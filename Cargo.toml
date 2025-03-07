@@ -8,7 +8,7 @@ description = "A modern, lightweight wget clone written in Rust for fast and rel
 readme = "README.md"
 homepage = "https://github.com/davimf721/KelpsGet"
 repository = "https://github.com/davimf721/KelpsGet"
-keywords = ["cli", "download files"]
+keywords = ["cli", "download","files"]
 categories = ["command-line-utilities"]
 
 [dependencies]
