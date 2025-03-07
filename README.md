@@ -2,11 +2,11 @@
 A modern, lightweight wget clone written in Rust for fast and reliable file downloads from the command line.
 
 ## Features
-✅ Simple CLI tool for downloading files via HTTP/HTTPS.
-✅ Progress bar with real-time speed and ETA tracking.
-✅ Custom output names (-O flag to rename downloaded files).
-✅ MIME type detection and proper file handling.
-✅ Cross-platform (Linux, macOS, Windows).
+✅ Simple CLI tool for downloading files via HTTP/HTTPS.<br>
+✅ Progress bar with real-time speed and ETA tracking.<br>
+✅ Custom output names (-O flag to rename downloaded files).<br>
+✅ MIME type detection and proper file handling.<br>
+✅ Cross-platform (Linux, macOS, Windows).<br>
 
 ## Installation
 ### Option 1: Install via Cargo
