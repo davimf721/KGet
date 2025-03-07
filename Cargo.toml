@@ -1,6 +1,6 @@
 [package]
 name = "kelpsget"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 authors = ["Davi Moreira Fuzatto <davimoreiraf@gmail.com>"]
 license = "MIT"
@@ -12,7 +12,7 @@ keywords = ["cli", "download","files"]
 categories = ["command-line-utilities"]
 
 [dependencies]
-clap = "2.26.0"
+clap = "4.5.31"
 console = "0.15.11"
 humansize = "2.1.3"
 indicatif = {version = "0.17.11", features = ["rayon"]}
