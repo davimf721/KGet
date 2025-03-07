@@ -3,6 +3,13 @@ name = "kelpsget"
 version = "0.1.0"
 edition = "2024"
 authors = ["Davi Moreira Fuzatto <davimoreiraf@gmail.com>"]
+license = "MIT"
+description = "A modern, lightweight wget clone written in Rust for fast and reliable file downloads from the command line."
+readme = "README.md"
+homepage = "https://github.com/davimf721/KelpsGet"
+repository = "https://github.com/davimf721/KelpsGet"
+keywords = ["cli", "download files"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 clap = "2.26.0"
