@@ -7,9 +7,10 @@ use crate::progress::create_progress_bar;
 use crate::utils::print;
 use humansize::{format_size, DECIMAL};
 use mime::Mime;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::Path;
-
+use crate::config::ProxyConfig;
+use crate::optimization::Optimizer;
 
 const MAX_RETRIES: u32 = 3;
 const RETRY_DELAY: Duration = Duration::from_secs(2);
@@ -42,10 +43,29 @@ pub fn download(
     target: &str,
     quiet_mode: bool,
     output_filename: Option<String>,
+    proxy: ProxyConfig,
+    optimizer: Optimizer,
 ) -> Result<(), Box<dyn Error>> {
-    let client = Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()?;
+    let mut client_builder = Client::builder()
+        .timeout(Duration::from_secs(30));
+
+    if proxy.enabled {
+        if let Some(proxy_url) = &proxy.url {
+            let proxy_client = match proxy.proxy_type {
+                crate::config::ProxyType::Http => reqwest::Proxy::http(proxy_url),
+                crate::config::ProxyType::Https => reqwest::Proxy::https(proxy_url),
+                crate::config::ProxyType::Socks5 => reqwest::Proxy::all(proxy_url),
+            };
+            if let Ok(mut proxy_client) = proxy_client {
+                if let (Some(username), Some(password)) = (&proxy.username, &proxy.password) {
+                    proxy_client = proxy_client.basic_auth(username, password);
+                }
+                client_builder = client_builder.proxy(proxy_client);
+            }
+        }
+    }
+
+    let client = client_builder.build()?;
 
     let mut retries = 0;
     let response = loop {
@@ -115,7 +135,14 @@ pub fn download(
     let progress = create_progress_bar(quiet_mode, fname.clone(), content_length, false);
     let mut source = response.take(content_length.unwrap_or(u64::MAX));
     let mut buffered_reader = progress.wrap_read(&mut source);
-    std::io::copy(&mut buffered_reader, &mut dest)?;
+    
+    let mut buffer = Vec::new();
+    buffered_reader.read_to_end(&mut buffer)?;
+    
+    // Descomprimir o conteúdo se necessário
+    let buffer = optimizer.decompress(&buffer)?;
+    
+    dest.write_all(&buffer)?;
     progress.finish_with_message("Download completed");
     Ok(())
 }

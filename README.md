@@ -1,4 +1,4 @@
-# KelpsGet v0.1.2
+# KelpsGet v0.1.3
 
 A modern, lightweight wget clone written in Rust for fast and reliable file downloads from the command line.
 
@@ -15,6 +15,9 @@ A modern, lightweight wget clone written in Rust for fast and reliable file down
 ✅ Support for different MIME types.<br>
 ✅ Detailed download information display.<br>
 ✅ Advanced download mode with parallel chunks and resume capability.<br>
+✅ Proxy support (HTTP, HTTPS, SOCKS5).<br>
+✅ Automatic compression and caching.<br>
+✅ Speed limiting and connection control.<br>
 
 ## Installation
 ### Option 1: Install via Cargo
@@ -48,6 +51,26 @@ Advanced Download Mode (Parallel and Resumable):
 ```bash
 kelpsget -a https://example.com/large_file.zip
 ```
+Using Proxy:
+```bash
+kelpsget -p http://proxy:8080 https://example.com/file.txt
+```
+With Proxy Authentication:
+```bash
+kelpsget -p http://proxy:8080 --proxy-user user --proxy-pass pass https://example.com/file.txt
+```
+Speed Limiting:
+```bash
+kelpsget -l 1048576 https://example.com/file.txt  # 1MB/s limit
+```
+Disable Compression:
+```bash
+kelpsget --no-compress https://example.com/file.txt
+```
+Disable Cache:
+```bash
+kelpsget --no-cache https://example.com/file.txt
+```
 
 ## How It Works
 1. Progress Bar: Shows download speed, ETA, and bytes transferred.
@@ -61,12 +84,48 @@ kelpsget -a https://example.com/large_file.zip
   - Downloads file in parallel chunks for better performance
   - Supports resuming interrupted downloads
   - Automatically handles large files efficiently
+7. Proxy Support:
+  - HTTP, HTTPS, and SOCKS5 proxy support
+  - Proxy authentication
+  - Configurable proxy settings
+8. Optimization Features:
+  - Automatic compression (gzip, brotli, lz4)
+  - File caching for faster repeated downloads
+  - Speed limiting
+  - Connection control
+
+## Configuration
+KelpsGet uses a configuration file located at:
+- Windows: `%APPDATA%\kelpsget\config.json`
+- Linux/macOS: `~/.config/kelpsget/config.json`
+
+Example configuration:
+```json
+{
+  "proxy": {
+    "enabled": false,
+    "url": null,
+    "username": null,
+    "password": null,
+    "proxy_type": "Http"
+  },
+  "optimization": {
+    "compression": true,
+    "compression_level": 6,
+    "cache_enabled": true,
+    "cache_dir": "~/.cache/kelpsget",
+    "speed_limit": null,
+    "max_connections": 4
+  }
+}
+```
 
 ## Security Features
 - Space Checking: Ensures enough disk space before downloading.
 - File Name Validation: Prevents path injection.
 - URL Handling: Safely handles URLs.
 - Automatic Retry: Retries download if network fails.
+- Secure Proxy Support: Encrypted proxy connections.
 
 ## Contributing
 Found a bug or want to add a feature? Open an issue or submit a PR!

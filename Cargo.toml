@@ -1,6 +1,6 @@
 [package]
 name = "kelpsget"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 authors = ["Davi Moreira Fuzatto <davimoreiraf@gmail.com>"]
 license = "MIT"
@@ -12,14 +12,22 @@ keywords = ["cli", "download","files"]
 categories = ["command-line-utilities"]
 
 [dependencies]
-clap = { version = "4.5.28", features = ["derive"] }
+clap = { version = "4.5.1", features = ["derive"] }
 console = "0.15.11"
 fs2 = "0.4.3"
 humansize = "2.1.3"
 indicatif = {version = "0.17.11", features = ["rayon"]}
 mime = "0.3.17"
-reqwest = { version = "0.12.12", features = ["blocking", "stream", "json"] }
+reqwest = { version = "0.12.12", features = ["blocking", "stream", "json", "socks"] }
 tokio = { version = "1.44.0", features = ["full"] }
 futures = "0.3.30"
 rayon = "1.8.0"
 tempfile = "3.10.0"
+flate2 = "1.0.28"
+brotli = "3.5.0"
+lz4 = "1.24.0"
+config = "0.15.6"
+serde = { version = "1.0.197", features = ["derive"] }
+serde_json = "1.0"
+dirs = "5.0.0"
+md5 = "0.7.0"
