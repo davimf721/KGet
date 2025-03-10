@@ -8,6 +8,35 @@ use crate::utils::print;
 use humansize::{format_size, DECIMAL};
 use mime::Mime;
 use std::io::Read;
+use std::path::Path;
+
+
+const MAX_RETRIES: u32 = 3;
+const RETRY_DELAY: Duration = Duration::from_secs(2);
+
+fn check_disk_space(path: &Path, required_size: u64) -> Result<(), Box<dyn Error>> {
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let available_space = fs2::available_space(dir)?;
+    
+    if available_space < required_size {
+        return Err(format!(
+            "Espaço insuficiente em disco. Necessário: {}, Disponível: {}", 
+            format_size(required_size, DECIMAL),
+            format_size(available_space, DECIMAL)
+        ).into());
+    }
+    Ok(())
+}
+
+fn validate_filename(filename: &str) -> Result<(), Box<dyn Error>> {
+    if filename.contains(std::path::MAIN_SEPARATOR) {
+        return Err("Nome do arquivo não pode conter separadores de diretório".into());
+    }
+    if filename.is_empty() {
+        return Err("Nome do arquivo não pode estar vazio".into());
+    }
+    Ok(())
+}
 
 pub fn download(
     target: &str,
@@ -18,10 +47,24 @@ pub fn download(
         .timeout(Duration::from_secs(30))
         .build()?;
 
-    let response = client.get(target).send()?;
+    let mut retries = 0;
+    let response = loop {
+        match client.get(target).send() {
+            Ok(resp) => break resp,
+            Err(e) => {
+                retries += 1;
+                if retries >= MAX_RETRIES {
+                    return Err(format!("Falha após {} tentativas: {}", MAX_RETRIES, e).into());
+                }
+                print(&format!("Tentativa {} falhou, tentando novamente em {} segundos...", 
+                    retries, RETRY_DELAY.as_secs()), quiet_mode);
+                std::thread::sleep(RETRY_DELAY);
+            }
+        }
+    };
     
     print(
-        format!("HTTP request sent... {}", response.status()),
+        &format!("HTTP request sent... {}", response.status()),
         quiet_mode
     );
 
@@ -41,25 +84,31 @@ pub fn download(
 
     if let Some(len) = content_length {
         print(
-            format!("Length: {} ({})", 
+            &format!("Length: {} ({})", 
                 len, 
                 format_size(len, DECIMAL)
             ), 
             quiet_mode
         );
     } else {
-        print("Length: unknown".to_string(), quiet_mode);
+        print("Length: unknown", quiet_mode);
     }
 
     if let Some(ct) = content_type {
-        print(format!("Type: {}", ct), quiet_mode);
+        print(&format!("Type: {}", ct), quiet_mode);
     }
 
     let fname = output_filename.unwrap_or_else(|| {
         target.split('/').last().unwrap_or("index.html").to_owned()
     });
 
-    print(format!("Saving to: {}", fname), quiet_mode);
+    validate_filename(&fname)?;
+
+    if let Some(len) = content_length {
+        check_disk_space(Path::new(&fname), len)?;
+    }
+
+    print(&format!("Saving to: {}", fname), quiet_mode);
 
     let mut dest = File::create(&fname)?;
     let content_length = response.content_length();
