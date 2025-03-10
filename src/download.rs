@@ -112,7 +112,7 @@ pub fn download(
 
     let mut dest = File::create(&fname)?;
     let content_length = response.content_length();
-    let progress = create_progress_bar(quiet_mode, fname.clone(), content_length);
+    let progress = create_progress_bar(quiet_mode, fname.clone(), content_length, false);
     let mut source = response.take(content_length.unwrap_or(u64::MAX));
     let mut buffered_reader = progress.wrap_read(&mut source);
     std::io::copy(&mut buffered_reader, &mut dest)?;

@@ -1,39 +1,45 @@
-extern crate indicatif;
-extern crate reqwest;
-extern crate mime;
-extern crate humansize;
-
-use clap::{Arg, ArgAction, Command};
+use clap::Parser;
+use std::error::Error;
 use crate::download::download;
+use crate::advanced_download::AdvancedDownloader;
+
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// URL do arquivo para download
+    url: String,
+
+    /// Nome do arquivo de saída
+    #[arg(short = 'O', long = "output")]
+    output: Option<String>,
+
+    /// Modo silencioso (sem barra de progresso)
+    #[arg(short = 'q', long = "quiet")]
+    quiet: bool,
+
+    /// Usar download avançado (paralelo e resumível)
+    #[arg(short = 'a', long = "advanced")]
+    advanced: bool,
+}
+
+mod download;
 mod progress;
 mod utils;
-mod download;
+mod advanced_download;
 
-fn main() {
-    let matches = Command::new("KelpsGet")
-        .version("0.1.0")
-        .author("Davi Moreira Fuzatto")
-        .about("wget clone written in Rust")
-        .arg(Arg::new("URL")
-            .required(true)
-            .action(ArgAction::Set)
-            .index(1)
-            .help("URL to download"))
-        .arg(
-            Arg::new("output")
-                .short('O')
-                .long("output")
-                .value_name("ARQUIVO")
-                .help("Define o nome do arquivo de destino")
-                .action(ArgAction::Set),
-        )
-        .get_matches();
+fn main() -> Result<(), Box<dyn Error>> {
+    let args = Args::parse();
 
-    let url = matches.get_one::<String>("URL").unwrap();
-    let output = matches.get_one::<String>("output").map(String::from);
-    
-    if let Err(e) = download(url, false, output) {
-        eprintln!("Error: {}", e);
-        std::process::exit(1);
+    if args.advanced {
+        let downloader = AdvancedDownloader::new(
+            args.url,
+            args.output.unwrap_or_else(|| "output".to_string()),
+            args.quiet
+        );
+        downloader.download()?;
+    } else {
+        download(&args.url, args.quiet, args.output)?;
     }
+
+    Ok(())
 }
