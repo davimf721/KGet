@@ -155,7 +155,7 @@ Estamos trabalhando nas seguintes melhorias:
 - [ ] Interface gráfica desktop (GUI)
 - [ ] Documentação em múltiplos idiomas
 
-Quer contribuir com alguma dessas funcionalidades? Confira nosso [guia de contribuição](CONTRIBUTING.md)!
+Quer contribuir com alguma dessas funcionalidades? Confira nosso [guia de contribuição](CONTRIBUTING.pt-BR.md)!
 
 ## Licença
 Este projeto está licenciado sob a Licença MIT - veja o arquivo [LICENSE](LICENSE) para detalhes. 
