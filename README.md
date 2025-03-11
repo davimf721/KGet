@@ -122,3 +122,40 @@ Example configuration:
   }
 }
 ```
+
+## Security Features
+- Space Checking: Ensures enough disk space before downloading.
+- File Name Validation: Prevents path injection.
+- URL Handling: Safely handles URLs.
+- Automatic Retry: Retries download if network fails.
+- Secure Proxy Support: Encrypted proxy connections.
+
+## Contributing
+Found a bug or want to add a feature? Open an issue or submit a PR!
+
+🚀 Download files effortlessly with Rust's speed and reliability. 🚀
+
+## 🔗 Important Links
+- 📚 [Documentation](https://davimf721.github.io/KelpsGet/)
+- 📦 [crates.io](https://crates.io/crates/kelpsget)
+- 💻 [GitHub](https://github.com/davimf721/KelpsGet)
+- 📝 [Changelog](CHANGELOG.md)
+
+## 🎯 Next Steps
+We are working on the following improvements:
+
+- [ ] FTP/SFTP download support
+- [ ] Web interface for download monitoring
+- [ ] Cloud storage service integration
+- [ ] Custom plugin system
+- [ ] Torrent download support
+- [ ] Adaptive compression improvements
+- [ ] Cache system optimization
+- [ ] Additional proxy protocol support
+- [ ] Desktop GUI interface
+- [ ] Multi-language documentation
+
+Want to contribute to any of these features? Check out our [contributing guide](CONTRIBUTING.md)!
+
+## License
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
