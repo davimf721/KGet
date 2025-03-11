@@ -2,6 +2,8 @@
 
 A modern, lightweight wget clone written in Rust for fast and reliable file downloads from the command line.
 
+[English](README.md) | [Português](translations/README.pt-BR.md) | [Español](translations/README.es.md)
+
 ## Features
 ✅ Simple CLI tool for downloading files via HTTP/HTTPS.<br>
 ✅ Progress bar with real-time speed and ETA tracking.<br>
@@ -25,7 +27,8 @@ A modern, lightweight wget clone written in Rust for fast and reliable file down
 cargo install kelpsget
 ```
 ### Option 2: Download Pre-built Binaries
-Download the latest binary for your OS from [Release](https://github.com/davimf721/KelpsGet/releases/tag/beta)
+Download the latest binary for your OS from [Release](https://github.com/davimf721/KelpsGet/releases)
+
 ### Linux/macOS:
 ```bash
 chmod +x kelpsget  # Make executable  
@@ -119,20 +122,3 @@ Example configuration:
   }
 }
 ```
-
-## Security Features
-- Space Checking: Ensures enough disk space before downloading.
-- File Name Validation: Prevents path injection.
-- URL Handling: Safely handles URLs.
-- Automatic Retry: Retries download if network fails.
-- Secure Proxy Support: Encrypted proxy connections.
-
-## Contributing
-Found a bug or want to add a feature? Open an issue or submit a PR!
-
-🚀 Download files effortlessly with Rust's speed and reliability. 🚀
-
-## License
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-

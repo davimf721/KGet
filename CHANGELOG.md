@@ -1,91 +1,84 @@
 # Changelog
 
-Todas as mudanças notáveis neste projeto serão documentadas neste arquivo.
+[English](CHANGELOG.md) | [Português](translations/CHANGELOG.pt-BR.md) | [Español](translations/CHANGELOG.es.md)
 
-O formato é baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.0.0/),
-e este projeto adere a [Semantic Versioning](https://semver.org/lang/pt-BR/).
+All notable changes to this project will be documented in this file.
 
-## [0.1.3] - 2024-03-11
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-### Adicionado
-- Sistema de compressão adaptativa
-  - Gzip (níveis 1-3)
-  - LZ4 (níveis 4-6)
-  - Brotli (níveis 7-9)
-- Sistema de cache inteligente
-- Suporte a proxy HTTP/HTTPS/SOCKS5
-- Autenticação de proxy
-- Download paralelo
-- Suporte a retomada de downloads
+## [0.1.3] - 2025-03-11
 
-### Modificado
-- Melhorada a barra de progresso
-- Otimizado o sistema de chunks
-- Melhorado o tratamento de erros
+### Added
+- Advanced download mode with parallel chunks and resume capability
+- Automatic compression support (gzip, brotli, lz4)
+- Intelligent caching system for faster repeated downloads
+- Speed limiting and connection control
+- Multi-language documentation support
 
-### Corrigido
-- Bugs na manipulação de arquivos grandes
-- Problemas com nomes de arquivo especiais
-- Erros de timeout em downloads lentos
+### Changed
+- Improved error handling and user feedback
+- Enhanced progress bar with more detailed information
+- Optimized memory usage for large file downloads
+- Updated proxy configuration system
 
-## [0.1.2] - 2024-03-10
+### Fixed
+- Fixed proxy authentication issues
+- Resolved cache directory creation problems
+- Fixed compression level handling
+- Corrected file path handling on Windows
 
-### Adicionado
-- Suporte a downloads resumíveis
-- Verificação de espaço em disco
-- Validação de nomes de arquivo
+### Security
+- Added secure proxy connection handling
+- Improved URL validation
+- Enhanced file name sanitization
+- Added space checking before downloads
 
-### Modificado
-- Melhorado o sistema de retry
-- Otimizada a performance geral
+## [0.1.2] - 2025-03-10
 
-### Corrigido
-- Bugs na barra de progresso
-- Problemas com URLs especiais
+### Added
+- Proxy support (HTTP, HTTPS, SOCKS5)
+- Proxy authentication
+- Custom output file naming
+- MIME type detection
 
-## [0.1.1] - 2024-03-09
+### Changed
+- Improved download speed calculation
+- Enhanced progress bar display
+- Better error messages
+- Updated documentation
 
-### Adicionado
-- Suporte a múltiplos URLs
-- Modo silencioso
-- Renomeação de arquivos de saída
+### Fixed
+- Fixed connection timeout issues
+- Resolved file permission problems
+- Corrected URL parsing
+- Fixed progress bar display on Windows
 
-### Modificado
-- Melhorada a interface CLI
-- Otimizada a performance
+## [0.1.1] - 2025-03-09
 
-### Corrigido
-- Bugs de inicialização
-- Problemas com caracteres especiais
+### Added
+- Silent mode for script integration
+- Basic progress bar
+- File size display
+- Download speed tracking
 
-## [0.1.0] - 2024-03-08
+### Changed
+- Improved error handling
+- Enhanced command-line interface
+- Better file handling
+- Updated installation instructions
 
-### Adicionado
-- Download básico de arquivos
-- Barra de progresso
-- Detecção de tipo MIME
-- Verificação de espaço em disco
-- Retry automático em falhas
-- Suporte a diferentes tipos MIME
-- Informações detalhadas de download
-- Modo avançado com chunks paralelos
-- Suporte a proxy
-- Compressão automática
-- Sistema de cache
-- Controle de velocidade
-- Controle de conexão
+### Fixed
+- Fixed path handling issues
+- Resolved permission problems
+- Corrected progress display
+- Fixed file overwrite behavior
 
-### Modificado
-- Interface CLI otimizada
-- Sistema de progresso melhorado
-- Tratamento de erros aprimorado
+## [0.1.0] - 2025-03-08
 
-### Corrigido
-- Bugs de inicialização
-- Problemas com URLs especiais
-- Erros de timeout
-- Bugs na barra de progresso
-- Problemas com caracteres especiais
-- Bugs na manipulação de arquivos grandes
-- Erros de timeout em downloads lentos
-- Problemas com nomes de arquivo especiais
+### Added
+- Initial release
+- Basic file download functionality
+- Command-line interface
+- Basic error handling
+- Cross-platform support

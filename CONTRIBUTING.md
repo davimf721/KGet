@@ -1,152 +1,117 @@
-# Guia de Contribuição para o KelpsGet
+# Contributing to KelpsGet
 
-Obrigado por considerar contribuir com o KelpsGet! Este documento fornece diretrizes e informações importantes para contribuidores.
+[English](CONTRIBUTING.md) | [Português](translations/CONTRIBUTING.pt-BR.md) | [Español](translations/CONTRIBUTING.es.md)
 
-## Índice
+First off, thank you for considering contributing to KelpsGet! It's people like you that make KelpsGet such a great tool.
 
-1. [Código de Conduta](#código-de-conduta)
-2. [Como Posso Contribuir?](#como-posso-contribuir)
-3. [Processo de Desenvolvimento](#processo-de-desenvolvimento)
-4. [Estilo de Código](#estilo-de-código)
-5. [Commits e Pull Requests](#commits-e-pull-requests)
-6. [Reportando Bugs](#reportando-bugs)
+## Code of Conduct
 
-## Código de Conduta
+This project and everyone participating in it is governed by our [Code of Conduct](CODE_OF_CONDUCT.md). By participating, you are expected to uphold this code. Please report unacceptable behavior to [davimf721@gmail.com](mailto:davimf721@gmail.com).
 
-Este projeto segue um Código de Conduta. Ao participar, você deve seguir este código. Por favor, leia [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+## How Can I Contribute?
 
-## Como Posso Contribuir?
+### Reporting Bugs
 
-### 🐛 Reportando Bugs
-- Use o template de issue para bugs
-- Inclua passos detalhados para reproduzir
-- Forneça informações do ambiente (OS, versão do Rust, etc.)
-- Inclua logs de erro relevantes
+Before creating bug reports, please check the existing issues as you might find out that you don't need to create one. When you are creating a bug report, please include as many details as possible:
 
-### 💡 Sugerindo Melhorias
-- Use o template de issue para features
-- Explique o caso de uso
-- Descreva o comportamento esperado
-- Forneça exemplos de uso
+* Use a clear and descriptive title
+* Describe the exact steps which reproduce the problem
+* Provide specific examples to demonstrate the steps
+* Describe the behavior you observed after following the steps
+* Explain which behavior you expected to see instead and why
+* Include screenshots if possible
+* Include the version of KelpsGet you're using
+* Include your operating system and version
 
-### 📝 Documentação
-- Corrija erros de digitação
-- Adicione exemplos de uso
-- Melhore explicações
-- Traduza documentação
+### Suggesting Enhancements
 
-### 👩‍💻 Código
-- Implemente novas features
-- Corrija bugs
-- Melhore performance
-- Adicione testes
+If you have a suggestion for the project, we'd love to hear about it! Just follow these steps:
 
-## Processo de Desenvolvimento
+* Use a clear and descriptive title
+* Provide a step-by-step description of the suggested enhancement
+* Provide specific examples to demonstrate the steps
+* Describe the current behavior and explain which behavior you expected to see instead
+* Explain why this enhancement would be useful to most KelpsGet users
 
-1. **Fork o repositório**
-2. **Clone seu fork**
-```bash
-git clone https://github.com/seu-usuario/KelpsGet.git
-cd KelpsGet
-```
+### Pull Requests
 
-3. **Crie uma branch**
-```bash
-git checkout -b feature/sua-feature
-# ou
-git checkout -b fix/seu-fix
-```
+* Fill in the required template
+* Do not include issue numbers in the PR title
+* Include screenshots and animated GIFs in your pull request whenever possible
+* Follow the Rust styleguide
+* Include thoughtfully-worded, well-structured tests
+* Document new code
+* End all files with a newline
 
-4. **Desenvolva**
-- Escreva testes
-- Siga o estilo de código
-- Mantenha commits atômicos
+## Development Process
 
-5. **Teste**
-```bash
-cargo test
-cargo clippy
-cargo fmt --all -- --check
-```
+1. Fork the repository
+2. Clone your fork: `git clone https://github.com/your-username/KelpsGet.git`
+3. Create your feature branch: `git checkout -b feature/my-new-feature`
+4. Make your changes
+5. Run the tests: `cargo test`
+6. Format your code: `cargo fmt`
+7. Check with clippy: `cargo clippy`
+8. Commit your changes: `git commit -am 'Add some feature'`
+9. Push to the branch: `git push origin feature/my-new-feature`
+10. Submit a pull request
 
-6. **Push e Pull Request**
-```bash
-git push origin feature/sua-feature
-```
+## Styleguides
 
-## Estilo de Código
+### Git Commit Messages
 
-### Rust
-- Siga o [Rust Style Guide](https://rust-lang.github.io/api-guidelines/)
-- Use `rustfmt` e `clippy`
-- Documente funções públicas
-- Escreva testes unitários
+* Use the present tense ("Add feature" not "Added feature")
+* Use the imperative mood ("Move cursor to..." not "Moves cursor to...")
+* Limit the first line to 72 characters or less
+* Reference issues and pull requests liberally after the first line
+* Consider starting the commit message with an applicable emoji:
+    * 🎨 `:art:` when improving the format/structure of the code
+    * 🐎 `:racehorse:` when improving performance
+    * 🚱 `:non-potable_water:` when plugging memory leaks
+    * 📝 `:memo:` when writing docs
+    * 🐛 `:bug:` when fixing a bug
+    * 🔥 `:fire:` when removing code or files
+    * 💚 `:green_heart:` when fixing the CI build
+    * ✅ `:white_check_mark:` when adding tests
+    * 🔒 `:lock:` when dealing with security
+    * ⬆️ `:arrow_up:` when upgrading dependencies
+    * ⬇️ `:arrow_down:` when downgrading dependencies
 
-### Commits
-- Use commits atômicos
-- Siga o padrão Conventional Commits:
-  - `feat:` nova funcionalidade
-  - `fix:` correção de bug
-  - `docs:` documentação
-  - `test:` testes
-  - `refactor:` refatoração
-  - `style:` formatação
-  - `chore:` manutenção
+### Rust Styleguide
 
-### Exemplo de Commit
-```
-feat: adiciona suporte a proxy SOCKS5
+* Use `cargo fmt` to format your code
+* Follow the [Rust API Guidelines](https://rust-lang.github.io/api-guidelines/)
+* Use meaningful variable names
+* Write documentation for public APIs
+* Add tests for new functionality
+* Keep functions small and focused
+* Use error handling instead of panics
+* Follow the standard library's naming conventions
 
-- Implementa cliente SOCKS5
-- Adiciona testes de integração
-- Atualiza documentação
-```
+### Documentation Styleguide
 
-## Commits e Pull Requests
+* Use [Markdown](https://daringfireball.net/projects/markdown/) for documentation
+* Reference functions, classes, and modules in backticks
+* Use section links when referring to other parts of the documentation
+* Include code examples when possible
+* Keep line length to a maximum of 80 characters
+* Use descriptive link texts instead of "click here"
 
-### Pull Request
-- Use o template fornecido
-- Referencie issues relacionadas
-- Descreva as mudanças
-- Inclua testes
-- Atualize documentação
+## Additional Notes
 
-### Revisão
-- Responda a feedback prontamente
-- Mantenha discussões construtivas
-- Faça squash de commits quando necessário
+### Issue and Pull Request Labels
 
-## Reportando Bugs
+* `bug` - Something isn't working
+* `enhancement` - New feature or request
+* `documentation` - Improvements or additions to documentation
+* `good first issue` - Good for newcomers
+* `help wanted` - Extra attention is needed
+* `question` - Further information is requested
+* `invalid` - Something's wrong
+* `wontfix` - This will not be worked on
 
-### Template de Bug
-```markdown
-**Descrição**
-[Descrição clara e concisa do bug]
+## Recognition
 
-**Para Reproduzir**
-1. Faça '...'
-2. Execute '...'
-3. Veja erro
+Contributors who submit a valid pull request will be added to our [CONTRIBUTORS.md](CONTRIBUTORS.md) file.
 
-**Comportamento Esperado**
-[O que deveria acontecer]
-
-**Logs**
-```rust
-[Coloque logs aqui]
-```
-
-**Ambiente**
-- OS: [ex: Ubuntu 20.04]
-- Rust: [ex: 1.70.0]
-- KelpsGet: [ex: 0.1.3]
-
-
-## Dúvidas?
-
-- Abra uma issue
-- Envie um email para [davimoreiraf@gmail.com]
-
----
-
-Agradecemos suas contribuições! 🚀
+Thank you for contributing to KelpsGet! 🚀
