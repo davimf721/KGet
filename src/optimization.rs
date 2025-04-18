@@ -7,14 +7,20 @@ use lz4::block::{compress, CompressionMode};
 use crate::config::OptimizationConfig;
 
 /// Estrutura responsável por otimizar operações de download através de compressão e cache
+#[derive(Clone)]
 pub struct Optimizer {
     config: OptimizationConfig,
+    pub speed_limit: Option<u64>,
 }
 
 impl Optimizer {
     /// Cria uma nova instância do otimizador com a configuração especificada
     pub fn new(config: OptimizationConfig) -> Self {
-        Self { config }
+        let speed_limit = config.speed_limit;
+        Self { 
+            config,
+            speed_limit,
+        }
     }
 
     /// Comprime os dados usando diferentes algoritmos baseado no nível de compressão configurado
@@ -27,7 +33,6 @@ impl Optimizer {
         if !self.config.compression {
             return Ok(data.to_vec());
         }
-
         let compressed = match self.config.compression_level {
             1..=3 => {
                 let mut encoder = GzEncoder::new(Vec::new(), flate2::Compression::fast());
@@ -49,7 +54,6 @@ impl Optimizer {
             }
             _ => return Ok(data.to_vec()),
         };
-
         Ok(compressed)
     }
 
@@ -60,7 +64,6 @@ impl Optimizer {
         if !self.config.compression {
             return Ok(data.to_vec());
         }
-
         let mut decompressed = Vec::new();
         if data.starts_with(&[0x1f, 0x8b]) {
             let mut decoder = GzDecoder::new(Vec::new());
@@ -73,7 +76,6 @@ impl Optimizer {
             let mut decoder = lz4::Decoder::new(data)?;
             decoder.read_to_end(&mut decompressed)?;
         }
-
         Ok(decompressed)
     }
 
@@ -85,7 +87,6 @@ impl Optimizer {
         if !self.config.cache_enabled {
             return Ok(None);
         }
-
         let cache_path = self.get_cache_path(url)?;
         if cache_path.exists() {
             let mut file = File::open(cache_path)?;
@@ -93,7 +94,6 @@ impl Optimizer {
             file.read_to_end(&mut contents)?;
             return Ok(Some(contents));
         }
-
         Ok(None)
     }
 
@@ -105,12 +105,10 @@ impl Optimizer {
         if !self.config.cache_enabled {
             return Ok(());
         }
-
         let cache_path = self.get_cache_path(url)?;
         if let Some(parent) = cache_path.parent() {
             fs::create_dir_all(parent)?;
         }
-
         let mut file = File::create(cache_path)?;
         file.write_all(data)?;
         Ok(())
@@ -118,11 +116,11 @@ impl Optimizer {
 
     /// Gera o caminho do arquivo no cache baseado na URL
     /// 
-    /// Usa MD5 para gerar um nome de arquivo único
+    /// Usa um hash simples para gerar um nome de arquivo único
     #[allow(dead_code)]
     fn get_cache_path(&self, url: &str) -> Result<PathBuf, Box<dyn Error>> {
         let mut cache_dir = PathBuf::from(
-            self.config.cache_dir.as_deref().unwrap_or("~/.cache/kelpsget")
+            self.config.cache_dir.clone().unwrap_or("~/.cache/kelpsget".to_string())
         );
         
         if cache_dir.starts_with("~") {
@@ -130,9 +128,14 @@ impl Optimizer {
                 cache_dir = home.join(cache_dir.strip_prefix("~").unwrap());
             }
         }
-
-        let hash = md5::compute(url.as_bytes());
+        
+        // Implementação simples de hash em vez de usar md5
+        let mut hash = 0u64;
+        for byte in url.bytes() {
+            hash = hash.wrapping_mul(31).wrapping_add(byte as u64);
+        }
+        
         cache_dir.push(format!("{:x}", hash));
         Ok(cache_dir)
     }
-} 
+}
