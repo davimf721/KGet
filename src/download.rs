@@ -4,18 +4,18 @@ use std::fs::File;
 use std::time::Duration;
 use std::error::Error;
 use crate::progress::create_progress_bar;
-use crate::utils::print;
+use crate::utils::{self, print};
 use humansize::{format_size, DECIMAL};
 use mime::Mime;
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use crate::config::ProxyConfig;
 use crate::optimization::Optimizer;
 
 const MAX_RETRIES: u32 = 3;
 const RETRY_DELAY: Duration = Duration::from_secs(2);
 
-fn check_disk_space(path: &Path, required_size: u64) -> Result<(), Box<dyn Error>> {
+fn check_disk_space(path: &Path, required_size: u64) -> Result<(), Box<dyn Error + Send + Sync>> {
     let dir = path.parent().unwrap_or(Path::new("."));
     let available_space = fs2::available_space(dir)?;
     
@@ -29,7 +29,7 @@ fn check_disk_space(path: &Path, required_size: u64) -> Result<(), Box<dyn Error
     Ok(())
 }
 
-fn validate_filename(filename: &str) -> Result<(), Box<dyn Error>> {
+fn validate_filename(filename: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
     if filename.contains(std::path::MAIN_SEPARATOR) {
         return Err("Nome do arquivo não pode conter separadores de diretório".into());
     }
@@ -42,10 +42,10 @@ fn validate_filename(filename: &str) -> Result<(), Box<dyn Error>> {
 pub fn download(
     target: &str,
     quiet_mode: bool,
-    output_filename: Option<String>,
+    output_filename_option: Option<String>,
     proxy: ProxyConfig,
     optimizer: Optimizer,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut client_builder = Client::builder()
         .timeout(Duration::from_secs(30));
 
@@ -118,29 +118,78 @@ pub fn download(
         print(&format!("Type: {}", ct), quiet_mode);
     }
 
-    let fname = output_filename.unwrap_or_else(|| {
-        target.split('/').last().unwrap_or("index.html").to_owned()
-    });
+    let mut tentative_path: PathBuf;
 
-    validate_filename(&fname)?;
+    if let Some(output_arg_str) = output_filename_option {
+        let user_path = PathBuf::from(output_arg_str.clone());
 
-    if let Some(len) = content_length {
-        check_disk_space(Path::new(&fname), len)?;
+        let is_target_dir = user_path.is_dir() || 
+                              output_arg_str.ends_with(std::path::MAIN_SEPARATOR);
+
+        if is_target_dir {
+            let base_filename = utils::get_filename_from_url_or_default(target, "downloaded_file");
+            validate_filename(&base_filename)?;
+            tentative_path = user_path.join(base_filename);
+        } else {
+            if let Some(file_name_osstr) = user_path.file_name() {
+                if let Some(file_name_str) = file_name_osstr.to_str() {
+                    if file_name_str.is_empty() {
+                         return Err(format!("Caminho de saída inválido, não especifica um nome de arquivo: {}", user_path.display()).into());
+                    }
+                    validate_filename(file_name_str)?;
+                } else {
+                    return Err("Nome do arquivo de saída contém caracteres inválidos (não UTF-8)".into());
+                }
+            } else {
+                return Err(format!("Caminho de saída inválido, não especifica um nome de arquivo: {}", user_path.display()).into());
+            }
+            tentative_path = user_path;
+        }
+    } else {
+        let base_filename = utils::get_filename_from_url_or_default(target, "downloaded_file");
+        validate_filename(&base_filename)?;
+        tentative_path = PathBuf::from(base_filename);
     }
 
-    print(&format!("Saving to: {}", fname), quiet_mode);
+    let final_path: PathBuf = if tentative_path.is_absolute() {
+        tentative_path
+    } else {
+        let current_dir = std::env::current_dir()
+            .map_err(|e| format!("Falha ao obter o diretório atual: {}", e))?;
+        current_dir.join(tentative_path)
+    };
 
-    let mut dest = File::create(&fname)?;
-    let content_length = response.content_length();
-    let progress = create_progress_bar(quiet_mode, fname.clone(), content_length, false);
-    let mut source = response.take(content_length.unwrap_or(u64::MAX));
+    if let Some(parent_dir) = final_path.parent() {
+        if !parent_dir.as_os_str().is_empty() && parent_dir != Path::new("/") && !parent_dir.exists() {
+            std::fs::create_dir_all(parent_dir)
+                .map_err(|e| format!("Falha ao criar diretório {}: {}", parent_dir.display(), e))?;
+            if !quiet_mode {
+                print(&format!("Created directory: {}", parent_dir.display()), quiet_mode);
+            }
+        }
+    }
+    
+    if !quiet_mode {
+        print(&format!("Saving to: {}", final_path.display()), quiet_mode);
+    }
+
+    if let Some(len) = content_length {
+        check_disk_space(&final_path, len)?;
+    }
+
+    let mut dest = File::create(&final_path).map_err(|e| {
+        format!("Failed to create file {}: {}", final_path.display(), e)
+    })?;
+    
+    let response_content_length = response.content_length();
+    let progress_bar_filename = final_path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    let progress = create_progress_bar(quiet_mode, progress_bar_filename, response_content_length, false);
+    
+    let mut source = response.take(response_content_length.unwrap_or(u64::MAX));
     let mut buffered_reader = progress.wrap_read(&mut source);
     
     let mut buffer = Vec::new();
     buffered_reader.read_to_end(&mut buffer)?;
-    
-    // Descomprimir o conteúdo se necessário
-    let buffer = optimizer.decompress(&buffer)?;
     
     dest.write_all(&buffer)?;
     progress.finish_with_message("Download completed");

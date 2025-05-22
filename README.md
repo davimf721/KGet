@@ -1,12 +1,14 @@
-# KelpsGet v0.1.3
+# KelpsGet v0.1.4 (New Release)
 
-A modern, lightweight wget clone written in Rust for fast and reliable file downloads from the command line.
+A modern, lightweight, and versatile downloader written in Rust for fast and reliable file downloads via command line (CLI) and graphical user interface (GUI).
 
 [English](README.md) | [Português](translations/README.pt-BR.md) | [Español](translations/README.es.md)
 
 ## Features
-✅ Simple CLI tool for downloading files via HTTP/HTTPS.<br>
-✅ Progress bar with real-time speed and ETA tracking.<br>
+✅ Simple CLI and GUI tool for downloading files via HTTP/HTTPS.<br>
+✅ Support for downloads via FTP and SFTP.<br>
+✅ Support for Torrent downloads (magnet links) via Transmission integration.<br>
+✅ Progress bar with real-time speed and ETA tracking (CLI).<br>
 ✅ Custom output names (-O flag to rename downloaded files).<br>
 ✅ MIME type detection and proper file handling.<br>
 ✅ Cross-platform (Linux, macOS, Windows).<br>
@@ -14,95 +16,197 @@ A modern, lightweight wget clone written in Rust for fast and reliable file down
 ✅ Automatic space checking before download.<br>
 ✅ Automatic retry on connection failure.<br>
 ✅ File name validation.<br>
-✅ Support for different MIME types.<br>
 ✅ Detailed download information display.<br>
-✅ Advanced download mode with parallel chunks and resume capability.<br>
+✅ Advanced download mode with parallel chunks and resume capability (HTTP/HTTPS).<br>
 ✅ Proxy support (HTTP, HTTPS, SOCKS5).<br>
-✅ Automatic compression and caching.<br>
+✅ Automatic compression and caching (for KelpsGet-specific optimizations).<br>
 ✅ Speed limiting and connection control.<br>
 
 ## Installation
-### Option 1: Install via Cargo
+
+### Option 1: Compile from source (Recommended to get all features)
+
+You will need Rust installed. If you don't have it, install it from [rustup.rs](https://rustup.rs/).
+
+To compile with all features, including the GUI, you might need some development dependencies.
+For Debian/Ubuntu based systems:
+```bash
+sudo apt update
+sudo apt install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev pkg-config
+```
+For Fedora:
+```bash
+sudo dnf install -y libxcb-devel libxkbcommon-devel openssl-devel pkg-config
+```
+
+Clone the repository and compile the project:
+```bash
+git clone https://github.com/davimf721/KelpsGet.git # Replace with the correct URL of your repository
+cd KelpsGet
+cargo build --release
+```
+The executable will be in `target/release/kelpsget`. You can copy it to a directory in your `PATH`:
+```bash
+sudo cp target/release/kelpsget /usr/local/bin/
+```
+
+### Option 2: Install via Cargo (May not include all GUI dependencies by default)
 ```bash
 cargo install kelpsget
 ```
-### Option 2: Download Pre-built Binaries
-Download the latest binary for your OS from [Release](https://github.com/davimf721/KelpsGet/releases)
+If you encounter issues with the GUI when installing via `cargo install`, compiling from source is more reliable.
 
-### Linux/macOS:
+### Option 3: Download Pre-compiled Binaries
+Check the [Releases](https://github.com/davimf721/KelpsGet/releases) section for the latest binaries for your OS.
+
+#### Linux/macOS:
 ```bash
-chmod +x kelpsget  # Make executable  
+chmod +x kelpsget  # Make executable
 ./kelpsget [URL]    # Run directly
 ```
-### Windows:
-Run the .exe file directly.
+#### Windows:
+Run the `.exe` file directly.
 
-## Usage Examples
-Basic Download:
+### Additional Requirement for Torrent Downloads: Transmission Daemon
+
+KelpsGet uses the `transmission-daemon` to manage torrent downloads.
+
+**1. Install Transmission Daemon:**
+*   **Debian/Ubuntu:**
+    ```bash
+    sudo apt update
+    sudo apt install transmission-daemon
+    ```
+*   **Fedora:**
+    ```bash
+    sudo dnf install transmission-daemon
+    ```
+*   **Arch Linux:**
+    ```bash
+    sudo pacman -S transmission-cli
+    ```
+
+**2. Stop the Daemon for Configuration:**
 ```bash
-kelpsget https://example.com/file.txt
-```
-Rename the Output File:
-```bash
-kelpsget -O new_name.txt https://example.com/file.txt
-```
-Silent Mode:
-```bash
-kelpsget -q https://example.com/file.txt
-```
-Advanced Download Mode (Parallel and Resumable):
-```bash
-kelpsget -a https://example.com/large_file.zip
-```
-Using Proxy:
-```bash
-kelpsget -p http://proxy:8080 https://example.com/file.txt
-```
-With Proxy Authentication:
-```bash
-kelpsget -p http://proxy:8080 --proxy-user user --proxy-pass pass https://example.com/file.txt
-```
-Speed Limiting:
-```bash
-kelpsget -l 1048576 https://example.com/file.txt  # 1MB/s limit
-```
-Disable Compression:
-```bash
-kelpsget --no-compress https://example.com/file.txt
-```
-Disable Cache:
-```bash
-kelpsget --no-cache https://example.com/file.txt
+sudo systemctl stop transmission-daemon
 ```
 
-## How It Works
-1. Progress Bar: Shows download speed, ETA, and bytes transferred.
-2. Smart File Naming:
-  - Uses the filename from the URL (e.g., file.txt from https://example.com/file.txt).
-  - Defaults to index.html if the URL ends with /.
-3. Error Handling: Exits with code 1 on HTTP errors (e.g., 404).
-4. Space Checking: Checks available disk space before downloading.
-5. Automatic Retry: Retries download if connection fails.
-6. Advanced Download Mode:
-  - Downloads file in parallel chunks for better performance
-  - Supports resuming interrupted downloads
-  - Automatically handles large files efficiently
-7. Proxy Support:
-  - HTTP, HTTPS, and SOCKS5 proxy support
-  - Proxy authentication
-  - Configurable proxy settings
-8. Optimization Features:
-  - Automatic compression (gzip, brotli, lz4)
-  - File caching for faster repeated downloads
-  - Speed limiting
-  - Connection control
+**3. Configure Transmission:**
+Edit the `settings.json` file. Common locations:
+*   `/var/lib/transmission-daemon/info/settings.json` (Debian/Ubuntu, if installed as a service)
+*   `/var/lib/transmission/.config/transmission-daemon/settings.json` (Another common path, check your system)
+*   `~/.config/transmission-daemon/settings.json` (if run as a user)
 
-## Configuration
-KelpsGet uses a configuration file located at:
+Use `sudo nano /var/lib/transmission-daemon/info/settings.json` (or the correct path for your system).
+
+Find and modify these lines:
+```json
+{
+    // ...
+    "rpc-authentication-required": true,
+    "rpc-enabled": true,
+    "rpc-password": "transmission", // This is the value KelpsGet uses by default to connect to Transmission (recommended)
+    "rpc-port": 9091,
+    "rpc-username": "transmission", // Username KelpsGet uses to connect to Transmission
+    "rpc-whitelist-enabled": false, // For local access. For remote access, configure IPs.
+    "download-dir": "/var/lib/transmission-daemon/downloads", // Transmission's default download directory
+    // ...
+}
+```
+**Important:** After saving and starting `transmission-daemon`, it will replace the plain text `rpc-password` with a hashed version.
+
+**4. (Optional) Adjust Daemon User Permissions:**
+If `transmission-daemon` runs as a specific user (e.g., `debian-transmission` or `transmission`), ensure this user has write permissions in the download directories you intend to use with KelpsGet or Transmission itself. You can add your user to the Transmission daemon's group:
+```bash
+sudo usermod -a -G debian-transmission your_linux_user # For Debian/Ubuntu
+# Check the Transmission group/user name on your system
+```
+
+**5. Start the Transmission Daemon:**
+```bash
+sudo systemctl start transmission-daemon
+# Check status:
+sudo systemctl status transmission-daemon
+```
+Access `http://localhost:9091` in your browser. You should see the Transmission web interface and be prompted to log in with the `rpc-username` and `rpc-password` you configured.
+
+## Usage
+
+### Command Line (CLI)
+```bash
+kelpsget [OPTIONS] <URL>
+```
+**Examples:**
+*   **HTTP/HTTPS Download:**
+    ```bash
+    kelpsget https://example.com/file.txt
+    ```
+*   **Rename Output File:**
+    ```bash
+    kelpsget -O new_name.txt https://example.com/file.txt
+    kelpsget -O ~/MyDownloads/ https://example.com/video.mp4 # Saves as ~/MyDownloads/video.mp4
+    ```
+*   **FTP Download:**
+    ```bash
+    kelpsget ftp://user:password@ftp.example.com/archive.zip
+    kelpsget --ftp ftp://ftp.example.com/pub/file.txt
+    ```
+*   **SFTP Download:**
+    (Requires SSH key setup or password if the server allows it)
+    ```bash
+    kelpsget sftp://user@sftp.example.com/path/file.dat
+    kelpsget --sftp sftp://user@sftp.example.com/path/file.dat -O local.dat
+    ```
+*   **Torrent Download (Magnet Link):**
+    (Requires `transmission-daemon` configured and running)
+    ```bash
+    kelpsget "magnet:?xt=urn:btih:YOUR_HASH_HERE&dn=TorrentName"
+    kelpsget --torrent "magnet:?xt=urn:btih:YOUR_HASH_HERE" -O ~/MyTorrents/
+    ```
+    KelpsGet will add the torrent to Transmission and attempt to open the web interface (`http://localhost:9091`) for management.
+
+*   **Silent Mode:**
+    ```bash
+    kelpsget -q https://example.com/file.txt
+    ```
+*   **Advanced Download Mode (HTTP/HTTPS):**
+    ```bash
+    kelpsget -a https://example.com/large_file.zip
+    ```
+*   **Use Proxy:**
+    ```bash
+    kelpsget -p http://proxy:8080 https://example.com/file.txt
+    ```
+*   **Proxy with Authentication:**
+    ```bash
+    kelpsget -p http://proxy:8080 --proxy-user user --proxy-pass pass https://example.com/file.txt
+    ```
+*   **Speed Limit:**
+    ```bash
+    kelpsget -l 1048576 https://example.com/file.txt  # Limit to 1MB/s
+    ```
+*   **Disable Compression (KelpsGet-specific, not HTTP):**
+    ```bash
+    kelpsget --no-compress https://example.com/file.txt
+    ```
+*   **Disable Cache (KelpsGet-specific):**
+    ```bash
+    kelpsget --no-cache https://example.com/file.txt
+    ```
+
+### Graphical User Interface (GUI)
+To start the GUI:
+```bash
+kelpsget --gui
+```
+The GUI allows you to enter the URL, output path, and start downloads. Status and progress are displayed in the interface.
+
+## KelpsGet Configuration
+KelpsGet uses a configuration file at:
 - Windows: `%APPDATA%\kelpsget\config.json`
 - Linux/macOS: `~/.config/kelpsget/config.json`
 
-Example configuration:
+**Example `config.json` for KelpsGet:**
 ```json
 {
   "proxy": {
@@ -113,49 +217,80 @@ Example configuration:
     "proxy_type": "Http"
   },
   "optimization": {
-    "compression": true,
+    "compression": true, // Compression for KelpsGet cache
     "compression_level": 6,
     "cache_enabled": true,
-    "cache_dir": "~/.cache/kelpsget",
+    "cache_dir": "~/.cache/kelpsget", // Expand ~ manually or use absolute path
     "speed_limit": null,
     "max_connections": 4
+  },
+  "torrent": {
+    "enabled": true,
+    "transmission_url": "http://localhost:9091/transmission/rpc",
+    "username": "transmission", // User configured in Transmission's settings.json
+    "password": "transmission", // Password configured in Transmission's settings.json
+    "max_peers": 50,
+    "max_seeds": 50,
+    "port": null,
+    "dht_enabled": true,
+    "default_download_dir": null // Default directory for torrent downloads via KelpsGet
+  },
+  "ftp": {
+    "default_port": 21,
+    "passive_mode": true
+  },
+  "sftp": {
+    "default_port": 22,
+    "key_path": null // Path to private SSH key, e.g., "~/.ssh/id_rsa"
   }
 }
 ```
+**Note on `cache_dir` and `key_path`:** If using `~`, ensure your program correctly expands the tilde to the user's home directory, or use absolute paths.
+
+## How It Works (Summary)
+1.  **Progress Bar (CLI):** Shows speed, ETA, and transferred bytes.
+2.  **Smart File Naming:**
+    *   Uses the filename from the URL.
+    *   Defaults to `index.html` if the URL ends with `/`.
+3.  **Error Handling:** Exits with code 1 on HTTP errors (e.g., 404).
+4.  **Space Check:** Verifies available disk space.
+5.  **Automatic Retry:** Retries download on network failure.
+6.  **Advanced Download Mode (HTTP/HTTPS):** Downloads in parallel chunks, supports resume.
+7.  **Proxy Support:** HTTP, HTTPS, SOCKS5 with authentication.
+8.  **Optimization Features:** Compression (for cache), file caching, speed limiting.
+9.  **Torrent Downloads:** Adds magnet links to `transmission-daemon` for download.
+10. **FTP/SFTP Downloads:** Connects to FTP/SFTP servers to transfer files.
 
 ## Security Features
-- Space Checking: Ensures enough disk space before downloading.
-- File Name Validation: Prevents path injection.
-- URL Handling: Safely handles URLs.
-- Automatic Retry: Retries download if network fails.
-- Secure Proxy Support: Encrypted proxy connections.
+- Space Check: Ensures sufficient disk space.
+- Filename Validation: Prevents path injection.
+- Secure URL Handling.
+- Secure Proxy Support.
 
 ## Contributing
-Found a bug or want to add a feature? Open an issue or submit a PR!
+Found a bug or want to add a feature? Open an issue or send a PR!
 
-🚀 Download files effortlessly with Rust's speed and reliability. 🚀
+🚀 Download files effortlessly with the speed and reliability of Rust. 🚀
 
 ## 🔗 Important Links
-- 📚 [Documentation](https://davimf721.github.io/KelpsGet/)
+- 📚 [Documentation](https://davimf721.github.io/KelpsGet/) (Update if necessary)
 - 📦 [crates.io](https://crates.io/crates/kelpsget)
 - 💻 [GitHub](https://github.com/davimf721/KelpsGet)
 - 📝 [Changelog](CHANGELOG.md)
 
-## 🎯 Next Steps
-We are working on the following improvements:
-
-- [ ] FTP/SFTP download support
+## 🎯 Next Steps (Example - adjust to your project)
+- [X] FTP/SFTP download support
+- [X] Torrent download support
+- [X] Desktop GUI Interface
 - [ ] Web interface for download monitoring
-- [ ] Cloud storage service integration
+- [ ] Integration with cloud storage services
 - [ ] Custom plugin system
-- [ ] Torrent download support
-- [ ] Adaptive compression improvements
-- [ ] Cache system optimization
-- [ ] Additional proxy protocol support
-- [ ] Desktop GUI interface
-- [ ] Multi-language documentation
+- [ ] Improvements in adaptive compression
+- [ ] Optimization of the caching system
+- [ ] Support for additional proxy protocols
+- [ ] Multilingual documentation (in progress)
 
-Want to contribute to any of these features? Check out our [contributing guide](CONTRIBUTING.md)!
+Want to contribute? Check out our [contribution guide](CONTRIBUTING.md)!
 
 ## License
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

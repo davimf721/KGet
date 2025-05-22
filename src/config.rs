@@ -30,6 +30,16 @@ pub struct OptimizationConfig {
     pub max_connections: usize,
 }
 
+// Função para fornecer o valor padrão para max_peer_connections
+fn default_torrent_max_peer_connections() -> u32 {
+     50
+}
+
+// Função para fornecer o valor padrão para max_upload_slots
+fn default_torrent_max_upload_slots() -> u32 {
+    4 // Este é o valor que você já usa no seu Default para Config
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TorrentConfig {
     pub enabled: bool,
@@ -38,13 +48,31 @@ pub struct TorrentConfig {
     pub max_seeds: usize,
     pub port: Option<u16>,
     pub dht_enabled: bool,
+    #[serde(default = "default_torrent_max_peer_connections")]
+    pub max_peer_connections: u32,
+    #[serde(default = "default_torrent_max_upload_slots")]
+    pub max_upload_slots: u32,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FtpConfig {
+    pub passive_mode: bool,
+    pub default_port: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SftpConfig {
+    pub default_port: u16,
+    pub key_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub proxy: ProxyConfig,
     pub optimization: OptimizationConfig,
     pub torrent: TorrentConfig,
+    pub ftp: FtpConfig,
+    pub sftp: SftpConfig,
 }
 
 impl Config {
@@ -52,11 +80,13 @@ impl Config {
         let config_path = Self::get_config_path()?;
         
         if !config_path.exists() {
+            // Se o arquivo não existe, retorna a configuração padrão, que já tem o campo.
             return Ok(Self::default());
         }
         
         let config_str = fs::read_to_string(config_path)?;
-        let config: Config = serde_json::from_str(&config_str)?;
+        // O erro ocorre aqui se o arquivo JSON existente não tiver o campo.
+        let config: Config = serde_json::from_str(&config_str)?; 
         
         Ok(config)
     }
@@ -112,6 +142,16 @@ impl Default for Config {
                 max_seeds: 25,
                 port: None,
                 dht_enabled: true,
+                max_peer_connections: default_torrent_max_peer_connections(),
+                max_upload_slots: default_torrent_max_upload_slots(),
+            },
+            ftp: FtpConfig {
+                passive_mode: true,
+                default_port: 21,
+            },
+            sftp: SftpConfig {
+                default_port: 22,
+                key_path: None,
             },
         }
     }

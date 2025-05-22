@@ -7,6 +7,25 @@ Todas as mudanças notáveis neste projeto serão documentadas neste arquivo.
 O formato é baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.0.0/),
 e este projeto adere ao [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
+## [0.1.4] - 2025-05-22
+
+### Adicionado
+- Interface Gráfica do Usuário (GUI) para downloads mais fáceis.
+- Suporte a download via FTP.
+- Suporte a download via SFTP (autenticação baseada em senha e chave).
+- Suporte a download de Torrent via links magnéticos (integra com o daemon Transmission).
+- Instruções detalhadas para configuração do daemon Transmission no README.
+
+### Modificado
+- Refinada a determinação do caminho de saída para alinhar o comportamento com o `wget`.
+- Garantido que `final_path` seja sempre absoluto para prevenir erros de "Arquivo ou diretório não encontrado" no CWD (diretório de trabalho atual).
+- Atualizado o README em Inglês, Português e Espanhol para refletir todas as novas funcionalidades e instruções de configuração.
+
+### Corrigido
+- Resolvido erro "Arquivo ou diretório não encontrado" ao baixar sem `-O`, garantindo caminhos absolutos.
+- Corrigido `validate_filename` para verificar apenas o nome base do arquivo, não o caminho completo.
+- Abordados problemas potenciais com `map_err` em `main.rs` para downloads de torrent e HTTP.
+
 ## [0.1.3] - 2025-03-11
 
 ### Adicionado
@@ -81,4 +100,4 @@ e este projeto adere ao [Versionamento Semântico](https://semver.org/lang/pt-BR
 - Funcionalidade básica de download de arquivos
 - Interface de linha de comando
 - Tratamento básico de erros
-- Suporte multiplataforma 
+- Suporte multiplataforma

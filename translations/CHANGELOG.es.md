@@ -7,6 +7,25 @@ Todos los cambios notables en este proyecto serán documentados en este archivo.
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.0.0/),
 y este proyecto adhiere a [Versionado Semántico](https://semver.org/lang/es/).
 
+## [0.1.4] - 2025-05-22
+
+### Añadido
+- Interfaz Gráfica de Usuario (GUI) para descargas más fáciles.
+- Soporte para descarga vía FTP.
+- Soporte para descarga vía SFTP (autenticación basada en contraseña y clave).
+- Soporte para descarga de Torrent vía enlaces magnéticos (se integra con el demonio Transmission).
+- Instrucciones detalladas para la configuración del demonio Transmission en el README.
+
+### Cambiado
+- Refinada la determinación de la ruta de salida para alinear el comportamiento con `wget`.
+- Asegurado que `final_path` sea siempre absoluto para prevenir errores de "No existe el fichero o el directorio" en el CWD (directorio de trabajo actual).
+- Actualizado el README en Inglés, Portugués y Español para reflejar todas las nuevas características e instrucciones de configuración.
+
+### Corregido
+- Resuelto error "No existe el fichero o el directorio" al descargar sin `-O`, asegurando rutas absolutas.
+- Corregido `validate_filename` para verificar solo el nombre base del archivo, no la ruta completa.
+- Abordados problemas potenciales con `map_err` en `main.rs` para descargas de torrent y HTTP.
+
 ## [0.1.3] - 2025-03-11
 
 ### Añadido
@@ -81,4 +100,4 @@ y este proyecto adhiere a [Versionado Semántico](https://semver.org/lang/es/).
 - Funcionalidad básica de descarga de archivos
 - Interfaz de línea de comandos
 - Manejo básico de errores
-- Soporte multiplataforma 
+- Soporte multiplataforma

@@ -7,6 +7,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.4] - 2025-05-22
+
+### Added
+- Graphical User Interface (GUI) for easier downloads.
+- FTP download support.
+- SFTP download support (password and key-based authentication).
+- Torrent download support via magnet links (integrates with Transmission daemon).
+- Detailed instructions for Transmission daemon setup in README.
+
+### Changed
+- Refined output path determination to align comportamento with `wget`.
+- Ensured `final_path` is always absolute to prevent "No such file or directory" errors in CWD.
+- Updated README in English, Portuguese, and Spanish to reflect all new features and setup instructions.
+
+### Fixed
+- Resolved "No such file or directory" error when downloading without `-O` by ensuring absolute paths.
+- Corrected `validate_filename` to only check the base filename, not the full path.
+- Addressed potential issues with `map_err` in `main.rs` for torrent and HTTP downloads.
+
 ## [0.1.3] - 2025-03-11
 
 ### Added

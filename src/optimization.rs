@@ -87,6 +87,8 @@ impl Optimizer {
         if !self.config.cache_enabled {
             return Ok(None);
         }
+
+        let _cache_dir = self.config.cache_dir.as_str();
         let cache_path = self.get_cache_path(url)?;
         if cache_path.exists() {
             let mut file = File::open(cache_path)?;
@@ -120,7 +122,11 @@ impl Optimizer {
     #[allow(dead_code)]
     fn get_cache_path(&self, url: &str) -> Result<PathBuf, Box<dyn Error>> {
         let mut cache_dir = PathBuf::from(
-            self.config.cache_dir.clone().unwrap_or("~/.cache/kelpsget".to_string())
+            if self.config.cache_dir.is_empty() {
+                "~/.cache/kelpsget".to_string()
+            } else {
+                self.config.cache_dir.clone()
+            }
         );
         
         if cache_dir.starts_with("~") {
@@ -137,5 +143,13 @@ impl Optimizer {
         
         cache_dir.push(format!("{:x}", hash));
         Ok(cache_dir)
+    }
+
+    pub fn get_peer_limit(&self) -> usize {
+        self.speed_limit.unwrap_or(50) as usize
+    }
+    
+    pub fn is_compression_enabled(&self) -> bool {
+        self.config.compression
     }
 }
