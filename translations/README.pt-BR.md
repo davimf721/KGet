@@ -2,7 +2,7 @@
 
 Um downloader moderno, leve e versátil escrito em Rust para downloads rápidos e confiáveis de arquivos via linha de comando (CLI) e interface gráfica (GUI).
 
-[English](README.md) | [Português](translations/README.pt-BR.md) | [Español](translations/README.es.md)
+[English](../README.md) | [Português](translations/README.pt-BR.md) | [Español](translations/README.es.md)
 
 ## Features
 ✅ Ferramenta CLI e GUI simples para baixar arquivos via HTTP/HTTPS.<br>
