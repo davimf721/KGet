@@ -284,7 +284,7 @@ Found a bug or want to add a feature? Open an issue or send a PR!
 - [PitchHut](https://www.pitchhut.com/project/kelpsget)
 - [Hacker News](https://hn.algolia.com/?query=Show%20HN%3A%20KelpsGet%20%E2%80%93%20Modern%20download%20manager%20built%20in%20Rust&type=story&dateRange=all&sort=byDate&storyText=false&prefix&page=0)
 
-## 🎯 Next Steps (Example - adjust to your project)
+## 🎯 Next Steps(just a few)
 - [X] FTP/SFTP download support
 - [X] Torrent download support
 - [X] Desktop GUI Interface
