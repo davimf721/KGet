@@ -261,6 +261,14 @@ KelpsGet uses a configuration file at:
 9.  **Torrent Downloads:** Adds magnet links to `transmission-daemon` for download.
 10. **FTP/SFTP Downloads:** Connects to FTP/SFTP servers to transfer files.
 
+## Screenshots
+- GUI:
+ ![image](https://github.com/user-attachments/assets/bcee5d10-83eb-4138-bf40-5b99d6fa4a57)
+- Torrent on `localhost:9091/transmission/web/`:
+  ![image](https://github.com/user-attachments/assets/d80b60d7-f53e-4198-8e11-1cacf0e78958)
+
+
+
 ## Security Features
 - Space Check: Ensures sufficient disk space.
 - Filename Validation: Prevents path injection.
