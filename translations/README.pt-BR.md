@@ -4,6 +4,18 @@ Um downloader moderno, leve e versátil escrito em Rust para downloads rápidos 
 
 [English](../README.md) | [Português](translations/README.pt-BR.md) | [Español](translations/README.es.md)
 
+## Telas:
+- GUI:
+ <img src="https://github.com/user-attachments/assets/bcee5d10-83eb-4138-bf40-5b99d6fa4a57"  width="500"/>
+ 
+- Torrent no `localhost:9091/transmission/web/`:
+ <img src="https://github.com/user-attachments/assets/d80b60d7-f53e-4198-8e11-1cacf0e78958"  width="600"/>
+
+- CLI:
+ <img src="https://github.com/user-attachments/assets/2495d772-0a9c-4acb-a49d-68ad66366898"  width="600"/>
+
+
+
 ## Features
 ✅ Ferramenta CLI e GUI simples para baixar arquivos via HTTP/HTTPS.<br>
 ✅ Suporte para downloads via FTP e SFTP.<br>
@@ -271,6 +283,13 @@ Encontrou um bug ou quer adicionar uma funcionalidade? Abra uma issue ou envie u
 - 📦 [crates.io](https://crates.io/crates/kelpsget)
 - 💻 [GitHub](https://github.com/davimf721/KelpsGet)
 - 📝 [Changelog](CHANGELOG.md)
+
+## Você pode ver posts sobre esse projeto em outras comunidades:
+- [Dev.to](https://dev.to/davimf7221/kelpsget-v014-modern-download-manager-in-rust-4b9f)
+- [r/rust](https://www.reddit.com/r/rust/comments/1kt69vh/after_5_months_of_development_i_finally_released/)
+- [PitchHut](https://www.pitchhut.com/project/kelpsget)
+- [Hacker News](https://hn.algolia.com/?query=Show%20HN%3A%20KelpsGet%20%E2%80%93%20Modern%20download%20manager%20built%20in%20Rust&type=story&dateRange=all&sort=byDate&storyText=false&prefix&page=0)
+
 
 ## 🎯 Próximos Passos (Exemplo - ajuste conforme seu projeto)
 - [X] Suporte a download FTP/SFTP
