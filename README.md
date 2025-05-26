@@ -4,6 +4,17 @@ A modern, lightweight, and versatile downloader written in Rust for fast and rel
 
 [English](README.md) | [Português](translations/README.pt-BR.md) | [Español](translations/README.es.md)
 
+## Screenshots
+- GUI:
+ <img src="https://github.com/user-attachments/assets/bcee5d10-83eb-4138-bf40-5b99d6fa4a57"  width="500"/>
+ 
+- Torrent on `localhost:9091/transmission/web/`:
+ <img src="https://github.com/user-attachments/assets/d80b60d7-f53e-4198-8e11-1cacf0e78958"  width="600"/>
+
+- CLI:
+ <img src="https://github.com/user-attachments/assets/2495d772-0a9c-4acb-a49d-68ad66366898"  width="600"/>
+
+
 ## Features
 ✅ Simple CLI and GUI tool for downloading files via HTTP/HTTPS.<br>
 ✅ Support for downloads via FTP and SFTP.<br>
@@ -261,11 +272,6 @@ KelpsGet uses a configuration file at:
 9.  **Torrent Downloads:** Adds magnet links to `transmission-daemon` for download.
 10. **FTP/SFTP Downloads:** Connects to FTP/SFTP servers to transfer files.
 
-## Screenshots
-- GUI:
- ![image](https://github.com/user-attachments/assets/bcee5d10-83eb-4138-bf40-5b99d6fa4a57)
-- Torrent on `localhost:9091/transmission/web/`:
-  ![image](https://github.com/user-attachments/assets/d80b60d7-f53e-4198-8e11-1cacf0e78958)
 
 
 
