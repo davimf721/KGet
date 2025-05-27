@@ -77,7 +77,7 @@ Check the [Releases](https://github.com/davimf721/KGet/releases) section for the
 
 #### Linux/macOS:
 ```bash
-chmod +x kelpsget  # Make executable
+chmod +x ksget  # Make executable
 ./kelpsget [URL]    # Run directly
 ```
 #### Windows:
@@ -150,56 +150,56 @@ Access `http://localhost:9091` in your browser. You should see the Transmission 
 
 ### Command Line (CLI)
 ```bash
-kelpsget [OPTIONS] <URL>
+kget [OPTIONS] <URL>
 ```
 **Examples:**
 *   **HTTP/HTTPS Download:**
     ```bash
-    kelpsget https://example.com/file.txt
+    kget https://example.com/file.txt
     ```
 *   **Rename Output File:**
     ```bash
-    kelpsget -O new_name.txt https://example.com/file.txt
-    kelpsget -O ~/MyDownloads/ https://example.com/video.mp4 # Saves as ~/MyDownloads/video.mp4
+    kget -O new_name.txt https://example.com/file.txt
+    kget -O ~/MyDownloads/ https://example.com/video.mp4 # Saves as ~/MyDownloads/video.mp4
     ```
 *   **FTP Download:**
     ```bash
-    kelpsget ftp://user:password@ftp.example.com/archive.zip
-    kelpsget --ftp ftp://ftp.example.com/pub/file.txt
+    kget ftp://user:password@ftp.example.com/archive.zip
+    kget --ftp ftp://ftp.example.com/pub/file.txt
     ```
 *   **SFTP Download:**
     (Requires SSH key setup or password if the server allows it)
     ```bash
-    kelpsget sftp://user@sftp.example.com/path/file.dat
-    kelpsget --sftp sftp://user@sftp.example.com/path/file.dat -O local.dat
+    kget sftp://user@sftp.example.com/path/file.dat
+    kget --sftp sftp://user@sftp.example.com/path/file.dat -O local.dat
     ```
 *   **Torrent Download (Magnet Link):**
     (Requires `transmission-daemon` configured and running)
     ```bash
-    kelpsget "magnet:?xt=urn:btih:YOUR_HASH_HERE&dn=TorrentName"
-    kelpsget --torrent "magnet:?xt=urn:btih:YOUR_HASH_HERE" -O ~/MyTorrents/
+    kget "magnet:?xt=urn:btih:YOUR_HASH_HERE&dn=TorrentName"
+    kget --torrent "magnet:?xt=urn:btih:YOUR_HASH_HERE" -O ~/MyTorrents/
     ```
     KelpsGet will add the torrent to Transmission and attempt to open the web interface (`http://localhost:9091`) for management.
 
 *   **Silent Mode:**
     ```bash
-    kelpsget -q https://example.com/file.txt
+    kget -q https://example.com/file.txt
     ```
 *   **Advanced Download Mode (HTTP/HTTPS):**
     ```bash
-    kelpsget -a https://example.com/large_file.zip
+    kget -a https://example.com/large_file.zip
     ```
 *   **Use Proxy:**
     ```bash
-    kelpsget -p http://proxy:8080 https://example.com/file.txt
+    kget -p http://proxy:8080 https://example.com/file.txt
     ```
 *   **Proxy with Authentication:**
     ```bash
-    kelpsget -p http://proxy:8080 --proxy-user user --proxy-pass pass https://example.com/file.txt
+    kget -p http://proxy:8080 --proxy-user user --proxy-pass pass https://example.com/file.txt
     ```
 *   **Speed Limit:**
     ```bash
-    kelpsget -l 1048576 https://example.com/file.txt  # Limit to 1MB/s
+    kget -l 1048576 https://example.com/file.txt  # Limit to 1MB/s
     ```
 *   **Disable Compression (KelpsGet-specific, not HTTP):**
     ```bash
@@ -207,13 +207,13 @@ kelpsget [OPTIONS] <URL>
     ```
 *   **Disable Cache (KelpsGet-specific):**
     ```bash
-    kelpsget --no-cache https://example.com/file.txt
+    kget --no-cache https://example.com/file.txt
     ```
 
 ### Graphical User Interface (GUI)
 To start the GUI:
 ```bash
-kelpsget --gui
+kget --gui
 ```
 The GUI allows you to enter the URL, output path, and start downloads. Status and progress are displayed in the interface.
 
@@ -233,10 +233,10 @@ KelpsGet uses a configuration file at:
     "proxy_type": "Http"
   },
   "optimization": {
-    "compression": true, // Compression for KelpsGet cache
+    "compression": true, // Compression for KGet cache
     "compression_level": 6,
     "cache_enabled": true,
-    "cache_dir": "~/.cache/kelpsget", // Expand ~ manually or use absolute path
+    "cache_dir": "~/.cache/kget", // Expand ~ manually or use absolute path
     "speed_limit": null,
     "max_connections": 4
   },
@@ -249,7 +249,7 @@ KelpsGet uses a configuration file at:
     "max_seeds": 50,
     "port": null,
     "dht_enabled": true,
-    "default_download_dir": null // Default directory for torrent downloads via KelpsGet
+    "default_download_dir": null // Default directory for torrent downloads via KGet
   },
   "ftp": {
     "default_port": 21,
