@@ -219,10 +219,10 @@ The GUI allows you to enter the URL, output path, and start downloads. Status an
 
 ## KelpsGet Configuration
 KelpsGet uses a configuration file at:
-- Windows: `%APPDATA%\kelpsget\config.json`
-- Linux/macOS: `~/.config/kelpsget/config.json`
+- Windows: `%APPDATA%\kget\config.json`
+- Linux/macOS: `~/.config/kget/config.json`
 
-**Example `config.json` for KelpsGet:**
+**Example `config.json` for KGet:**
 ```json
 {
   "proxy": {
