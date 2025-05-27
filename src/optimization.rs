@@ -6,7 +6,7 @@ use flate2::write::{GzEncoder, GzDecoder};
 use lz4::block::{compress, CompressionMode};
 use crate::config::OptimizationConfig;
 
-/// Estrutura responsável por otimizar operações de download através de compressão e cache
+/// Structure responsible for optimizing download operations through compression and caching
 #[derive(Clone)]
 pub struct Optimizer {
     config: OptimizationConfig,
@@ -14,7 +14,7 @@ pub struct Optimizer {
 }
 
 impl Optimizer {
-    /// Cria uma nova instância do otimizador com a configuração especificada
+    /// Make a new Optimizer instance with the provided configuration
     pub fn new(config: OptimizationConfig) -> Self {
         let speed_limit = config.speed_limit;
         Self { 
@@ -23,11 +23,11 @@ impl Optimizer {
         }
     }
 
-    /// Comprime os dados usando diferentes algoritmos baseado no nível de compressão configurado
-    /// 
-    /// Níveis 1-3: Gzip
-    /// Níveis 4-6: LZ4
-    /// Níveis 7-9: Brotli
+    /// Compress data using different algorithms based on the configured compression level
+    ///
+    /// Levels 1-3: Gzip
+    /// Levels 4-6: LZ4
+    /// Levels 7-9: Brotli
     #[allow(dead_code)]
     pub fn compress(&self, data: &[u8]) -> Result<Vec<u8>, Box<dyn Error>> {
         if !self.config.compression {
@@ -57,9 +57,9 @@ impl Optimizer {
         Ok(compressed)
     }
 
-    /// Descomprime os dados usando o algoritmo apropriado baseado no cabeçalho do arquivo
-    /// 
-    /// Suporta Gzip, Brotli e LZ4
+    /// Decompress data using the appropriate algorithm based on the file header
+    ///
+    /// Supports Gzip, Brotli, and LZ4
     pub fn decompress(&self, data: &[u8]) -> Result<Vec<u8>, Box<dyn Error>> {
         if !self.config.compression {
             return Ok(data.to_vec());
@@ -79,9 +79,9 @@ impl Optimizer {
         Ok(decompressed)
     }
 
-    /// Recupera um arquivo do cache se existir
-    /// 
-    /// Retorna None se o cache estiver desabilitado ou o arquivo não existir
+    /// Retrieve a file from the cache if it exists
+    ///
+    /// Returns None if caching is disabled or the file does not exist
     #[allow(dead_code)]
     pub fn get_cached_file(&self, url: &str) -> Result<Option<Vec<u8>>, Box<dyn Error>> {
         if !self.config.cache_enabled {
@@ -99,9 +99,9 @@ impl Optimizer {
         Ok(None)
     }
 
-    /// Armazena um arquivo no cache
-    /// 
-    /// Não faz nada se o cache estiver desabilitado
+    /// Store a file in the cache
+    ///
+    /// Does nothing if caching is disabled
     #[allow(dead_code)]
     pub fn cache_file(&self, url: &str, data: &[u8]) -> Result<(), Box<dyn Error>> {
         if !self.config.cache_enabled {
@@ -116,14 +116,14 @@ impl Optimizer {
         Ok(())
     }
 
-    /// Gera o caminho do arquivo no cache baseado na URL
-    /// 
-    /// Usa um hash simples para gerar um nome de arquivo único
+    /// Generate the cache file path based on the URL
+    ///
+    /// Uses a simple hash to generate a unique filename
     #[allow(dead_code)]
     fn get_cache_path(&self, url: &str) -> Result<PathBuf, Box<dyn Error>> {
         let mut cache_dir = PathBuf::from(
             if self.config.cache_dir.is_empty() {
-                "~/.cache/kelpsget".to_string()
+                "~/.cache/kget".to_string()
             } else {
                 self.config.cache_dir.clone()
             }
@@ -135,7 +135,7 @@ impl Optimizer {
             }
         }
         
-        // Implementação simples de hash em vez de usar md5
+        // Simple hash function to generate a unique filename
         let mut hash = 0u64;
         for byte in url.bytes() {
             hash = hash.wrapping_mul(31).wrapping_add(byte as u64);

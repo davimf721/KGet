@@ -1,15 +1,24 @@
 [package]
-name = "kelpsget"
-version = "0.1.4"
+name = "Kget"
+version = "1.5.0"
 edition = "2024"
+description = "A powerful and versatile download manager and library"
 authors = ["Davi Moreira Fuzatto <davimoreiraf@gmail.com>"]
 license = "MIT"
-description = "A modern, lightweight wget clone written in Rust for fast and reliable file downloads from the command line."
+repository = "https://github.com/davimf721/KGet"
 readme = "README.md"
-homepage = "https://github.com/davimf721/KelpsGet"
-repository = "https://github.com/davimf721/KelpsGet"
-keywords = ["cli", "download","files"]
-categories = ["command-line-utilities"]
+keywords = ["download", "http", "ftp", "sftp", "torrent"]
+categories = ["network-programming", "command-line-utilities", "api-bindings"]
+
+# Main library
+[lib]
+name = "kget"
+path = "src/lib.rs"
+
+# Binary CLI/GUI
+[[bin]]
+name = "kget"
+path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.5.31", features = ["derive"] }
@@ -33,8 +42,8 @@ ssh2 = "0.9"
 url = "2.4"
 suppaftp = "5.1"
 socks = "0.3"
-rqbit = "8.0.0"
 eframe = "0.31.1"
+egui = "0.31.1"
 transmission-rpc = "0.4"
 reqwest = { version = "0.12.15", features = [
     "blocking",
@@ -44,3 +53,10 @@ reqwest = { version = "0.12.15", features = [
     "rustls-tls"
 ]}
 opener = "0.8.1"
+arboard = "3.5.0"
+rfd = "0.15.3"
+rustyline = "16.0.0"
+
+[dev-dependencies]
+tempfile = "3.2"
+mockito = "0.31"

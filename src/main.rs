@@ -1,5 +1,4 @@
 use clap::Parser;
-// Adicione esta linha
 use clap::CommandFactory;
 use std::error::Error;
 use std::sync::mpsc::{self, Receiver as MpscReceiver, Sender as MpscSender};
@@ -10,7 +9,7 @@ use crate::download::download as cli_download;
 use crate::advanced_download::AdvancedDownloader;
 use crate::config::Config;
 use crate::optimization::Optimizer;
-use crate::gui::{KelpsGetGui, DownloadCommand, WorkerToGuiMessage};
+use crate::gui::{KGetGui, DownloadCommand, WorkerToGuiMessage};
 pub use crate::ftp::FtpDownloader;
 pub use crate::sftp::SftpDownloader;
 pub use crate::torrent::TorrentDownloader;
@@ -18,67 +17,67 @@ pub use crate::torrent::TorrentDownloader;
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// URL do arquivo para download
+    /// URL file for the download
     #[arg(default_value_t = String::new())]
     url: String,
 
-    /// Nome do arquivo de saída
+    /// Output file name
     #[arg(short = 'O', long = "output")]
     output: Option<String>,
 
-    /// Modo silencioso (sem barra de progresso)
+    /// Silent mode (no progress bar)
     #[arg(short = 'q', long = "quiet")]
     quiet: bool,
 
-    /// Usar download avançado (paralelo e resumível)
+    /// Use advanced download (parallel and resumable)
     #[arg(short = 'a', long = "advanced")]
     advanced: bool,
 
-    /// Usar download via torrent (magnetic links)
+    /// Use torrent download (magnet links)
     #[arg(short = 't', long = "torrent")]
     torrent: bool,
 
-    /// URL do proxy (ex: http://proxy:8080)
+    /// Proxy URL (ex: http://proxy:8080)
     #[arg(short = 'p', long = "proxy")]
     proxy: Option<String>,
 
-    /// Usuário do proxy
+    /// Proxy user
     #[arg(long = "proxy-user")]
     proxy_user: Option<String>,
 
-    /// Senha do proxy
+    /// Proxy password
     #[arg(long = "proxy-pass")]
     proxy_pass: Option<String>,
 
-    /// Tipo de proxy (http, https, socks5)
+    /// Proxy type (http, https, socks5)
     #[arg(long = "proxy-type", default_value = "http")]
     proxy_type: String,
 
-    /// Limite de velocidade em bytes/segundo
+    /// Speed limit in bytes/second
     #[arg(short = 'l', long = "limit")]
     speed_limit: Option<u64>,
 
-    // /// Desabilitar compressão
+    // /// Disable compression
     // #[arg(long = "no-compress")]
     // no_compress: bool,
 
-    /// Desabilitar cache
+    /// Disable cache
     #[arg(long = "no-cache")]
     no_cache: bool,
 
-    /// Número máximo de peers para download via torrent
+    /// Maximum number of peers for torrent download
     #[arg(long = "max-peers")]
     max_peers: Option<usize>,
 
-    /// Número máximo de seeds para download via torrent
+    /// Maximum number of seeds for torrent download
     #[arg(long = "max-seeds")]
     max_seeds: Option<usize>,
 
-    /// Porta para conexões torrent
+    /// Port for torrent connections
     #[arg(long = "torrent-port")]
     torrent_port: Option<u16>,
 
-    /// Desabilitar DHT para torrents
+    /// Disable DHT for torrents
     #[arg(long = "no-dht")]
     no_dht: bool,
 
@@ -93,6 +92,10 @@ struct Args {
     /// Use SFTP download  
     #[arg(long = "sftp")]
     sftp: bool,
+
+    /// Use interactive mode
+    #[arg(short = 'i', long = "interactive")]
+    interactive: bool,
 }
 
 mod download;
@@ -105,6 +108,7 @@ mod ftp;
 mod gui;
 mod sftp;
 mod torrent;
+mod interactive;
 
 fn download_worker(
     config: Config,
@@ -140,7 +144,7 @@ fn download_worker(
                         proxy_clone,
                         optimizer_clone,
                     );
-                    downloader.download().map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())) as Box<dyn Error + Send + Sync>)
+                    downloader.download()
                 } else if url.starts_with("sftp://") {
                     let downloader = SftpDownloader::new(
                         url.clone(),
@@ -149,7 +153,7 @@ fn download_worker(
                         proxy_clone,
                         optimizer_clone,
                     );
-                    downloader.download().map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())) as Box<dyn Error + Send + Sync>)
+                    downloader.download()
                 } else {
                     status_tx.send(WorkerToGuiMessage::StatusUpdate(format!("Starting HTTP download: {}", url))).unwrap();
                     for i in 1..=10 {
@@ -184,9 +188,14 @@ fn download_worker(
     }
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let args = Args::parse();
     let mut config = Config::load()?;
+
+    if args.interactive {
+        interactive::interactive_mode();
+        return Ok(());
+    }
 
     if !args.gui {
         if let Some(proxy_url) = args.proxy.clone() {
@@ -242,21 +251,26 @@ fn main() -> Result<(), Box<dyn Error>> {
             download_worker(worker_config, download_rx_worker, status_tx_worker, runtime);
         });
 
-        let native_options = eframe::NativeOptions::default();
-        eframe::run_native(
-            "KelpsGet Downloader",
+        
+        let mut native_options = eframe::NativeOptions::default();
+        native_options.viewport.inner_size = Some(egui::Vec2::new(900.0, 400.0));
+
+        if let Err(e) = eframe::run_native(
+            "KGet Downloader",
             native_options,
             Box::new(move |cc| {
-                Ok(Box::new(KelpsGetGui::new(cc, download_tx, status_rx_gui)))
+                Ok(Box::new(KGetGui::new(cc, download_tx, status_rx_gui)))
             }),
-        )?;
-        return Ok(());
+        ) {
+            eprintln!("Failed to launch GUI: {e}");
+            return Err("Failed to launch GUI".into());
+        }
     }
 
     let optimizer = Optimizer::new(config.optimization.clone());
 
     if args.url.is_empty() && !args.gui {
-        // Agora Args::command() deve funcionar
+    
         Args::command().print_help()?;
         return Err("URL is required for CLI mode.".into());
     }
@@ -265,7 +279,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let url = args.url.clone();
         let output = args.output.unwrap_or_else(|| utils::get_filename_from_url_or_default(&url, "ftp_output"));
         let downloader = FtpDownloader::new(
-            url,
+            url.to_owned(),
             output,
             args.quiet,
             config.proxy,
@@ -278,7 +292,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let url = args.url.clone();
         let output = args.output.unwrap_or_else(|| utils::get_filename_from_url_or_default(&url, "sftp_output"));
         let downloader = SftpDownloader::new(
-            url,
+            url.to_owned(),
             output,
             args.quiet,
             config.proxy,
@@ -296,8 +310,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             optimizer,
         );
         tokio::runtime::Runtime::new()?
-            .block_on(downloader.download())
-            .map_err(|e| e as Box<dyn Error>)?;
+            .block_on(downloader.download())?;
     } else if args.advanced {
         let downloader = AdvancedDownloader::new(
             args.url.clone(),
@@ -314,7 +327,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             args.output.or_else(|| Some(utils::get_filename_from_url_or_default(&args.url, "http_output"))),
             config.proxy, 
             optimizer
-        ).map_err(|e| e as Box<dyn Error>)?;
+        )?;
     }
 
     Ok(())

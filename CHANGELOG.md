@@ -7,6 +7,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2025-05-26
+
+### Added
+- New public Rust crate: KGet can now be used as a library in your own Rust projects, click [here](LIB.md) to see more.
+- Improved GUI: larger fonts, better layout, and more intuitive controls.
+- Clipboard integration for easy pasting of URLs.
+- Download button and cancel button now always visible and functional in the GUI.
+- **Interactive mode:** Run `kget --interactive` for a REPL-like experience with commands such as `download <url> [output]`, `help`, and `exit`.
+
+### Changed
+- Project renamed from "KelpsGet" to "KGet" for simplicity and consistency.
+- Versioning scheme updated from 0.1.4 to 1.5.0 to allow for more frequent minor updates and clearer release tracking.
+- Features list moved from README to CHANGELOG for easier maintenance and to keep the README concise.
+
+### Removed
+- Redundant or overly detailed features section from the README (now see CHANGELOG for all features).
+
 ## [0.1.4] - 2025-05-22
 
 ### Added

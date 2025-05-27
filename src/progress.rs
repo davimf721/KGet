@@ -1,17 +1,17 @@
 use indicatif::{ProgressBar, ProgressStyle};
 
-/// Cria uma barra de progresso personalizada para download de arquivos.
+/// Make a custom progress bar for file downloads
 /// 
 /// # Arguments
-/// 
-/// * `quiet_mode` - Se true, a barra de progresso será ocultada
-/// * `msg` - Mensagem a ser exibida na barra
-/// * `length` - Tamanho total do arquivo em bytes (opcional)
-/// * `is_parallel` - Se true, mostra informações de download paralelo
-/// 
+///
+/// * `quiet_mode` - If true, the progress bar will be hidden
+/// * `msg` - Message to be displayed on the bar
+/// * `length` - Total file size in bytes (optional)
+/// * `is_parallel` - If true, shows parallel download information
+///
 /// # Returns
-/// 
-/// Uma barra de progresso configurada com estilo personalizado
+///
+/// A progress bar configured with a custom style
 pub fn create_progress_bar(quiet_mode: bool, msg: String, length: Option<u64>, is_parallel: bool) -> ProgressBar {
     let bar = if quiet_mode {
         ProgressBar::hidden()

@@ -1,4 +1,4 @@
-# Contributing to KelpsGet
+# Contributing to KGet
 
 [English](CONTRIBUTING.md) | [Português](translations/CONTRIBUTING.pt-BR.md) | [Español](translations/CONTRIBUTING.es.md)
 
@@ -46,7 +46,7 @@ If you have a suggestion for the project, we'd love to hear about it! Just follo
 ## Development Process
 
 1. Fork the repository
-2. Clone your fork: `git clone https://github.com/your-username/KelpsGet.git`
+2. Clone your fork: `git clone https://github.com/your-username/KGet.git`
 3. Create your feature branch: `git checkout -b feature/my-new-feature`
 4. Make your changes
 5. Run the tests: `cargo test`

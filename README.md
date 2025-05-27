@@ -1,4 +1,4 @@
-# KelpsGet v0.1.4 (New Release)
+# KelpsGet now is KGet!  v1.5.0 (New Release)
 
 A modern, lightweight, and versatile downloader written in Rust for fast and reliable file downloads via command line (CLI) and graphical user interface (GUI).
 
@@ -6,32 +6,37 @@ A modern, lightweight, and versatile downloader written in Rust for fast and rel
 
 ## Screenshots
 - GUI:
- <img src="https://github.com/user-attachments/assets/bcee5d10-83eb-4138-bf40-5b99d6fa4a57"  width="500"/>
+ <img src="https://github.com/user-attachments/assets/30f77e72-aaac-454f-ace4-947b92411bf7"  width="600"/>
  
 - Torrent on `localhost:9091/transmission/web/`:
  <img src="https://github.com/user-attachments/assets/d80b60d7-f53e-4198-8e11-1cacf0e78958"  width="600"/>
 
 - CLI:
- <img src="https://github.com/user-attachments/assets/2495d772-0a9c-4acb-a49d-68ad66366898"  width="600"/>
+ <img src="https://github.com/user-attachments/assets/c2e512fe-be46-42b7-8763-fdc51a7233df"  width="600"/>
 
+- Interactive:
+<img src="image.png"  width="600"/>
+
+## How It Works (Summary)
+1.  **Progress Bar (CLI):** Shows speed, ETA, and transferred bytes.
+2.  **Smart File Naming:**
+    *   Uses the filename from the URL.
+    *   Defaults to `index.html` if the URL ends with `/`.
+3.  **Error Handling:** Exits with code 1 on HTTP errors (e.g., 404).
+4.  **Space Check:** Verifies available disk space.
+5.  **Automatic Retry:** Retries download on network failure.
+6.  **Advanced Download Mode (HTTP/HTTPS):** Downloads in parallel chunks, supports resume.
+7.  **Proxy Support:** HTTP, HTTPS, SOCKS5 with authentication.
+8.  **Optimization Features:** Compression (for cache), file caching, speed limiting.
+9.  **Torrent Downloads:** Adds magnet links to `transmission-daemon` for download.
+10. **FTP/SFTP Downloads:** Connects to FTP/SFTP servers to transfer files.
 
 ## Features
-✅ Simple CLI and GUI tool for downloading files via HTTP/HTTPS.<br>
-✅ Support for downloads via FTP and SFTP.<br>
-✅ Support for Torrent downloads (magnet links) via Transmission integration.<br>
-✅ Progress bar with real-time speed and ETA tracking (CLI).<br>
-✅ Custom output names (-O flag to rename downloaded files).<br>
-✅ MIME type detection and proper file handling.<br>
-✅ Cross-platform (Linux, macOS, Windows).<br>
-✅ Silent mode for scripts.<br>
-✅ Automatic space checking before download.<br>
-✅ Automatic retry on connection failure.<br>
-✅ File name validation.<br>
-✅ Detailed download information display.<br>
-✅ Advanced download mode with parallel chunks and resume capability (HTTP/HTTPS).<br>
-✅ Proxy support (HTTP, HTTPS, SOCKS5).<br>
-✅ Automatic compression and caching (for KelpsGet-specific optimizations).<br>
-✅ Speed limiting and connection control.<br>
+
+See the full list of features and recent changes in the [CHANGELOG](CHANGELOG.md).
+
+## KGet now is a Crate too!
+If you want to use KGet as a crate you can click [here](LIB.md).
 
 ## Installation
 
@@ -39,7 +44,7 @@ A modern, lightweight, and versatile downloader written in Rust for fast and rel
 
 You will need Rust installed. If you don't have it, install it from [rustup.rs](https://rustup.rs/).
 
-To compile with all features, including the GUI, you might need some development dependencies.
+Install some dependencies:
 For Debian/Ubuntu based systems:
 ```bash
 sudo apt update
@@ -52,23 +57,23 @@ sudo dnf install -y libxcb-devel libxkbcommon-devel openssl-devel pkg-config
 
 Clone the repository and compile the project:
 ```bash
-git clone https://github.com/davimf721/KelpsGet.git # Replace with the correct URL of your repository
-cd KelpsGet
+git clone https://github.com/davimf721/KGet.git
+cd KGet
 cargo build --release
 ```
-The executable will be in `target/release/kelpsget`. You can copy it to a directory in your `PATH`:
+The executable will be in `target/release/kget`. You can copy it to a directory in your `PATH`:
 ```bash
-sudo cp target/release/kelpsget /usr/local/bin/
+sudo cp target/release/kget /usr/local/bin/
 ```
 
-### Option 2: Install via Cargo (May not include all GUI dependencies by default)
+### Option 2: Install via Cargo
 ```bash
 cargo install kelpsget
 ```
 If you encounter issues with the GUI when installing via `cargo install`, compiling from source is more reliable.
 
 ### Option 3: Download Pre-compiled Binaries
-Check the [Releases](https://github.com/davimf721/KelpsGet/releases) section for the latest binaries for your OS.
+Check the [Releases](https://github.com/davimf721/KGet/releases) section for the latest binaries for your OS.
 
 #### Linux/macOS:
 ```bash
@@ -80,7 +85,7 @@ Run the `.exe` file directly.
 
 ### Additional Requirement for Torrent Downloads: Transmission Daemon
 
-KelpsGet uses the `transmission-daemon` to manage torrent downloads.
+KGet uses the `transmission-daemon` to manage torrent downloads.
 
 **1. Install Transmission Daemon:**
 *   **Debian/Ubuntu:**
@@ -116,9 +121,9 @@ Find and modify these lines:
     // ...
     "rpc-authentication-required": true,
     "rpc-enabled": true,
-    "rpc-password": "transmission", // This is the value KelpsGet uses by default to connect to Transmission (recommended)
+    "rpc-password": "transmission", // This is the value KGet uses by default to connect to Transmission (recommended)
     "rpc-port": 9091,
-    "rpc-username": "transmission", // Username KelpsGet uses to connect to Transmission
+    "rpc-username": "transmission", // Username KGet uses to connect to Transmission
     "rpc-whitelist-enabled": false, // For local access. For remote access, configure IPs.
     "download-dir": "/var/lib/transmission-daemon/downloads", // Transmission's default download directory
     // ...
@@ -258,33 +263,7 @@ KelpsGet uses a configuration file at:
 ```
 **Note on `cache_dir` and `key_path`:** If using `~`, ensure your program correctly expands the tilde to the user's home directory, or use absolute paths.
 
-## How It Works (Summary)
-1.  **Progress Bar (CLI):** Shows speed, ETA, and transferred bytes.
-2.  **Smart File Naming:**
-    *   Uses the filename from the URL.
-    *   Defaults to `index.html` if the URL ends with `/`.
-3.  **Error Handling:** Exits with code 1 on HTTP errors (e.g., 404).
-4.  **Space Check:** Verifies available disk space.
-5.  **Automatic Retry:** Retries download on network failure.
-6.  **Advanced Download Mode (HTTP/HTTPS):** Downloads in parallel chunks, supports resume.
-7.  **Proxy Support:** HTTP, HTTPS, SOCKS5 with authentication.
-8.  **Optimization Features:** Compression (for cache), file caching, speed limiting.
-9.  **Torrent Downloads:** Adds magnet links to `transmission-daemon` for download.
-10. **FTP/SFTP Downloads:** Connects to FTP/SFTP servers to transfer files.
 
-
-
-
-## Security Features
-- Space Check: Ensures sufficient disk space.
-- Filename Validation: Prevents path injection.
-- Secure URL Handling.
-- Secure Proxy Support.
-
-## Contributing
-Found a bug or want to add a feature? Open an issue or send a PR!
-
-🚀 Download files effortlessly with the speed and reliability of Rust. 🚀
 
 ## 🔗 Important Links
 - 📚 [Documentation](https://davimf721.github.io/KelpsGet/)
@@ -298,19 +277,12 @@ Found a bug or want to add a feature? Open an issue or send a PR!
 - [PitchHut](https://www.pitchhut.com/project/kelpsget)
 - [Hacker News](https://hn.algolia.com/?query=Show%20HN%3A%20KelpsGet%20%E2%80%93%20Modern%20download%20manager%20built%20in%20Rust&type=story&dateRange=all&sort=byDate&storyText=false&prefix&page=0)
 
-## 🎯 Next Steps(just a few)
-- [X] FTP/SFTP download support
-- [X] Torrent download support
-- [X] Desktop GUI Interface
-- [ ] Web interface for download monitoring
-- [ ] Integration with cloud storage services
-- [ ] Custom plugin system
-- [ ] Improvements in adaptive compression
-- [ ] Optimization of the caching system
-- [ ] Support for additional proxy protocols
-- [ ] Multilingual documentation (in progress)
-
+## Contributing
 Want to contribute? Check out our [contribution guide](CONTRIBUTING.md)!
+
+Found a bug or want to add a feature? Open an issue or send a PR!
+
+🚀 Download files effortlessly with the speed and reliability of Rust. 🚀
 
 ## License
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

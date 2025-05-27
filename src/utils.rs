@@ -1,33 +1,31 @@
-/// Imprime uma mensagem no console, a menos que o modo silencioso esteja ativado.
+/// Print a message to the console if not in quiet mode.
 /// 
 /// # Arguments
 /// 
-/// * `msg` - A mensagem a ser impressa
-/// * `quiet_mode` - Se true, suprime a impressão da mensagem
+/// * `msg` - The message to print
+/// * `quiet_mode` - If true, suppress printing the message
 pub fn print(msg: &str, quiet_mode: bool) {
     if !quiet_mode {
         println!("{}", msg);
     }
 }
 
-/// Tenta extrair o nome do arquivo de uma URL.
-/// Se a URL não puder ser analisada ou não contiver um nome de arquivo no caminho,
-/// retorna o nome de arquivo padrão fornecido.
+/// Tries to extract the filename from a URL.
+/// If the URL cannot be parsed or does not contain a filename in the path,
+/// it returns the provided default filename.
 ///
 /// # Arguments
 ///
-/// * `url_str` - A string da URL da qual extrair o nome do arquivo.
-/// * `default_filename` - O nome do arquivo a ser retornado se nenhum puder ser extraído da URL.
+/// * `url_str` - A string slice of the URL to extract the filename from.
+/// * `default_filename` - The filename to return if none can be extracted from the URL.
 ///
 /// # Returns
 ///
-/// Uma `String` contendo o nome do arquivo extraído ou o nome do arquivo padrão.
+/// A `String` containing the extracted filename or the default filename.
 pub fn get_filename_from_url_or_default(url_str: &str, default_filename: &str) -> String {
-    // Tenta analisar a URL
-    // Para isso, você pode precisar adicionar o crate `url` ao seu Cargo.toml:
-    // url = "2"
+    // Tries to parse the URL
     if let Ok(parsed_url) = url::Url::parse(url_str) {
-        // Tenta obter o último segmento do caminho
+        // Tries to get the last segment of the path
         if let Some(segments) = parsed_url.path_segments() {
             if let Some(last_segment) = segments.last() {
                 if !last_segment.is_empty() {
@@ -36,6 +34,6 @@ pub fn get_filename_from_url_or_default(url_str: &str, default_filename: &str) -
             }
         }
     }
-    // Retorna o nome do arquivo padrão se a análise falhar ou o caminho estiver vazio/inválido
+    // Returns the default filename if parsing fails or the path is empty/invalid
     default_filename.to_string()
 }

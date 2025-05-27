@@ -33,7 +33,7 @@ impl FtpDownloader {
         }
     }
 
-    pub fn download(&self) -> Result<(), Box<dyn Error>> {
+    pub fn download(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
         let url = Url::parse(&self.url)?;
         let host = url.host_str().ok_or("Invalid host")?;
         let port = url.port().unwrap_or(21);
@@ -90,7 +90,7 @@ impl FtpDownloader {
         Ok(())
     }
 
-    fn connect_via_proxy(&self, host: &str, port: u16) -> Result<FtpStream, Box<dyn Error>> {
+    fn connect_via_proxy(&self, host: &str, port: u16) -> Result<FtpStream, Box<dyn Error + Send + Sync>> {
         match self.proxy.proxy_type {
             crate::config::ProxyType::Http | crate::config::ProxyType::Https => {
                 Err("HTTP/HTTPS proxy not supported for FTP".into())

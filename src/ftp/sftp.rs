@@ -27,7 +27,7 @@ impl SftpDownloader {
         }
     }
 
-    pub fn download(&self) -> Result<(), Box<dyn Error>> {
+    pub fn download(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
         // TODO: Implement SFTP download logic here
         Ok(())
     }

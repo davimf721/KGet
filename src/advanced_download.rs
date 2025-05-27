@@ -9,7 +9,7 @@ use crate::utils::print;
 use crate::config::ProxyConfig;
 use crate::optimization::Optimizer;
 
-const CHUNK_SIZE: u64 = 1024 * 1024; // 1MB chunks
+const CHUNK_SIZE: u64 = 1024 * 1024;
 
 pub struct AdvancedDownloader {
     client: Client,
@@ -56,34 +56,36 @@ impl AdvancedDownloader {
         }
     }
 
-    pub fn download(&self) -> Result<(), Box<dyn Error>> {
-        // Verificar se o arquivo já existe e obter seu tamanho
+    
+    pub fn download(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Verify if the output path is valid
         let existing_size = if Path::new(&self.output_path).exists() {
             Some(std::fs::metadata(&self.output_path)?.len())
         } else {
             None
         };
 
-        // Obter o tamanho total do arquivo
+        // Get the total file size
         let total_size = self.get_file_size()?;
-        
-        // Criar ou abrir o arquivo de saída
+
+        // Create or open the output file
         let file = if existing_size.is_some() {
             File::options().read(true).write(true).open(&self.output_path)?
         } else {
             File::create(&self.output_path)?
         };
 
-        // Calcular chunks para download paralelo
+        // Calculate chunks for parallel download
         let chunks = self.calculate_chunks(total_size, existing_size)?;
-        
-        // Download paralelo dos chunks
+
+        // Download parallel chunks
         self.download_chunks_parallel(chunks, &file)?;
 
         Ok(())
     }
 
-    fn get_file_size(&self) -> Result<u64, Box<dyn Error>> {
+    // We also need to update the other methods
+    fn get_file_size(&self) -> Result<u64, Box<dyn Error + Send + Sync>> {
         let response = self.client.head(&self.url).send()?;
         let content_length = response.headers()
             .get(reqwest::header::CONTENT_LENGTH)
@@ -94,7 +96,7 @@ impl AdvancedDownloader {
         Ok(content_length)
     }
 
-    fn calculate_chunks(&self, total_size: u64, existing_size: Option<u64>) -> Result<Vec<(u64, u64)>, Box<dyn Error>> {
+    fn calculate_chunks(&self, total_size: u64, existing_size: Option<u64>) -> Result<Vec<(u64, u64)>, Box<dyn Error + Send + Sync>> {
         let mut chunks = Vec::new();
         let chunk_size = CHUNK_SIZE;
         let mut start = existing_size.unwrap_or(0);
@@ -108,7 +110,7 @@ impl AdvancedDownloader {
         Ok(chunks)
     }
 
-    fn download_chunks_parallel(&self, chunks: Vec<(u64, u64)>, file: &File) -> Result<(), Box<dyn Error>> {
+    fn download_chunks_parallel(&self, chunks: Vec<(u64, u64)>, file: &File) -> Result<(), Box<dyn Error + Send + Sync>> {
         let file = Arc::new(file);
         let client = Arc::new(self.client.clone());
         let url = Arc::new(self.url.clone());
@@ -125,7 +127,7 @@ impl AdvancedDownloader {
             let mut buffer = Vec::new();
             response.copy_to(&mut buffer).expect("Failed to read response");
 
-            // Descomprimir o chunk se necessário
+            // Descompress the chunk if necessary
             let buffer = optimizer.decompress(&buffer).expect("Failed to decompress chunk");
 
             let mut file = file.try_clone().expect("Failed to clone file");
@@ -139,4 +141,4 @@ impl AdvancedDownloader {
 
         Ok(())
     }
-} 
+}

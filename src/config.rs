@@ -30,14 +30,14 @@ pub struct OptimizationConfig {
     pub max_connections: usize,
 }
 
-// Função para fornecer o valor padrão para max_peer_connections
+// Function to provide the default value for max_peer_connections
 fn default_torrent_max_peer_connections() -> u32 {
      50
 }
 
-// Função para fornecer o valor padrão para max_upload_slots
+// Function to provide the default value for max_upload_slots
 fn default_torrent_max_upload_slots() -> u32 {
-    4 // Este é o valor que você já usa no seu Default para Config
+    4 
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,25 +76,25 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn load() -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn load() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let config_path = Self::get_config_path()?;
         
         if !config_path.exists() {
-            // Se o arquivo não existe, retorna a configuração padrão, que já tem o campo.
+            // If the config file does not exist, return default config
             return Ok(Self::default());
         }
         
         let config_str = fs::read_to_string(config_path)?;
-        // O erro ocorre aqui se o arquivo JSON existente não tiver o campo.
-        let config: Config = serde_json::from_str(&config_str)?; 
-        
+        // The error occurs here if the existing JSON file does not have the field.
+        let config: Config = serde_json::from_str(&config_str)?;
+
         Ok(config)
     }
     
-    pub fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn save(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let config_path = Self::get_config_path()?;
-        
-        // Criar diretório de configuração se não existir
+
+        // Create config directory if it doesn't exist
         if let Some(parent) = config_path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -107,10 +107,10 @@ impl Config {
     
     fn get_config_path() -> Result<PathBuf, io::Error> {
         let mut path = config_dir().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotFound, "Não foi possível encontrar o diretório de configuração")
+            io::Error::new(io::ErrorKind::NotFound, "Not able to find config directory")
         })?;
         
-        path.push("kelpsget");
+        path.push("kget");
         path.push("config.json");
         
         Ok(path)
@@ -131,7 +131,7 @@ impl Default for Config {
                 compression: true,
                 compression_level: 6,
                 cache_enabled: true,
-                cache_dir: "~/.cache/kelpsget".to_string(),
+                cache_dir: "~/.cache/kget".to_string(),
                 speed_limit: None,
                 max_connections: 4,
             },

@@ -21,7 +21,7 @@ fn check_disk_space(path: &Path, required_size: u64) -> Result<(), Box<dyn Error
     
     if available_space < required_size {
         return Err(format!(
-            "Espaço insuficiente em disco. Necessário: {}, Disponível: {}", 
+            "Insufficient disk space. Required: {}, Available: {}", 
             format_size(required_size, DECIMAL),
             format_size(available_space, DECIMAL)
         ).into());
@@ -31,10 +31,10 @@ fn check_disk_space(path: &Path, required_size: u64) -> Result<(), Box<dyn Error
 
 fn validate_filename(filename: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
     if filename.contains(std::path::MAIN_SEPARATOR) {
-        return Err("Nome do arquivo não pode conter separadores de diretório".into());
+        return Err("Filename cannot contain directory separators".into());
     }
     if filename.is_empty() {
-        return Err("Nome do arquivo não pode estar vazio".into());
+        return Err("Filename cannot be empty".into());
     }
     Ok(())
 }
@@ -74,9 +74,9 @@ pub fn download(
             Err(e) => {
                 retries += 1;
                 if retries >= MAX_RETRIES {
-                    return Err(format!("Falha após {} tentativas: {}", MAX_RETRIES, e).into());
+                    return Err(format!("Failed after {} attempts: {}", MAX_RETRIES, e).into());
                 }
-                print(&format!("Tentativa {} falhou, tentando novamente em {} segundos...", 
+                print(&format!("Attempt {} failed, retrying in {} seconds...", 
                     retries, RETRY_DELAY.as_secs()), quiet_mode);
                 std::thread::sleep(RETRY_DELAY);
             }
@@ -134,14 +134,14 @@ pub fn download(
             if let Some(file_name_osstr) = user_path.file_name() {
                 if let Some(file_name_str) = file_name_osstr.to_str() {
                     if file_name_str.is_empty() {
-                         return Err(format!("Caminho de saída inválido, não especifica um nome de arquivo: {}", user_path.display()).into());
+                        return Err(format!("Invalid output path, does not specify a file name: {}", user_path.display()).into());
                     }
                     validate_filename(file_name_str)?;
                 } else {
-                    return Err("Nome do arquivo de saída contém caracteres inválidos (não UTF-8)".into());
+                    return Err("Output filename contains invalid characters (non-UTF-8)".into());
                 }
             } else {
-                return Err(format!("Caminho de saída inválido, não especifica um nome de arquivo: {}", user_path.display()).into());
+                return Err(format!("Invalid output path, does not specify a file name: {}", user_path.display()).into());
             }
             tentative_path = user_path;
         }
@@ -155,14 +155,14 @@ pub fn download(
         tentative_path
     } else {
         let current_dir = std::env::current_dir()
-            .map_err(|e| format!("Falha ao obter o diretório atual: {}", e))?;
+            .map_err(|e| format!("Failed to get current directory: {}", e))?;
         current_dir.join(tentative_path)
     };
 
     if let Some(parent_dir) = final_path.parent() {
         if !parent_dir.as_os_str().is_empty() && parent_dir != Path::new("/") && !parent_dir.exists() {
             std::fs::create_dir_all(parent_dir)
-                .map_err(|e| format!("Falha ao criar diretório {}: {}", parent_dir.display(), e))?;
+                .map_err(|e| format!("Failed to create directory {}: {}", parent_dir.display(), e))?;
             if !quiet_mode {
                 print(&format!("Created directory: {}", parent_dir.display()), quiet_mode);
             }
@@ -191,7 +191,7 @@ pub fn download(
     let mut buffer = Vec::new();
     buffered_reader.read_to_end(&mut buffer)?;
     
-    dest.write_all(&buffer)?;
-    progress.finish_with_message("Download completed");
-    Ok(())
-}
+        dest.write_all(&buffer)?;
+        progress.finish_with_message("Download completed\n Thanks for using KGet!\n");
+        Ok(())
+    }
