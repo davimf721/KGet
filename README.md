@@ -68,7 +68,7 @@ sudo cp target/release/kget /usr/local/bin/
 
 ### Option 2: Install via Cargo
 ```bash
-cargo install kelpsget
+cargo install Kget
 ```
 If you encounter issues with the GUI when installing via `cargo install`, compiling from source is more reliable.
 
