@@ -15,7 +15,7 @@ A modern, lightweight, and versatile downloader written in Rust for fast and rel
  <img src="https://github.com/user-attachments/assets/c2e512fe-be46-42b7-8763-fdc51a7233df"  width="600"/>
 
 - Interactive:
-<img src="image.png"  width="600"/>
+<img src="Interactive.png"  width="600"/>
 
 ## How It Works (Summary)
 1.  **Progress Bar (CLI):** Shows speed, ETA, and transferred bytes.

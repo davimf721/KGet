@@ -2,7 +2,7 @@
 
 Um downloader moderno, leve e versátil escrito em Rust para downloads rápidos e confiáveis via linha de comando (CLI) e interface gráfica (GUI).
 
-[English](README.md) | [Português](translations/README.pt-BR.md) | [Español](translations/README.es.md)
+[English](../README.md) | [Português](translations/README.pt-BR.md) | [Español](translations/README.es.md)
 
 ## Screenshots
 - GUI:
@@ -15,7 +15,7 @@ Um downloader moderno, leve e versátil escrito em Rust para downloads rápidos 
  <img src="https://github.com/user-attachments/assets/c2e512fe-be46-42b7-8763-fdc51a7233df"  width="600"/>
 
 - Interativo:
-<img src="image.png"  width="600"/>
+<img src="../Interactive.png"  width="600"/>
 
 ## Como Funciona (Resumo)
 1. **Barra de Progresso (CLI):** Mostra velocidade, tempo estimado e bytes transferidos.
