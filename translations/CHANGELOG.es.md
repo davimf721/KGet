@@ -1,6 +1,6 @@
 # Registro de cambios
 
-[English](../CHANGELOG.md) | [Português](CHANGELOG.pt-BR.md) | [Español](translations/CHANGELOG.es.md)
+[English](../CHANGELOG.md) | [Português](CHANGELOG.pt-BR.md) | [Español](CHANGELOG.es.md)
 
 Todos los cambios notables en este proyecto serán documentados en este archivo.
 
