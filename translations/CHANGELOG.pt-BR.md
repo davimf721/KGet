@@ -1,6 +1,6 @@
 # Changelog
 
-[English](CHANGELOG.md) | [Português](translations/CHANGELOG.pt-BR.md) | [Español](translations/CHANGELOG.es.md)
+[English](../CHANGELOG.md) | [Português](translations/CHANGELOG.pt-BR.md) | [Español](translations/CHANGELOG.es.md)
 
 Todas as mudanças notáveis neste projeto serão documentadas neste arquivo.
 
