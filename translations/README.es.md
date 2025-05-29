@@ -2,7 +2,7 @@
 
 Un descargador moderno, ligero y versátil escrito en Rust para descargas rápidas y confiables a través de línea de comandos (CLI) e interfaz gráfica (GUI).
 
-[English](../README.md) | [Português](translations/README.pt-BR.md) | [Español](translations/README.es.md)
+[English](../README.md) | [Português](README.pt-BR.md) | [Español](README.es.md)
 
 ## Capturas de pantalla
 - GUI:
