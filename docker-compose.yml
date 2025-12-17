@@ -1,0 +1,17 @@
+version: "3.9"
+
+services:
+  kget:
+    build: .
+    container_name: kget-dev
+    volumes:
+      - .:/app
+      - cargo-cache:/usr/local/cargo/registry
+      - target-cache:/app/target
+    working_dir: /app
+    command: cargo run
+    tty: true
+
+volumes:
+  cargo-cache:
+  target-cache:
