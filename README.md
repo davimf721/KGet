@@ -85,10 +85,10 @@ You can install the published binary from crates.io (the GUI is opt-in via featu
 
 ```bash
 # Install the binary without GUI (default)
-cargo install kget
+cargo install Kget
 
 # Install the binary with GUI support (compiles GUI deps; system libraries may be required)
-cargo install kget --features gui
+cargo install Kget --features gui
 
 #Add to your PATH
 $env:PATH += ";$HOME\.cargo\bin"
