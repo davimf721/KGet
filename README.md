@@ -290,9 +290,9 @@ KelpsGet uses a configuration file at:
 
 
 ## 🔗 Important Links
-- 📚 [Documentation](https://davimf721.github.io/KelpsGet/)
-- 📦 [crates.io](https://crates.io/crates/kelpsget)
-- 💻 [GitHub](https://github.com/davimf721/KelpsGet)
+- 📚 [Documentation](https://davimf721.github.io/KGet/)
+- 📦 [crates.io](https://crates.io/crates/Kget)
+- 💻 [GitHub](https://github.com/davimf721/KGet)
 - 📝 [Changelog](CHANGELOG.md)
 
 ## You can see posts about the project in others communities:
