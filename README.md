@@ -12,10 +12,10 @@ A modern, lightweight, and versatile downloader written in Rust for fast and rel
  <img src="https://github.com/user-attachments/assets/d80b60d7-f53e-4198-8e11-1cacf0e78958"  width="600"/>
 
 - CLI:
- <img src="https://github.com/user-attachments/assets/c2e512fe-be46-42b7-8763-fdc51a7233df"  width="600"/>
+ <img src="https://github.com/user-attachments/assets/a835c4df-5424-4aaa-b687-2445a99ba067"  width="600"/>
 
 - Interactive:
-<img src="Interactive.png"  width="600"/>
+<img src="https://github.com/user-attachments/assets/c8d03a5c-6459-4f3d-a581-5180797f8b1c"  width="600"/>
 
 ## How It Works (Summary)
 1.  **Progress Bar (CLI):** Shows speed, ETA, and transferred bytes.
@@ -89,6 +89,9 @@ cargo install kget
 
 # Install the binary with GUI support (compiles GUI deps; system libraries may be required)
 cargo install kget --features gui
+
+#Add to your PATH
+$env:PATH += ";$HOME\.cargo\bin"
 ```
 
 If you encounter issues with the GUI when installing via `cargo install`, compiling from source is more reliable.
