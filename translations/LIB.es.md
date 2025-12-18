@@ -6,9 +6,18 @@ KGet puede ser usado como una biblioteca Rust en sus propios proyectos para agre
 
 ## Agregue a su `Cargo.toml`
 
+Sin GUI (recomendado para servidores/CI/compilaciones mínimas):
+
 ```toml
 [dependencies]
-kget = "1.5.0"
+kget = "1.5.1"
+```
+
+Con GUI activada (esto incluirá dependencias opcionales de GUI):
+
+```toml
+[dependencies]
+kget = { version = "1.5.1", features = ["gui"] }
 ```
 
 ## Uso Básico
@@ -26,6 +35,45 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Ok(())
 }
 ```
+
+## Funciones de conveniencia
+
+El crate también expone funciones top-level simples para que pueda llamarlas directamente
+sin crear una instancia de `KGet`:
+
+- `kget::download(url, output_path, quiet_mode)` — descarga estándar HTTP/HTTPS/FTP/SFTP.
+- `kget::advanced_download(url, output_path, quiet_mode)` — descarga paralela/retomable.
+
+Ejemplo usando la función top-level `download`:
+
+```rust
+fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    kget::download("https://example.com/file.txt", Some("file.txt"), false)?;
+    Ok(())
+}
+```
+
+## API de barra de progreso
+
+Si desea renderizar su propia barra de progreso (por ejemplo, integrarla con su UI),
+el crate expone una fábrica de barras de progreso:
+
+```rust
+let bar = kget::create_progress_bar_factory(false, "Downloading".to_string(), Some(1024u64), false);
+// use `bar` como un `indicatif::ProgressBar`
+```
+
+## Feature GUI (opcional)
+
+La GUI es opcional y está disponible detrás de una feature de Cargo llamada `gui`. Compile o ejecute con la GUI activada usando:
+
+```bash
+cargo build --features gui
+cargo run --features gui -- --gui
+```
+
+Si la feature `gui` no está activada, el crate y el binario se compilarán sin las dependencias relacionadas con la GUI.
+
 
 ## Descarga Avanzada (Chunks Paralelos, Reanudación)
 

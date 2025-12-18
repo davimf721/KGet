@@ -7,6 +7,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] - 2025-12-18
+
+### Added
+- Optional `gui` Cargo feature to make GUI dependencies opt-in; compile with `--features gui` to enable GUI support.
+- Top-level convenience functions: `kget::download(...)` and `kget::advanced_download(...)` for easier library usage.
+- `create_progress_bar_factory(...)` exported to let consumers create `indicatif` progress bars.
+- `examples/lib_usage.rs` example demonstrating library usage.
+- Docker development instructions and `docker-compose` integration to simplify building, testing and contributing.
+
+### Changed
+- Updated README and `LIB.md` with library usage instructions and examples.
+- `CONTRIBUTING.md` and translations updated with Docker contributor workflow.
+- GUI code split: `gui_types` module added so CLI builds without GUI feature.
+
+### Fixed / Misc
+- Minor documentation fixes and translation updates (PT-BR/ES).
+
+
 ## [1.5.0] - 2025-05-26
 
 ### Added

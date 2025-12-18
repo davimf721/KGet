@@ -1,4 +1,4 @@
-# KelpsGet now is KGet!  v1.5.0 (New Release)
+# KelpsGet now is KGet!  v1.5.1 (Latest Release)
 
 A modern, lightweight, and versatile downloader written in Rust for fast and reliable file downloads via command line (CLI) and graphical user interface (GUI).
 
@@ -35,8 +35,22 @@ A modern, lightweight, and versatile downloader written in Rust for fast and rel
 
 See the full list of features and recent changes in the [CHANGELOG](CHANGELOG.md).
 
-## KGet now is a Crate too!
-If you want to use KGet as a crate you can click [here](LIB.md).
+## KGet now is a Library too!
+If you want to use KGet as a library you can click [here](LIB.md).
+
+### Optional GUI feature
+
+The GUI is provided behind an optional Cargo feature called `gui`. To build or run the binary with the GUI enabled:
+
+```bash
+cargo build --features gui
+cargo run --features gui -- --gui
+```
+
+If you don't enable the `gui` feature, the binary and library will compile without GUI dependencies.
+
+
+
 
 ## Installation
 
@@ -67,9 +81,16 @@ sudo cp target/release/kget /usr/local/bin/
 ```
 
 ### Option 2: Install via Cargo
+You can install the published binary from crates.io (the GUI is opt-in via features):
+
 ```bash
-cargo install Kget
+# Install the binary without GUI (default)
+cargo install kget
+
+# Install the binary with GUI support (compiles GUI deps; system libraries may be required)
+cargo install kget --features gui
 ```
+
 If you encounter issues with the GUI when installing via `cargo install`, compiling from source is more reliable.
 
 ### Option 3: Download Pre-compiled Binaries

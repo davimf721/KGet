@@ -56,6 +56,60 @@ Si tienes una sugerencia para el proyecto, ¡nos encantaría escucharla! Solo si
 9. Haz push a la rama: `git push origin feature/mi-nueva-feature`
 10. Envía un pull request
 
+## Desarrollo con Docker (recomendado para contribuidores)
+
+Proporcionamos un `Dockerfile` y `docker-compose.yml` para que el desarrollo sea reproducible entre máquinas. El contenedor incluye la toolchain de Rust y herramientas comunes para que los contribuidores puedan compilar, probar y ejecutar ejemplos sin instalar dependencias en el host.
+
+Flujo básico
+
+```bash
+# Construir la imagen de desarrollo
+docker build -t kget-dev .
+
+# Iniciar un shell interactivo montado al repositorio (Linux/macOS)
+docker run --rm -it -v "$(pwd)":/work -w /work kget-dev bash
+
+# Windows PowerShell
+docker run --rm -it -v ${PWD}:/work -w /work kget-dev powershell
+```
+
+Comandos comunes sin entrar en el contenedor:
+
+```bash
+# Build
+docker run --rm -v "$(pwd)":/work -w /work kget-dev cargo build
+
+# Ejecutar pruebas
+docker run --rm -v "$(pwd)":/work -w /work kget-dev cargo test
+
+# Ejecutar el ejemplo que demuestra el uso como librería
+docker run --rm -v "$(pwd)":/work -w /work kget-dev cargo run --example lib_usage
+```
+
+Usando `docker-compose`:
+
+```bash
+docker-compose up --build
+```
+
+Notas y recomendaciones
+
+- La imagen de desarrollo está enfocada en CLI, CI y tests. Ejecutar la GUI dentro de un contenedor requiere X11/Wayland o forwarding específico del sistema operativo (no habilitado por defecto).
+- Si quieres probar la GUI desde un contenedor en Linux, reenvía X11 y construye/ejecuta con la feature `gui`:
+
+```bash
+# Construir la imagen con GUI (opcional)
+docker build -t kget-gui .
+
+# Ejecutar con reenvío X11 (ejemplo Linux)
+docker run --rm -it \
+    -e DISPLAY=$DISPLAY \
+    -v /tmp/.X11-unix:/tmp/.X11-unix \
+    -v "$(pwd)":/work -w /work kget-gui cargo run --features gui -- --gui
+```
+
+- El montaje de volumen (`-v "$(pwd)":/work`) te permite editar archivos en el host y compilar/probar dentro del contenedor, manteniendo consistencia con CI y otros contribuidores.
+
 ## Guías de Estilo
 
 ### Mensajes de Commit de Git

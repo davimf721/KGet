@@ -9,7 +9,8 @@ use crate::download::download as cli_download;
 use crate::advanced_download::AdvancedDownloader;
 use crate::config::Config;
 use crate::optimization::Optimizer;
-use crate::gui::{KGetGui, DownloadCommand, WorkerToGuiMessage};
+#[cfg(feature = "gui")] use crate::gui::KGetGui;
+use crate::gui_types::{DownloadCommand, WorkerToGuiMessage};
 pub use crate::ftp::FtpDownloader;
 pub use crate::sftp::SftpDownloader;
 pub use crate::torrent::TorrentDownloader;
@@ -105,6 +106,8 @@ mod advanced_download;
 mod config;
 mod optimization;
 mod ftp;
+mod gui_types;
+#[cfg(feature = "gui")]
 mod gui;
 mod sftp;
 mod torrent;
@@ -241,29 +244,37 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     }
 
     if args.gui {
-        let (download_tx, download_rx_worker): (MpscSender<DownloadCommand>, MpscReceiver<DownloadCommand>) = mpsc::channel();
-        let (status_tx_worker, status_rx_gui): (MpscSender<WorkerToGuiMessage>, MpscReceiver<WorkerToGuiMessage>) = mpsc::channel();
+        #[cfg(feature = "gui")]
+        {
+            let (download_tx, download_rx_worker): (MpscSender<DownloadCommand>, MpscReceiver<DownloadCommand>) = mpsc::channel();
+            let (status_tx_worker, status_rx_gui): (MpscSender<WorkerToGuiMessage>, MpscReceiver<WorkerToGuiMessage>) = mpsc::channel();
 
-        let worker_config = config.clone();
-        let runtime = tokio::runtime::Runtime::new()?;
+            let worker_config = config.clone();
+            let runtime = tokio::runtime::Runtime::new()?;
 
-        thread::spawn(move || {
-            download_worker(worker_config, download_rx_worker, status_tx_worker, runtime);
-        });
+            thread::spawn(move || {
+                download_worker(worker_config, download_rx_worker, status_tx_worker, runtime);
+            });
 
-        
-        let mut native_options = eframe::NativeOptions::default();
-        native_options.viewport.inner_size = Some(egui::Vec2::new(900.0, 400.0));
+            let mut native_options = eframe::NativeOptions::default();
+            native_options.viewport.inner_size = Some(egui::Vec2::new(900.0, 400.0));
 
-        if let Err(e) = eframe::run_native(
-            "KGet Downloader",
-            native_options,
-            Box::new(move |cc| {
-                Ok(Box::new(KGetGui::new(cc, download_tx, status_rx_gui)))
-            }),
-        ) {
-            eprintln!("Failed to launch GUI: {e}");
-            return Err("Failed to launch GUI".into());
+            if let Err(e) = eframe::run_native(
+                "KGet Downloader",
+                native_options,
+                Box::new(move |cc| {
+                    Ok(Box::new(KGetGui::new(cc, download_tx, status_rx_gui)))
+                }),
+            ) {
+                eprintln!("Failed to launch GUI: {e}");
+                return Err("Failed to launch GUI".into());
+            }
+        }
+
+        #[cfg(not(feature = "gui"))]
+        {
+            eprintln!("GUI support was not compiled in. Rebuild with `--features gui` to enable it.");
+            return Err("GUI not available (compile with --features gui)".into());
         }
     }
 

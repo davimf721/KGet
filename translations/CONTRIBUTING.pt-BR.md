@@ -56,6 +56,60 @@ Se você tem uma sugestão para o projeto, adoraríamos ouvir! Basta seguir este
 9. Faça push para a branch: `git push origin feature/minha-nova-feature`
 10. Envie um pull request
 
+## Desenvolvimento com Docker (recomendado para contribuintes)
+
+Fornecemos um `Dockerfile` e um `docker-compose.yml` para tornar o desenvolvimento reproduzível entre máquinas. O contêiner inclui a toolchain do Rust e ferramentas comuns para que contribuintes possam compilar, testar e executar exemplos sem instalar dependências localmente.
+
+Fluxo básico
+
+```bash
+# Construir a imagem de desenvolvimento
+docker build -t kget-dev .
+
+# Iniciar um shell interativo mapeado para o repositório (Linux/macOS)
+docker run --rm -it -v "$(pwd)":/work -w /work kget-dev bash
+
+# Windows PowerShell
+docker run --rm -it -v ${PWD}:/work -w /work kget-dev powershell
+```
+
+Comandos comuns sem entrar no container:
+
+```bash
+# Build
+docker run --rm -v "$(pwd)":/work -w /work kget-dev cargo build
+
+# Rodar testes
+docker run --rm -v "$(pwd)":/work -w /work kget-dev cargo test
+
+# Executar o exemplo que demonstra uso como biblioteca
+docker run --rm -v "$(pwd)":/work -w /work kget-dev cargo run --example lib_usage
+```
+
+Usando `docker-compose`:
+
+```bash
+docker-compose up --build
+```
+
+Observações e dicas
+
+- A imagem de desenvolvimento foca em fluxo CLI, CI e testes. Executar a GUI dentro de um container exige X11/Wayland ou encaminhamento específico da plataforma (não ativado por padrão).
+- Para experimentar a GUI a partir de um container no Linux, encaminhe o X11 e construa/executar com a feature `gui`:
+
+```bash
+# Construir a imagem com GUI (opcional)
+docker build -t kget-gui .
+
+# Executar com encaminhamento X11 (exemplo Linux)
+docker run --rm -it \
+    -e DISPLAY=$DISPLAY \
+    -v /tmp/.X11-unix:/tmp/.X11-unix \
+    -v "$(pwd)":/work -w /work kget-gui cargo run --features gui -- --gui
+```
+
+- O mount de volume (`-v "$(pwd)":/work`) permite editar arquivos no host e compilar/testar no container, mantendo consistência com CI e outros contribuintes.
+
 ## Guias de Estilo
 
 ### Mensagens de Commit do Git

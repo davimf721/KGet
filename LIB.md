@@ -2,15 +2,30 @@
 
 KGet can be used as a Rust library in your own projects to add powerful download capabilities (HTTP, HTTPS, FTP, SFTP, torrents, progress, proxy, etc).
 
-[English](README.md) | [Português](translations/LIB.pt-BR.md) | [Español](translations/LIB.es.md)
+[English](README.md) | [Português](translations/LIB.pt-br.md) | [Español](translations/LIB.es.md)
 
 ## Add to Your `Cargo.toml`
 
+Without GUI (recommended for servers/CI/minimal builds):
+
 ```toml
 [dependencies]
-kget = "1.5.0"
+kget = "1.5.1"
 ```
 
+With GUI enabled (this pulls in optional GUI dependencies):
+
+```toml
+[dependencies]
+kget = { version = "1.5.1", features = ["gui"] }
+```
+
+For local development (when working inside the repository), use a path dependency:
+
+```toml
+[dependencies]
+kget = { path = "." }
+```
 ## Basic Usage
 
 ```rust
@@ -26,6 +41,47 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Ok(())
 }
 ```
+
+## Convenience top-level functions
+
+The crate also exposes simple top-level functions so you can call them
+directly without creating a `KGet` instance:
+
+- `kget::download(url, output_path, quiet_mode)` — regular HTTP/HTTPS/FTP/SFTP download.
+- `kget::advanced_download(url, output_path, quiet_mode)` — parallel/resumable download.
+
+Example using the top-level `download` function:
+
+```rust
+fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    kget::download("https://example.com/file.txt", Some("file.txt"), false)?;
+    Ok(())
+}
+```
+
+## Progress bar API
+
+If you want to render a progress bar yourself (e.g., integrate with your own UI),
+the crate exposes a progress bar factory:
+
+```rust
+let bar = kget::create_progress_bar_factory(false, "Downloading".to_string(), Some(1024u64), false);
+// use `bar` as an `indicatif::ProgressBar`
+```
+
+The `examples/lib_usage.rs` file demonstrates a minimal usage scenario.
+
+## GUI feature (optional)
+
+The GUI is optional and provided behind a Cargo feature. Build or run with the GUI enabled using:
+
+```bash
+cargo build --features gui
+cargo run --features gui -- --gui
+```
+
+When the `gui` feature is disabled the crate and binary compile without GUI-related dependencies.
+
 
 ## Advanced Download (Parallel Chunks, Resume)
 

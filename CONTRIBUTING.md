@@ -56,6 +56,60 @@ If you have a suggestion for the project, we'd love to hear about it! Just follo
 9. Push to the branch: `git push origin feature/my-new-feature`
 10. Submit a pull request
 
+## Development with Docker (recommended for contributors)
+
+We provide a `Dockerfile` and `docker-compose.yml` to make development reproducible across machines. The container contains the Rust toolchain and common development tools so contributors can build, test and run examples without installing dependencies on the host.
+
+Basic workflow
+
+```bash
+# Build the dev image
+docker build -t kget-dev .
+
+# Start an interactive shell bound to the repository (Linux/macOS)
+docker run --rm -it -v "$(pwd)":/work -w /work kget-dev bash
+
+# Windows PowerShell
+docker run --rm -it -v ${PWD}:/work -w /work kget-dev powershell
+```
+
+Run common commands without entering the container shell:
+
+```bash
+# Build
+docker run --rm -v "$(pwd)":/work -w /work kget-dev cargo build
+
+# Run tests
+docker run --rm -v "$(pwd)":/work -w /work kget-dev cargo test
+
+# Run the example that demonstrates library usage
+docker run --rm -v "$(pwd)":/work -w /work kget-dev cargo run --example lib_usage
+```
+
+Using docker-compose
+
+```bash
+docker-compose up --build
+```
+
+Notes & tips
+
+- The development image is aimed at CLI development, CI and testing. Running the GUI inside a container requires X11/Wayland or OS-specific GUI forwarding (not enabled by default).
+- If you want to try the GUI from a container on Linux, forward X11 and build/run with the `gui` feature:
+
+```bash
+# Build image (optional: add feature build-arg if your Dockerfile supports it)
+docker build -t kget-gui .
+
+# Run with X11 forwarding (Linux)
+docker run --rm -it \
+    -e DISPLAY=$DISPLAY \
+    -v /tmp/.X11-unix:/tmp/.X11-unix \
+    -v "$(pwd)":/work -w /work kget-gui cargo run --features gui -- --gui
+```
+
+- Volume mount (`-v "$(pwd)":/work`) lets you edit files on the host and build/test inside the container so CI and contributors see consistent results.
+
 ## Styleguides
 
 ### Git Commit Messages

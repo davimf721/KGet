@@ -2,21 +2,7 @@ use eframe::egui;
 use std::sync::mpsc;
 use std::path::PathBuf;
 use rfd::FileDialog;
-
-// Command sent from the GUI to the worker thread
-pub enum DownloadCommand {
-    Start(String, String), // url, output_path
-    Cancel,
-}
-
-// Message sent from the worker thread back to the GUI
-#[derive(Debug)]
-pub enum WorkerToGuiMessage {
-    Progress(f32),          // Progress value from 0.0 to 1.0
-    StatusUpdate(String),   // General status message
-    Completed(String),      // Successful completion message
-    Error(String),          // Error message
-}
+use crate::gui_types::{DownloadCommand, WorkerToGuiMessage};
 
 pub struct KGetGui {
     url: String,

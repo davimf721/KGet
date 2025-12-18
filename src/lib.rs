@@ -13,6 +13,7 @@ mod optimization;
 mod ftp;
 mod sftp;
 mod torrent;
+mod gui_types;
 
 // Re-export public API
 pub use crate::config::{Config, ProxyConfig, ProxyType, OptimizationConfig, TorrentConfig, FtpConfig, SftpConfig};
@@ -172,4 +173,36 @@ pub mod simple {
             options.quiet_mode
         )
     }
+}
+
+/// Convenience top-level API so other crates can call downloads without
+/// instantiating `KGet` themselves.
+pub fn download(
+    url: &str,
+    output_path: Option<&str>,
+    quiet_mode: bool,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let client = KGet::new()?;
+    client.download(url, output_path.map(|s| s.to_string()), quiet_mode)
+}
+
+/// Convenience top-level API for advanced (parallel/resumable) downloads.
+pub fn advanced_download(
+    url: &str,
+    output_path: Option<&str>,
+    quiet_mode: bool,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let client = KGet::new()?;
+    client.advanced_download(url, output_path.map(|s| s.to_string()), quiet_mode)
+}
+
+/// Expose progress bar factory for consumers who want to render their own bars.
+/// This simply forwards to `create_progress_bar` defined in `progress.rs`.
+pub fn create_progress_bar_factory(
+    quiet_mode: bool,
+    msg: String,
+    length: Option<u64>,
+    is_parallel: bool,
+) -> indicatif::ProgressBar {
+    create_progress_bar(quiet_mode, msg, length, is_parallel)
 }
