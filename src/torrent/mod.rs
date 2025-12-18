@@ -10,6 +10,7 @@ use crate::config::ProxyConfig;
 use crate::optimization::Optimizer;
 use crate::progress::create_progress_bar;
 use crate::utils::print;
+#[cfg(feature = "gui")]
 use opener;
 
 pub struct TorrentDownloader {
@@ -101,14 +102,20 @@ impl TorrentDownloader {
             }
         };
 
-        // Abrir a interface web do Transmission
+        // Abrir a interface web do Transmission (somente se o feature `gui` estiver presente)
         if !self.quiet {
             let transmission_web_url = "http://localhost:9091/transmission/web/";
             print(&format!("\nStarting the Download!\n"), self.quiet);
             print(&format!("\nOpening Transmission web UI: {}\n", transmission_web_url), self.quiet);
+            #[cfg(feature = "gui")]
             if let Err(e) = opener::open(transmission_web_url) {
                 print(&format!("Warning: Could not open web browser: {}", e), self.quiet);
                 // Não retornar um erro aqui, pois o download pode prosseguir
+            }
+            #[cfg(not(feature = "gui"))]
+            {
+                // Quando compilado sem GUI, apenas informe a URL ao usuário.
+                print("GUI feature disabled; abra a URL manualmente se quiser gerenciar o download.", self.quiet);
             }
         }
 
