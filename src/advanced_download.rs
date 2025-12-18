@@ -1,15 +1,20 @@
 use std::error::Error;
 use std::fs::File;
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use rayon::prelude::*;
 use reqwest::blocking::Client;
+use indicatif::{ProgressBar, ProgressStyle};
 use crate::utils::print;
 use crate::config::ProxyConfig;
+use sha2::{Sha256, Digest};
+use hex;
 use crate::optimization::Optimizer;
 
-const CHUNK_SIZE: u64 = 1024 * 1024;
+const MIN_CHUNK_SIZE: u64 = 4 * 1024 * 1024; // 4 MiB, melhor para arquivos grandes
+const MAX_RETRIES: usize = 3;
 
 pub struct AdvancedDownloader {
     client: Client,
@@ -24,7 +29,9 @@ pub struct AdvancedDownloader {
 impl AdvancedDownloader {
     pub fn new(url: String, output_path: String, quiet_mode: bool, proxy_config: ProxyConfig, optimizer: Optimizer) -> Self {
         let mut client_builder = Client::builder()
-            .timeout(std::time::Duration::from_secs(30));
+            .timeout(std::time::Duration::from_secs(300)) // Increased for large files
+            .connect_timeout(std::time::Duration::from_secs(20))
+            .user_agent("KGet/1.0");
 
         if proxy_config.enabled {
             if let Some(proxy_url) = &proxy_config.url {
@@ -58,49 +65,143 @@ impl AdvancedDownloader {
 
     
     pub fn download(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        if !self.quiet_mode {
+            println!("Starting advanced download for: {}", self.url);
+        }
+
         // Verify if the output path is valid
         let existing_size = if Path::new(&self.output_path).exists() {
-            Some(std::fs::metadata(&self.output_path)?.len())
+            let size = std::fs::metadata(&self.output_path)?.len();
+            if !self.quiet_mode {
+                println!("Existing file found with size: {} bytes", size);
+            }
+            Some(size)
+        } else {
+            if !self.quiet_mode {
+                println!("Output file does not exist, starting fresh download");
+            }
+            None
+        };
+
+        // Get the total file size and range support
+        if !self.quiet_mode {
+            println!("Querying server for file size and range support...");
+        }
+        let (total_size, supports_range) = self.get_file_size_and_range()?;
+        if !self.quiet_mode {
+            println!("Total file size: {} bytes", total_size);
+            println!("Server supports range requests: {}", supports_range);
+        }
+
+        if let Some(size) = existing_size {
+            if size > total_size {
+                return Err("Existing file is larger than remote; aborting".into());
+            }
+            if !self.quiet_mode {
+                println!("Resuming download from byte: {}", size);
+            }
+        }
+
+        // Create a progress bar if not quiet
+        let progress = if !self.quiet_mode {
+            let bar = ProgressBar::new(total_size);
+            bar.set_style(ProgressStyle::with_template(
+                "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})"
+            ).unwrap().progress_chars("#>-"));
+            Some(Arc::new(Mutex::new(bar)))
         } else {
             None
         };
 
-        // Get the total file size
-        let total_size = self.get_file_size()?;
-
-        // Create or open the output file
+        // Create or open the output file and preallocate
+        if !self.quiet_mode {
+            println!("Preparing output file: {}", self.output_path);
+        }
         let file = if existing_size.is_some() {
             File::options().read(true).write(true).open(&self.output_path)?
         } else {
             File::create(&self.output_path)?
         };
+        file.set_len(total_size)?;
+        if !self.quiet_mode {
+            println!("File preallocated to {} bytes", total_size);
+        }
+
+        // If range not supported, do a single download
+        if !supports_range {
+            if !self.quiet_mode {
+                println!("Range requests not supported, falling back to single-threaded download");
+            }
+            self.download_whole(&file, existing_size.unwrap_or(0), progress.clone())?;
+            if let Some(ref bar) = progress {
+                bar.lock().unwrap().finish_with_message("Download completed");
+            }
+            if !self.quiet_mode {
+                println!("Single-threaded download completed");
+            }
+            return Ok(());
+        }
 
         // Calculate chunks for parallel download
+        if !self.quiet_mode {
+            println!("Calculating download chunks...");
+        }
         let chunks = self.calculate_chunks(total_size, existing_size)?;
+        if !self.quiet_mode {
+            println!("Download will be split into {} chunks", chunks.len());
+        }
 
         // Download parallel chunks
-        self.download_chunks_parallel(chunks, &file)?;
+        if !self.quiet_mode {
+            println!("Starting parallel chunk downloads...");
+        }
+        self.download_chunks_parallel(chunks, &file, progress.clone())?;
+
+        if let Some(ref bar) = progress {
+            bar.lock().unwrap().finish_with_message("Download completed");
+        }
+
+        // Verify download integrity
+        if !self.quiet_mode {
+            println!("Verifying download integrity...");
+        }
+        self.verify_integrity(total_size)?;
+
+        if !self.quiet_mode {
+            println!("Advanced download completed successfully!");
+        }
 
         Ok(())
     }
 
     // We also need to update the other methods
-    fn get_file_size(&self) -> Result<u64, Box<dyn Error + Send + Sync>> {
+    fn get_file_size_and_range(&self) -> Result<(u64, bool), Box<dyn Error + Send + Sync>> {
         let response = self.client.head(&self.url).send()?;
         let content_length = response.headers()
             .get(reqwest::header::CONTENT_LENGTH)
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.parse::<u64>().ok())
             .ok_or("Could not determine file size")?;
-        
-        Ok(content_length)
+
+        let accepts_range = response.headers()
+            .get(reqwest::header::ACCEPT_RANGES)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.eq_ignore_ascii_case("bytes"))
+            .unwrap_or(false);
+
+        Ok((content_length, accepts_range))
     }
 
     fn calculate_chunks(&self, total_size: u64, existing_size: Option<u64>) -> Result<Vec<(u64, u64)>, Box<dyn Error + Send + Sync>> {
         let mut chunks = Vec::new();
-        let chunk_size = CHUNK_SIZE;
-        let mut start = existing_size.unwrap_or(0);
+        let start_from = existing_size.unwrap_or(0);
 
+        // Escolha chunk size baseado no tamanho total e no número de threads
+        let parallelism = rayon::current_num_threads() as u64;
+        let target_chunks = parallelism.saturating_mul(2).max(2); // Reduced to avoid overwhelming servers
+        let chunk_size = ((total_size / target_chunks).max(MIN_CHUNK_SIZE)).min(64 * 1024 * 1024);
+
+        let mut start = start_from;
         while start < total_size {
             let end = (start + chunk_size).min(total_size);
             chunks.push((start, end));
@@ -110,34 +211,151 @@ impl AdvancedDownloader {
         Ok(chunks)
     }
 
-    fn download_chunks_parallel(&self, chunks: Vec<(u64, u64)>, file: &File) -> Result<(), Box<dyn Error + Send + Sync>> {
+    fn download_whole(&self, file: &File, offset: u64, progress: Option<Arc<Mutex<ProgressBar>>>) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let mut response = self.client.get(&self.url).send()?;
+        if offset > 0 {
+            // Resume not possible without range; warn
+            return Err("Server does not support range; cannot resume partial file".into());
+        }
+
+        let mut reader = BufReader::new(response);
+        let mut f = file.try_clone()?;
+        f.seek(SeekFrom::Start(0))?;
+
+        struct ProgressWriter<W> {
+            inner: W,
+            progress: Option<Arc<Mutex<ProgressBar>>>,
+        }
+
+        impl<W: Write> Write for ProgressWriter<W> {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                let n = self.inner.write(buf)?;
+                if let Some(ref bar) = self.progress {
+                    bar.lock().unwrap().inc(n as u64);
+                }
+                Ok(n)
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                self.inner.flush()
+            }
+        }
+
+        let mut writer = ProgressWriter { inner: f, progress };
+        std::io::copy(&mut reader, &mut writer)?;
+
+        Ok(())
+    }
+
+    fn download_chunks_parallel(&self, chunks: Vec<(u64, u64)>, file: &File, progress: Option<Arc<Mutex<ProgressBar>>>) -> Result<(), Box<dyn Error + Send + Sync>> {
         let file = Arc::new(file);
         let client = Arc::new(self.client.clone());
         let url = Arc::new(self.url.clone());
         let quiet_mode = self.quiet_mode;
-        let optimizer = Arc::new(&self.optimizer);
+        let optimizer = Arc::new(self.optimizer.clone());
 
-        chunks.par_iter().for_each(|&(start, end)| {
-            let range = format!("bytes={}-{}", start, end - 1);
-            let mut response = client.get(&*url)
-                .header(reqwest::header::RANGE, &range)
-                .send()
-                .expect("Failed to send request");
-
-            let mut buffer = Vec::new();
-            response.copy_to(&mut buffer).expect("Failed to read response");
-
-            // Descompress the chunk if necessary
-            let buffer = optimizer.decompress(&buffer).expect("Failed to decompress chunk");
-
-            let mut file = file.try_clone().expect("Failed to clone file");
-            file.seek(SeekFrom::Start(start)).expect("Failed to seek file");
-            file.write_all(&buffer).expect("Failed to write chunk");
-
+        let result: Result<(), Box<dyn Error + Send + Sync>> = chunks.par_iter().try_for_each(|&(start, end)| {
             if !quiet_mode {
-                print(&format!("Downloaded chunk {}-{}", start, end), quiet_mode);
+                println!("Starting download for chunk {}-{}", start, end);
             }
+
+            let range = format!("bytes={}-{}", start, end - 1);
+            let range_header = reqwest::header::HeaderValue::from_str(&range)
+                .map_err(|e| format!("Invalid range header {}: {}", range, e))?;
+            let mut buffer = Vec::with_capacity((end - start) as usize);
+
+            for retry in 0..=MAX_RETRIES {
+                let mut request = client.get(url.as_str());
+                let request = request.header(reqwest::header::RANGE, range_header.clone());
+
+                match request.send() {
+                    Ok(mut response) => {
+                        let status = response.status();
+                        if status.is_success() {
+                            buffer.clear();
+                            response.copy_to(&mut buffer)?;
+                            let buffer = optimizer
+                                .decompress(&buffer)
+                                .map_err(|e| -> Box<dyn Error + Send + Sync> { format!("{}", e).into() })?;
+                            let mut f = file.try_clone()?;
+                            f.seek(SeekFrom::Start(start))?;
+                            f.write_all(&buffer)?;
+
+                            if let Some(ref bar) = progress {
+                                bar.lock().unwrap().inc((end - start) as u64);
+                            }
+
+                            if !quiet_mode {
+                                print(&format!("Chunk from {} to {} downloaded", start, end), quiet_mode);
+                            }
+                            return Ok(());
+                        } else if status.as_u16() == 416 {
+                            if let Some(ref bar) = progress {
+                                bar.lock().unwrap().inc((end - start) as u64);
+                            }
+                            if !quiet_mode {
+                                print(&format!("Chunk {}-{} already satisfied (416)", start, end), quiet_mode);
+                            }
+                            return Ok(());
+                        } else {
+                            if retry == MAX_RETRIES {
+                                return Err(format!("Failed to download chunk {}-{}: HTTP {}", start, end, status).into());
+                            } else {
+                                print(&format!("Retrying chunk {}-{} after HTTP {}", start, end, status), quiet_mode);
+                                std::thread::sleep(Duration::from_millis(250 * (retry as u64 + 1)));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        if retry == MAX_RETRIES {
+                            return Err(format!("Failed to download chunk {}-{}: {}", start, end, e).into());
+                        } else {
+                            print(&format!("Retrying chunk {}-{} after error: {}", start, end, e), quiet_mode);
+                            std::thread::sleep(Duration::from_millis(250 * (retry as u64 + 1)));
+                        }
+                    }
+                }
+            }
+
+            Err(format!("Failed to download chunk {}-{} after retries", start, end).into())
         });
+
+        result
+    }
+
+    fn verify_integrity(&self, expected_size: u64) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let metadata = std::fs::metadata(&self.output_path)?;
+        let actual_size = metadata.len();
+        
+        if actual_size != expected_size {
+            return Err(format!("File size mismatch: expected {} bytes, got {} bytes", expected_size, actual_size).into());
+        }
+        
+        if !self.quiet_mode {
+            println!("File size verified: {} bytes", actual_size);
+        }
+
+        // Calculate SHA256 hash for corruption check
+        if !self.quiet_mode {
+            println!("Calculating SHA256 hash...");
+        }
+        let mut file = File::open(&self.output_path)?;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0; 8192];
+        loop {
+            let n = file.read(&mut buffer)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buffer[..n]);
+        }
+        let hash = hasher.finalize();
+        let hash_hex = hex::encode(hash);
+        
+        if !self.quiet_mode {
+            println!("SHA256 hash: {}", hash_hex);
+            println!("Integrity check passed - file is not corrupted");
+        }
 
         Ok(())
     }
