@@ -1,4 +1,4 @@
-# KelpsGet now is KGet!  v1.5.1 (Latest Release)
+# KelpsGet now is KGet!  v1.5.2 (Latest Release)
 
 A modern, lightweight, and versatile downloader written in Rust for fast and reliable file downloads via command line (CLI) and graphical user interface (GUI).
 
@@ -25,11 +25,13 @@ A modern, lightweight, and versatile downloader written in Rust for fast and rel
 3.  **Error Handling:** Exits with code 1 on HTTP errors (e.g., 404).
 4.  **Space Check:** Verifies available disk space.
 5.  **Automatic Retry:** Retries download on network failure.
-6.  **Advanced Download Mode (HTTP/HTTPS):** Downloads in parallel chunks, supports resume.
-7.  **Proxy Support:** HTTP, HTTPS, SOCKS5 with authentication.
-8.  **Optimization Features:** Compression (for cache), file caching, speed limiting.
-9.  **Torrent Downloads:** Adds magnet links to `transmission-daemon` for download.
-10. **FTP/SFTP Downloads:** Connects to FTP/SFTP servers to transfer files.
+6.  **ISO Smart Detection:** Detects `.iso` files to ensure raw binary transfer and prevent corruption.
+7.  **Integrity Check:** Optional SHA256 verification for disk images after download.
+8.  **Advanced Download Mode (HTTP/HTTPS):** Downloads in parallel chunks, supports resume.
+9. **Proxy Support:** HTTP, HTTPS, SOCKS5 with authentication.
+10. **Optimization Features:** Compression (for cache), file caching, speed limiting.
+11. **Torrent Downloads:** Adds magnet links to `transmission-daemon` for download.
+12. **FTP/SFTP Downloads:** Connects to FTP/SFTP servers to transfer files.
 
 ## Features
 
@@ -213,6 +215,8 @@ kget [OPTIONS] <URL>
     ```bash
     kget -a https://example.com/large_file.zip
     ```
+    *   **ISO Download with Verification:**
+        KGet will automatically detect the ISO and ask if you want to verify the SHA256 hash once finished.
 *   **Use Proxy:**
     ```bash
     kget -p http://proxy:8080 https://example.com/file.txt

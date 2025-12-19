@@ -7,6 +7,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.2] - 2025-12-19
+
+### Added
+- **ISO Smart Handling**: Automatic detection of `.iso` files via URL and MIME type.
+- **Corruption Prevention**: ISO files now bypass decompression/optimization layers to ensure binary 1:1 integrity.
+- **Integrity Verification**: Added optional SHA256 checksum calculation at the end of ISO downloads.
+
+### Fixed
+- Fixed Rust compiler error `E0382` regarding `Mime` type ownership in `download.rs`.
+- Improved parallel chunk writing safety for binary-heavy files.
+
 ## [1.5.1] - 2025-12-18
 
 ### Added

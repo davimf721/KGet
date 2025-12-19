@@ -1,6 +1,6 @@
 use std::error::Error;
 use std::fs::File;
-use std::io::{BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, Read, Seek, SeekFrom, Write, BufWriter};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -172,15 +172,23 @@ impl AdvancedDownloader {
         // Verify download integrity
         if !self.quiet_mode {
             if is_iso {
-                println!("\nISO download finished. Recommended: Verify integrity.");
+                println!("\nThis is an ISO file. Would you like to verify its integrity? (y/N)");
+                let mut input = String::new();
+                if std::io::stdin().read_line(&mut input).is_ok() && input.trim().to_lowercase() == "y" {
+                    self.verify_integrity(total_size)?;
+                }
+            } else {
+                let metadata = std::fs::metadata(&self.output_path)?;
+                if metadata.len() != total_size {
+                    return Err(format!("File size mismatch: expected {} bytes, got {} bytes", total_size, metadata.len()).into());
+                }
             }
-            self.verify_integrity(total_size)?;
+            println!("Advanced download completed successfully!");
         }
 
         Ok(())
     }
 
-    // We also need to update the other methods
     fn get_file_size_and_range(&self) -> Result<(u64, bool), Box<dyn Error + Send + Sync>> {
         let response = self.client.head(&self.url).send()?;
         let content_length = response.headers()
@@ -257,18 +265,12 @@ impl AdvancedDownloader {
         let file = Arc::new(file);
         let client = Arc::new(self.client.clone());
         let url = Arc::new(self.url.clone());
-        let quiet_mode = self.quiet_mode;
         let optimizer = Arc::new(self.optimizer.clone());
 
-        let result: Result<(), Box<dyn Error + Send + Sync>> = chunks.par_iter().try_for_each(|&(start, end)| {
-            if !quiet_mode {
-                println!("Starting download for chunk {}-{}", start, end);
-            }
-
+        chunks.par_iter().try_for_each(|&(start, end)| {
             let range = format!("bytes={}-{}", start, end - 1);
             let range_header = reqwest::header::HeaderValue::from_str(&range)
                 .map_err(|e| format!("Invalid range header {}: {}", range, e))?;
-            let mut buffer = Vec::with_capacity((end - start) as usize);
 
             for retry in 0..=MAX_RETRIES {
                 let mut request = client.get(url.as_str());
@@ -278,65 +280,55 @@ impl AdvancedDownloader {
                     Ok(mut response) => {
                         let status = response.status();
                         if status.is_success() {
-                            buffer.clear();
-                            response.copy_to(&mut buffer)?;
+                            let f = file.try_clone()?;
+                            // Usamos BufWriter com um tamanho estratégico (2MB)
+                            // Isso agrupa as escritas e evita o uso de 100% do disco
+                            let mut writer = BufWriter::with_capacity(2 * 1024 * 1024, f);
+                            writer.seek(SeekFrom::Start(start))?;
                             
-                            // Apenas descomprime se NÃO for ISO
-                            let final_data = if self.url.to_lowercase().ends_with(".iso") {
-                                buffer.clone()
-                            } else {
-                                optimizer.decompress(&buffer)
-                                    .map_err(|e| -> Box<dyn Error + Send + Sync> { format!("{}", e).into() })?
-                            };
-
-                            let mut f = file.try_clone()?;
-                            f.seek(SeekFrom::Start(start))?;
-                            f.write_all(&final_data)?;
-
-                            if let Some(ref bar) = progress {
-                                bar.lock().unwrap().inc((end - start) as u64);
+                            let mut current_pos = start;
+                            let mut buffer = [0u8; 16384]; 
+                            
+                            while current_pos < end {
+                                let limit = (end - current_pos).min(buffer.len() as u64);
+                                let n = response.read(&mut buffer[..limit as usize])?;
+                                if n == 0 { break; }
+                                
+                                // Escreve no BufWriter (RAM rápida)
+                                writer.write_all(&buffer[..n])?;
+                                current_pos += n as u64;
+                            
+                                if let Some(ref bar) = progress {
+                                    bar.lock().unwrap().inc(n as u64);
+                                }
                             }
+                            // Força o flush do buffer de 2MB para o disco de uma vez só
+                            writer.flush()?;
 
-                            if !quiet_mode {
-                                print(&format!("Chunk from {} to {} downloaded", start, end), quiet_mode);
-                            }
-                            return Ok(());
+                            return Ok::<(), Box<dyn Error + Send + Sync>>(());
                         } else if status.as_u16() == 416 {
-                            if let Some(ref bar) = progress {
-                                bar.lock().unwrap().inc((end - start) as u64);
-                            }
-                            if !quiet_mode {
-                                print(&format!("Chunk {}-{} already satisfied (416)", start, end), quiet_mode);
-                            }
-                            return Ok(());
-                        } else {
                             if retry == MAX_RETRIES {
                                 return Err(format!("Failed to download chunk {}-{}: HTTP {}", start, end, status).into());
-                            } else {
-                                print(&format!("Retrying chunk {}-{} after HTTP {}", start, end, status), quiet_mode);
-                                std::thread::sleep(Duration::from_millis(250 * (retry as u64 + 1)));
                             }
+                            std::thread::sleep(Duration::from_millis(250 * (retry as u64 + 1)));
                         }
                     }
                     Err(e) => {
                         if retry == MAX_RETRIES {
                             return Err(format!("Failed to download chunk {}-{}: {}", start, end, e).into());
-                        } else {
-                            print(&format!("Retrying chunk {}-{} after error: {}", start, end, e), quiet_mode);
-                            std::thread::sleep(Duration::from_millis(250 * (retry as u64 + 1)));
                         }
+                        std::thread::sleep(Duration::from_millis(250 * (retry as u64 + 1)));
                     }
                 }
             }
-
             Err(format!("Failed to download chunk {}-{} after retries", start, end).into())
-        });
+        })?;
 
-        result
+        Ok(())
     }
 
-    fn verify_integrity(&self, expected_size: u64) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let metadata = std::fs::metadata(&self.output_path)?;
+        fn verify_integrity(&self, expected_size: u64) -> Result<(), Box<dyn Error + Send + Sync>> {
+            let metadata = std::fs::metadata(&self.output_path)?;
         let actual_size = metadata.len();
         
         if actual_size != expected_size {
