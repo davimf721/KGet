@@ -9,6 +9,7 @@ use humansize::{format_size, DECIMAL};
 use mime::Mime;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use sha2::Digest;
 use crate::config::ProxyConfig;
 use crate::optimization::Optimizer;
 
@@ -114,8 +115,15 @@ pub fn download(
         print("Length: unknown", quiet_mode);
     }
 
-    if let Some(ct) = content_type {
+    if let Some(ref ct) = content_type {
         print(&format!("Type: {}", ct), quiet_mode);
+    }
+
+    let is_iso = target.to_lowercase().ends_with(".iso") 
+        || content_type.as_ref().map_or(false, |ct| ct.essence_str() == "application/x-iso9001" || ct.essence_str() == "application/x-cd-image");
+
+    if is_iso {
+        print("ISO file detected. Ensuring raw download to prevent corruption...", quiet_mode);
     }
 
     let mut tentative_path: PathBuf;
@@ -192,6 +200,33 @@ pub fn download(
     buffered_reader.read_to_end(&mut buffer)?;
     
         dest.write_all(&buffer)?;
-        progress.finish_with_message("Download completed\n Thanks for using KGet!\n");
+        progress.finish_with_message("Download completed\n");
+
+        if is_iso && !quiet_mode {
+            println!("\nThis is an ISO file. Would you like to verify its integrity? (y/N)");
+            let mut input = String::new();
+            if std::io::stdin().read_line(&mut input).is_ok() && input.trim().to_lowercase() == "y" {
+                verify_iso_integrity(&final_path)?;
+            }
+        }
+
+        print("Thanks for using KGet!", quiet_mode);
         Ok(())
     }
+
+fn verify_iso_integrity(path: &Path) -> Result<(), Box<dyn Error + Send + Sync>> {
+    println!("Calculating SHA256 hash... (this may take a while for large ISOs)");
+    let mut file = File::open(path)?;
+    let mut hasher = sha2::Sha256::new();
+    let mut buffer = [0; 8192];
+    loop {
+        let n = file.read(&mut buffer)?;
+        if n == 0 { break; }
+        hasher.update(&buffer[..n]);
+    }
+    let hash = hex::encode(hasher.finalize());
+    println!("Integrity check finished.");
+    println!("SHA256: {}", hash);
+    println!("You can compare this hash with the one provided by the source.");
+    Ok(())
+}

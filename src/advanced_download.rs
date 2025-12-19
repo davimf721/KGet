@@ -28,10 +28,14 @@ pub struct AdvancedDownloader {
 
 impl AdvancedDownloader {
     pub fn new(url: String, output_path: String, quiet_mode: bool, proxy_config: ProxyConfig, optimizer: Optimizer) -> Self {
+        let is_iso = url.to_lowercase().ends_with(".iso");
+        
         let mut client_builder = Client::builder()
-            .timeout(std::time::Duration::from_secs(300)) // Increased for large files
+            .timeout(std::time::Duration::from_secs(300))
             .connect_timeout(std::time::Duration::from_secs(20))
-            .user_agent("KGet/1.0");
+            .user_agent("KGet/1.0")
+            .no_gzip() // Crucial para ISOs: não tentar descompressão automática
+            .no_deflate();
 
         if proxy_config.enabled {
             if let Some(proxy_url) = &proxy_config.url {
@@ -63,10 +67,14 @@ impl AdvancedDownloader {
         }
     }
 
-    
+
     pub fn download(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let is_iso = self.url.to_lowercase().ends_with(".iso");
         if !self.quiet_mode {
             println!("Starting advanced download for: {}", self.url);
+            if is_iso {
+                println!("Warning: ISO mode active. Disabling optimizations that could corrupt binary data.");
+            }
         }
 
         // Verify if the output path is valid
@@ -163,12 +171,10 @@ impl AdvancedDownloader {
 
         // Verify download integrity
         if !self.quiet_mode {
-            println!("Verifying download integrity...");
-        }
-        self.verify_integrity(total_size)?;
-
-        if !self.quiet_mode {
-            println!("Advanced download completed successfully!");
+            if is_iso {
+                println!("\nISO download finished. Recommended: Verify integrity.");
+            }
+            self.verify_integrity(total_size)?;
         }
 
         Ok(())
@@ -274,12 +280,18 @@ impl AdvancedDownloader {
                         if status.is_success() {
                             buffer.clear();
                             response.copy_to(&mut buffer)?;
-                            let buffer = optimizer
-                                .decompress(&buffer)
-                                .map_err(|e| -> Box<dyn Error + Send + Sync> { format!("{}", e).into() })?;
+                            
+                            // Apenas descomprime se NÃO for ISO
+                            let final_data = if self.url.to_lowercase().ends_with(".iso") {
+                                buffer.clone()
+                            } else {
+                                optimizer.decompress(&buffer)
+                                    .map_err(|e| -> Box<dyn Error + Send + Sync> { format!("{}", e).into() })?
+                            };
+
                             let mut f = file.try_clone()?;
                             f.seek(SeekFrom::Start(start))?;
-                            f.write_all(&buffer)?;
+                            f.write_all(&final_data)?;
 
                             if let Some(ref bar) = progress {
                                 bar.lock().unwrap().inc((end - start) as u64);
