@@ -5,7 +5,12 @@ use std::fmt;
 /// Command sent from the GUI to the worker thread
 #[derive(Debug, Clone)]
 pub enum DownloadCommand {
-    Start(String, String), // url, output_path
+    Start {
+        url: String,
+        output_path: String,
+        is_advanced: bool,
+        verify_iso: bool,
+    },
     Cancel,
 }
 

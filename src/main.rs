@@ -1,19 +1,47 @@
-use clap::Parser;
-use clap::CommandFactory;
+// #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+// Silencia warnings chatos para focar no que importa
+#![allow(unused_imports)]
+#![allow(unused_variables)]
+#![allow(dead_code)]
+
+use clap::{Parser, CommandFactory};
 use std::error::Error;
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver as MpscReceiver, Sender as MpscSender};
 use std::thread;
 use std::time::Duration;
 
+// Módulos locais
+mod download;
+mod progress;
+mod utils;
+mod advanced_download;
+mod config;
+mod optimization;
+mod ftp;
+mod gui_types;
+mod sftp;
+mod torrent;
+mod interactive;
+
+#[cfg(feature = "gui")]
+mod gui;
+
+// Imports do Crate
 use crate::download::download as cli_download;
 use crate::advanced_download::AdvancedDownloader;
 use crate::config::Config;
 use crate::optimization::Optimizer;
-#[cfg(feature = "gui")] use crate::gui::KGetGui;
+#[cfg(feature = "gui")]
+use crate::gui::KGetGui;
 use crate::gui_types::{DownloadCommand, WorkerToGuiMessage};
 pub use crate::ftp::FtpDownloader;
 pub use crate::sftp::SftpDownloader;
 pub use crate::torrent::TorrentDownloader;
+
+// Importante: Usando tipos da Lib para compatibilidade
+use kget::{DownloadOptions, verify_iso_integrity};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -58,10 +86,6 @@ struct Args {
     #[arg(short = 'l', long = "limit")]
     speed_limit: Option<u64>,
 
-    // /// Disable compression
-    // #[arg(long = "no-compress")]
-    // no_compress: bool,
-
     /// Disable cache
     #[arg(long = "no-cache")]
     no_cache: bool,
@@ -90,7 +114,7 @@ struct Args {
     #[arg(long = "ftp")]
     ftp: bool,
 
-    /// Use SFTP download  
+    /// Use SFTP download
     #[arg(long = "sftp")]
     sftp: bool,
 
@@ -99,93 +123,49 @@ struct Args {
     interactive: bool,
 }
 
-mod download;
-mod progress;
-mod utils;
-mod advanced_download;
-mod config;
-mod optimization;
-mod ftp;
-mod gui_types;
-#[cfg(feature = "gui")]
-mod gui;
-mod sftp;
-mod torrent;
-mod interactive;
-
 fn download_worker(
     config: Config,
     download_rx: MpscReceiver<DownloadCommand>,
     status_tx: MpscSender<WorkerToGuiMessage>,
-    runtime: tokio::runtime::Runtime,
+    _runtime: tokio::runtime::Runtime,
 ) {
     for command in download_rx {
         match command {
-            DownloadCommand::Start(url, output_path) => {
-                let _ = status_tx.send(WorkerToGuiMessage::StatusUpdate(format!(
-                    "Preparing download: {} to {}",
-                    url, output_path
-                )));
-                
-                let optimizer_clone = Optimizer::new(config.optimization.clone());
-                let proxy_clone = config.proxy.clone();
+            DownloadCommand::Start { url, output_path, is_advanced, verify_iso } => {
+                let _ = status_tx.send(WorkerToGuiMessage::StatusUpdate(format!("Initializing: {}", url)));
 
-                let result: Result<(), Box<dyn Error + Send + Sync>> = if url.starts_with("magnet:?") {
-                    let downloader = TorrentDownloader::new(
+                let optimizer = Optimizer::new(config.optimization.clone());
+                let proxy = config.proxy.clone();
+
+                let result: Result<(), Box<dyn Error + Send + Sync>> = if is_advanced {
+                    let downloader = AdvancedDownloader::new(
                         url.clone(),
                         output_path.clone(),
-                        false,
-                        proxy_clone,
-                        optimizer_clone,
-                    );
-                    runtime.block_on(downloader.download())
-                } else if url.starts_with("ftp://") {
-                    let downloader = FtpDownloader::new(
-                        url.clone(),
-                        output_path.clone(),
-                        false,
-                        proxy_clone,
-                        optimizer_clone,
-                    );
-                    downloader.download()
-                } else if url.starts_with("sftp://") {
-                    let downloader = SftpDownloader::new(
-                        url.clone(),
-                        output_path.clone(),
-                        false,
-                        proxy_clone,
-                        optimizer_clone,
+                        true, // quiet_mode para não poluir o stdout do worker
+                        proxy,
+                        optimizer,
                     );
                     downloader.download()
                 } else {
-                    status_tx.send(WorkerToGuiMessage::StatusUpdate(format!("Starting HTTP download: {}", url))).unwrap();
-                    for i in 1..=10 {
-                    
-                        thread::sleep(Duration::from_millis(200));
-                        let _ = status_tx.send(WorkerToGuiMessage::Progress(i as f32 / 10.0));
-                    }
-                    Ok(())
+                    let options = kget::DownloadOptions {
+                        quiet_mode: true,
+                        output_path: Some(output_path.clone()),
+                        verify_iso,
+                    };
+                    cli_download(&url, proxy, optimizer, options)
                 };
 
                 match result {
                     Ok(_) => {
-                        let _ = status_tx.send(WorkerToGuiMessage::Completed(format!(
-                            "Successfully downloaded {} to {}",
-                            url, output_path
-                        )));
+                        let _ = status_tx.send(WorkerToGuiMessage::Completed(output_path));
                     }
                     Err(e) => {
-                        let _ = status_tx.send(WorkerToGuiMessage::Error(format!(
-                            "Download failed for {}: {}",
-                            url, e
-                        )));
+                        let _ = status_tx.send(WorkerToGuiMessage::Error(e.to_string()));
                     }
                 }
             }
             DownloadCommand::Cancel => {
-                let _ = status_tx.send(WorkerToGuiMessage::StatusUpdate(
-                    "Cancel command received (implement cancellation logic in worker).".to_string(),
-                ));
+                let _ = status_tx.send(WorkerToGuiMessage::StatusUpdate("Download cancelled.".into()));
             }
         }
     }
@@ -200,7 +180,11 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         return Ok(());
     }
 
-    if !args.gui {
+    // NOVA LÓGICA: Determina se deve abrir a GUI (flag --gui OU nenhum argumento de download passado)
+    let should_start_gui = args.gui || (args.url.is_empty() && !args.ftp && !args.sftp && !args.torrent);
+
+    // Se NÃO for abrir a GUI, configuramos o ambiente CLI com base nos argumentos
+    if !should_start_gui {
         if let Some(proxy_url) = args.proxy.clone() {
             config.proxy.enabled = true;
             config.proxy.url = Some(proxy_url);
@@ -219,9 +203,6 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         if let Some(limit) = args.speed_limit {
             config.optimization.speed_limit = Some(limit);
         }
-        // if args.no_compress {
-        //     config.optimization.compression = false;
-        // }
         if args.no_cache {
             config.optimization.cache_enabled = false;
         }
@@ -243,7 +224,8 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         config.save()?;
     }
 
-    if args.gui {
+    // Se deve abrir a GUI, executa o bloco gráfico e encerra o programa depois
+    if should_start_gui {
         #[cfg(feature = "gui")]
         {
             let (download_tx, download_rx_worker): (MpscSender<DownloadCommand>, MpscReceiver<DownloadCommand>) = mpsc::channel();
@@ -256,8 +238,10 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                 download_worker(worker_config, download_rx_worker, status_tx_worker, runtime);
             });
 
+            // Configurações da janela atualizadas conforme seu pedido
             let mut native_options = eframe::NativeOptions::default();
-            native_options.viewport.inner_size = Some(egui::Vec2::new(900.0, 400.0));
+            native_options.viewport.inner_size = Some(egui::Vec2::new(800.0, 550.0));
+            native_options.viewport.resizable = Some(true);
 
             if let Err(e) = eframe::run_native(
                 "KGet Downloader",
@@ -269,22 +253,32 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                 eprintln!("Failed to launch GUI: {e}");
                 return Err("Failed to launch GUI".into());
             }
+
+            // Encerra o programa após fechar a GUI para não tentar rodar o modo CLI sem URL
+            return Ok(());
         }
 
         #[cfg(not(feature = "gui"))]
         {
             eprintln!("GUI support was not compiled in. Rebuild with `--features gui` to enable it.");
-            return Err("GUI not available (compile with --features gui)".into());
+            // Se tentou abrir GUI sem suporte, mas tem URL, deixa cair pro modo CLI?
+            // Não, melhor avisar e sair se foi intencional.
+            if args.gui {
+                return Err("GUI not available (compile with --features gui)".into());
+            }
+            // Se caiu aqui porque não tinha URL, mostra o help
+            if args.url.is_empty() {
+                Args::command().print_help()?;
+                return Ok(());
+            }
         }
     }
 
-    let optimizer = Optimizer::new(config.optimization.clone());
+    // ==========================================================
+    // MODO CLI (Só executa se não entrou no bloco da GUI acima)
+    // ==========================================================
 
-    if args.url.is_empty() && !args.gui {
-    
-        Args::command().print_help()?;
-        return Err("URL is required for CLI mode.".into());
-    }
+    let optimizer = Optimizer::new(config.optimization.clone());
 
     if args.ftp {
         let url = args.url.clone();
@@ -311,7 +305,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         );
         return downloader.download();
     }
-    
+
     if args.torrent || args.url.starts_with("magnet:?") {
         let downloader = TorrentDownloader::new(
             args.url,
@@ -332,13 +326,26 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         );
         downloader.download()?;
     } else {
-        cli_download(
-            &args.url, 
-            args.quiet, 
-            args.output.or_else(|| Some(utils::get_filename_from_url_or_default(&args.url, "http_output"))),
-            config.proxy, 
-            optimizer
-        )?;
+        // Criamos as opções uma única vez
+        let options = DownloadOptions {
+            quiet_mode: args.quiet,
+            output_path: args.output.clone(),
+            verify_iso: false, // O CLI gerencia a pergunta manualmente abaixo
+        };
+
+        cli_download(&args.url, config.proxy, optimizer, options)?;
+
+        // COMPORTAMENTO CLI: Pergunta apenas se for um arquivo ISO e não estiver em modo quiet
+        if !args.quiet && args.url.to_lowercase().ends_with(".iso") {
+            println!("\nThis is an ISO file. Would you like to verify its integrity? (y/N)");
+            let mut input = String::new();
+            if std::io::stdin().read_line(&mut input).is_ok() && input.trim().to_lowercase() == "y" {
+                // Descobrimos o nome do arquivo para passar para a função de verificação
+                let filename = utils::get_filename_from_url_or_default(&args.url, "download.iso");
+                let path = std::path::Path::new(&filename);
+                verify_iso_integrity(path)?;
+            }
+        }
     }
 
     Ok(())

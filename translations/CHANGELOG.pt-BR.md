@@ -7,6 +7,37 @@ Todas as mudanças notáveis neste projeto serão documentadas neste arquivo.
 O formato é baseado em [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 e este projeto adere ao [Versionamento Semântico](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.2] - 2025-12-19
+
+### Adicionado
+- **Manuseio Inteligente de ISO**: Detecção automática de arquivos `.iso` via URL e tipo MIME.
+- **Prevenção de Corrupção**: Arquivos ISO agora ignoram camadas de descompressão/otimização para garantir integridade binária 1:1.
+- **Verificação de Integridade**: Adicionada verificação opcional de checksum SHA256 ao final de downloads de ISO.
+
+### Corrigido
+- **Otimização de Memória e Disco**: Refatoração do `AdvancedDownloader` para usar escritas em stream com `BufWriter`, reduzindo drasticamente o uso de RAM e evitando problemas de 100% de tempo ativo do disco.
+- **Confirmação de Verificação**: Corrigido bug onde a verificação de integridade rodava automaticamente no modo avançado; agora o programa solicita confirmação do usuário corretamente.
+- **UI/UX**: Limpeza na saída do terminal durante downloads paralelos para uma experiência de barra de progresso mais fluida.
+- Corrigido erro do compilador Rust `E0382` em relação à posse (ownership) do tipo `Mime` em `download.rs`.
+- Melhorada a segurança de escrita de chunks paralelos para arquivos binários pesados.
+
+## [1.5.1] - 2025-12-18
+
+### Adicionado
+- Feature opcional `gui` no Cargo para tornar as dependências da interface gráfica opcionais; compile com `--features gui` para habilitar o suporte a GUI.
+- Funções de conveniência de alto nível: `kget::download(...)` e `kget::advanced_download(...)` para facilitar o uso como biblioteca.
+- `create_progress_bar_factory(...)` exportado para permitir que consumidores criem barras de progresso `indicatif`.
+- Exemplo `examples/lib_usage.rs` demonstrando o uso da biblioteca.
+- Instruções de desenvolvimento Docker e integração `docker-compose` para simplificar a compilação, testes e contribuições.
+
+### Alterado
+- Atualizado README e `LIB.md` com instruções de uso da biblioteca e exemplos.
+- `CONTRIBUTING.md` e traduções atualizadas com o fluxo de trabalho para contribuidores via Docker.
+- Divisão do código GUI: adicionado o módulo `gui_types` para que builds CLI funcionem sem a feature de GUI.
+
+### Corrigido / Diversos
+- Pequenas correções na documentação e atualizações de tradução (PT-BR/ES).
+
 ## [1.5.0] - 2025-05-26
 
 ### Adicionado

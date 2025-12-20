@@ -1,154 +1,63 @@
-# Usando KGet como una Librería
+# Uso de KGet como una Crate (Librería)
 
-KGet puede ser usado como una biblioteca Rust en sus propios proyectos para agregar potentes funciones de descarga (HTTP, HTTPS, FTP, SFTP, torrents, progreso, proxy, etc).
+KGet es un motor de descarga de alto rendimiento para Rust. Proporciona características avanzadas como división en partes paralelas, E/S de flujo y protección de la salud del disco (Escritura con Búfer), todo envuelto en una API amigable para el desarrollador.
 
-[English](../LIB.md) | [Português](translations/LIB.pt-BR.md) | [Español](translations/LIB.es.md)
+[English](../LIB.md) | [Português](LIB.pt-br.md) | [Español](LIB.es.md)
 
-## Agregue a su `Cargo.toml`
+## Instalación
 
-Sin GUI (recomendado para servidores/CI/compilaciones mínimas):
-
-```toml
-[dependencies]
-kget = "1.5.1"
-```
-
-Con GUI activada (esto incluirá dependencias opcionales de GUI):
+Añade KGet a tu `Cargo.toml`:
 
 ```toml
 [dependencies]
-kget = { version = "1.5.1", features = ["gui"] }
+kget = "1.5.2"
 ```
 
-## Uso Básico
+## Componentes Principales
+
+La librería expone los siguientes bloques fundamentales:
+
+- **`download`**: Función estándar para transferencias de flujo único (HTTP/HTTPS/FTP/SFTP).
+- **`AdvancedDownloader`**: Una estructura para descargas paralelas multi-hilo con optimización automática de RAM/Disco.
+- **`DownloadOptions`**: Controla el comportamiento de la librería (Modo silencioso, Ruta de salida, Verificación de ISO).
+- **`create_progress_bar`**: Fábrica para crear barras de progreso con el estilo de KGet (verde, fluida, con ETA).
+- **`verify_iso_integrity`**: Utilidad independiente para el cálculo de sumas de comprobación SHA256.
+- **`Config` / `Optimizer`**: Gestión integral de la configuración.
+
+## Guía Práctica (Cookbook)
+
+La mejor manera de aprender es consultando nuestro [Ejemplo Completo](examples/lib_usage.rs).
+
+### Ejemplo: Integración Personalizada
 
 ```rust
-use kget::KGet;
+use kget::{download, DownloadOptions, Config, Optimizer};
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let kget = KGet::new()?;
-    kget.download(
-        "https://example.com/file.zip",
-        Some("file.zip".to_string()),
-        false, // modo silencioso
-    )?;
-    Ok(())
-}
-```
-
-## Funciones de conveniencia
-
-El crate también expone funciones top-level simples para que pueda llamarlas directamente
-sin crear una instancia de `KGet`:
-
-- `kget::download(url, output_path, quiet_mode)` — descarga estándar HTTP/HTTPS/FTP/SFTP.
-- `kget::advanced_download(url, output_path, quiet_mode)` — descarga paralela/retomable.
-
-Ejemplo usando la función top-level `download`:
-
-```rust
-fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    kget::download("https://example.com/file.txt", Some("file.txt"), false)?;
-    Ok(())
-}
-```
-
-## API de barra de progreso
-
-Si desea renderizar su propia barra de progreso (por ejemplo, integrarla con su UI),
-el crate expone una fábrica de barras de progreso:
-
-```rust
-let bar = kget::create_progress_bar_factory(false, "Downloading".to_string(), Some(1024u64), false);
-// use `bar` como un `indicatif::ProgressBar`
-```
-
-## Feature GUI (opcional)
-
-La GUI es opcional y está disponible detrás de una feature de Cargo llamada `gui`. Compile o ejecute con la GUI activada usando:
-
-```bash
-cargo build --features gui
-cargo run --features gui -- --gui
-```
-
-Si la feature `gui` no está activada, el crate y el binario se compilarán sin las dependencias relacionadas con la GUI.
-
-
-## Descarga Avanzada (Chunks Paralelos, Reanudación)
-
-```rust
-use kget::KGet;
-
-fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let kget = KGet::new()?;
-    kget.advanced_download(
-        "https://example.com/largefile.iso",
-        Some("largefile.iso".to_string()),
-        false,
-    )?;
-    Ok(())
-}
-```
-
-## Configuración Personalizada
-
-```rust
-use kget::{KGet, Config};
-
-fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut config = Config::load()?;
-    config.optimization.speed_limit = Some(1024 * 1024); // 1 MB/s
-    let kget = KGet::with_config(config);
-    kget.download("https://example.com/file.zip", None, false)?;
-    Ok(())
-}
-```
-
-## API Simple
-
-Para descargas rápidas sin crear una instancia de KGet:
-
-```rust
-use kget::simple;
-
-fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    simple::download("https://example.com/file.txt", Some("file.txt"))?;
-    Ok(())
-}
-```
-
-## Ejemplo de Callback de Progreso
-
-```rust
-use kget::{KGet, DownloadOptions};
-
-fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let config = Config::default();
     let options = DownloadOptions {
+        output_path: Some("archivo_personalizado.zip".into()),
+        verify_iso: false,
         quiet_mode: false,
-        progress_callback: Some(Box::new(|current, total, _speed| {
-            println!("Progreso: {}/{}", current, total);
-        })),
-        ..Default::default()
     };
-    kget::simple::download_with_options(
-        "https://example.com/file.txt",
-        Some("file.txt"),
-        options,
-    )?;
+
+    // Llamada simple de una línea al motor
+    download("https://example.com/file.zip", config.proxy, Optimizer::new(config.optimization), options)?;
     Ok(())
 }
 ```
 
-## Protocolos Soportados
+## Comportamiento: Librería vs CLI
 
-- HTTP/HTTPS
-- FTP
-- SFTP
-- Enlaces Magnet (torrents, requiere `transmission-daemon`)
+Para asegurar que KGet funcione perfectamente como una librería, seguimos estas reglas:
 
-## Más
+1. **Sin Prompts de Stdin**: Las funciones de la librería **nunca** usan `stdin`. No pausarán su programa para hacer preguntas.
+2. **Control Programático**: Use `DownloadOptions { verify_iso: true }` para forçar la verificación, o `false` para omitirla.
+3. **Optimizado por Defecto**: Incluso cuando se usa como lib, KGet utiliza `BufWriter` de 2MB por hilo y flujo de 16KB para asegurar que el sistema anfitrión siga respondiendo y el uso de RAM sea bajo (~30MB).
 
-Vea [docs.rs/kget](https://docs.rs/kget) para la documentación completa de la API.
+## Uso Avanzado
+
+Para escenarios complejos, como el cambio programático de proxy o la construcción de su propia GUI sobre el descargador, explore la estructura `AdvancedDownloader` y el módulo `Config` en el código fuente.
 
 ---
+KGet está construido con ❤️ en Rust para velocidad y confiabilidad.

@@ -1,19 +1,12 @@
-# Using KGet as a Crate
+# Using KGet as a Library
 
-KGet can be used as a Rust library in your own projects to add powerful download capabilities (HTTP, HTTPS, FTP, SFTP, torrents, progress, proxy, etc).
+KGet is a versatile Rust crate that provides a high-performance download engine. It is designed to be integrated into other projects while maintaining the same efficiency (RAM/Disk optimization) as the CLI app.
 
-[English](README.md) | [Português](translations/LIB.pt-br.md) | [Español](translations/LIB.es.md)
+[English](LIB.md) | [Português](translations/LIB.pt-br.md) | [Español](translations/LIB.es.md)
 
-## Add to Your `Cargo.toml`
+## Installation
 
-Without GUI (recommended for servers/CI/minimal builds):
-
-```toml
-[dependencies]
-kget = "1.5.1"
-```
-
-With GUI enabled (this pulls in optional GUI dependencies):
+Add KGet to your `Cargo.toml`:
 
 ```toml
 [dependencies]
@@ -26,128 +19,61 @@ For local development (when working inside the repository), use a path dependenc
 [dependencies]
 kget = { path = "." }
 ```
-## Basic Usage
+## Key Components
+The library exposes the following building blocks:
+- download: The standard function for single-stream HTTP/HTTPS/FTP/SFTP downloads.
+- AdvancedDownloader: A struct for multi-threaded, parallel chunk downloads with automatic RAM/Disk I/O optimization.
+- DownloadOptions: A struct to control library behavior (Quiet mode, Output path, Auto-verification).
+- create_progress_bar: A factory function to create KGet-styled progress bars (green, smooth, with ETA).
+- verify_iso_integrity: A standalone SHA256 checksum calculator.
+
+## Complete Usage Guide
+For a live demonstration of all features, see the [Cookbook Example](src/lib_usage.rs).
+
+## Quick Example: Standard Download
 
 ```rust
-use kget::KGet;
+use kget::{download, DownloadOptions, Config, Optimizer};
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let kget = KGet::new()?;
-    kget.download(
-        "https://example.com/file.zip",
-        Some("file.zip".to_string()),
-        false, // quiet_mode
-    )?;
-    Ok(())
-}
-```
-
-## Convenience top-level functions
-
-The crate also exposes simple top-level functions so you can call them
-directly without creating a `KGet` instance:
-
-- `kget::download(url, output_path, quiet_mode)` — regular HTTP/HTTPS/FTP/SFTP download.
-- `kget::advanced_download(url, output_path, quiet_mode)` — parallel/resumable download.
-
-Example using the top-level `download` function:
-
-```rust
-fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    kget::download("https://example.com/file.txt", Some("file.txt"), false)?;
-    Ok(())
-}
-```
-
-## Progress bar API
-
-If you want to render a progress bar yourself (e.g., integrate with your own UI),
-the crate exposes a progress bar factory:
-
-```rust
-let bar = kget::create_progress_bar_factory(false, "Downloading".to_string(), Some(1024u64), false);
-// use `bar` as an `indicatif::ProgressBar`
-```
-
-The `examples/lib_usage.rs` file demonstrates a minimal usage scenario.
-
-## GUI feature (optional)
-
-The GUI is optional and provided behind a Cargo feature. Build or run with the GUI enabled using:
-
-```bash
-cargo build --features gui
-cargo run --features gui -- --gui
-```
-
-When the `gui` feature is disabled the crate and binary compile without GUI-related dependencies.
-
-
-## Advanced Download (Parallel Chunks, Resume)
-
-```rust
-use kget::KGet;
-
-fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let kget = KGet::new()?;
-    kget.advanced_download(
-        "https://example.com/largefile.iso",
-        Some("largefile.iso".to_string()),
-        false,
-    )?;
-    Ok(())
-}
-```
-
-## Custom Configuration
-
-```rust
-use kget::{KGet, Config};
-
-fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut config = Config::load()?;
-    config.optimization.speed_limit = Some(1024 * 1024); // 1 MB/s
-    let kget = KGet::with_config(config);
-    kget.download("https://example.com/file.zip", None, false)?;
-    Ok(())
-}
-```
-
-## Simple API
-
-For quick downloads without creating a KGet instance:
-
-```rust
-use kget::simple;
-
-fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    simple::download("https://example.com/file.txt", Some("file.txt"))?;
-    Ok(())
-}
-```
-
-## Progress Callback Example
-
-```rust
-use kget::{KGet, DownloadOptions};
-
-fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let config = Config::default();
     let options = DownloadOptions {
-        quiet_mode: false,
-        progress_callback: Some(Box::new(|current, total, _speed| {
-            println!("Progress: {}/{}", current, total);
-        })),
+        output_path: Some("file.zip".to_string()),
         ..Default::default()
     };
-    kget::simple::download_with_options(
-        "https://example.com/file.txt",
-        Some("file.txt"),
-        options,
-    )?;
+
+    download("https://example.com/file.zip", config.proxy, Optimizer::new(config.optimization), options)?;
     Ok(())
 }
 ```
+## Quick Example: Parallel Download
+```rust
+use kget::{AdvancedDownloader, Config, Optimizer};
 
+let config = Config::default();
+let downloader = AdvancedDownloader::new(
+    "https://example.com/large.iso".into(),
+    "large.iso".into(),
+    false, // quiet_mode
+    config.proxy,
+    Optimizer::new(config.optimization)
+);
+
+downloader.download()?;
+```
+## Interactivity vs Library Behavior
+The core library functions never use `stdin` or prompt the user. All decisions are made via the `DownloadOptions` struct:
+- In the CLI App: We prompt the user "Do you want to verify?"
+- In your Library code: You decide programmatically by setting `verify_iso`: `true` or `false`.
+
+## Efficiency by Design
+When using KGet as a library, you automatically benefit from:
+1. Streaming I/O: 16KB read-write cycles to keep RAM usage low (~30MB).
+2. Buffered Writes: 2MB BufWriter per thread to protect disk health and prevent system freezes.
+3. Smart Detection: ISO files are automatically handled as raw binary to prevent corruption.
+
+
+For more details, check the source of `src/lib.rs`.
 ## Supported Protocols
 
 - HTTP/HTTPS

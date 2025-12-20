@@ -1,4 +1,4 @@
-# ¡KelpsGet ahora es KGet! v1.5.1 (Nuevo Lanzamiento)
+# ¡KelpsGet ahora es KGet! v1.5.2 (Nuevo Lanzamiento)
 
 Un descargador moderno, ligero y versátil escrito en Rust para descargas rápidas y confiables a través de línea de comandos (CLI) e interfaz gráfica (GUI).
 
@@ -12,10 +12,10 @@ Un descargador moderno, ligero y versátil escrito en Rust para descargas rápid
  <img src="https://github.com/user-attachments/assets/d80b60d7-f53e-4198-8e11-1cacf0e78958"  width="600"/>
 
 - CLI:
- <img src="https://github.com/user-attachments/assets/c2e512fe-be46-42b7-8763-fdc51a7233df"  width="600"/>
+ <img src="https://github.com/user-attachments/assets/a835c4df-5424-4aaa-b687-2445a99ba067"  width="600"/>
 
 - Interactivo:
-<img src="../Interactive.png"  width="600"/>
+<img src="https://github.com/user-attachments/assets/c8d03a5c-6459-4f3d-a581-5180797f8b1c"  width="600"/>
 
 ## Cómo funciona (Resumen)
 1. **Barra de progreso (CLI):** Muestra velocidad, tiempo estimado y bytes transferidos.
@@ -25,11 +25,15 @@ Un descargador moderno, ligero y versátil escrito en Rust para descargas rápid
 3. **Manejo de errores:** Termina con código 1 en errores HTTP (ej: 404).
 4. **Verificación de espacio:** Verifica el espacio disponible en disco.
 5. **Reintento automático:** Reintenta la descarga en fallos de red.
-6. **Modo de descarga avanzado (HTTP/HTTPS):** Descargas en chunks paralelos, soporta reanudación.
-7. **Soporte de proxy:** HTTP, HTTPS, SOCKS5 con autenticación.
-8. **Características de optimización:** Compresión (para caché), caché de archivos, límite de velocidad.
-9. **Descargas de Torrent:** Añade enlaces magnet al `transmission-daemon` para descarga.
-10. **Descargas FTP/SFTP:** Conecta a servidores FTP/SFTP para transferir archivos.
+6. **Detección Inteligente de ISO:** Detecta archivos `.iso` para garantizar una transferencia binaria pura y evitar la corrupción.
+7. **Verificación de Integridad:** Verificación opcional SHA256 para imágenes de disco después de la descarga.
+8. **Eficiencia de Memoria:** Las descargas paralelas utilizan buffers de flujo para mantener un bajo uso de RAM, independientemente del tamaño del archivo.
+9. **Optimización de Disco:** Utiliza E/S con búfer para evitar una alta ocupación del disco y bloqueos del sistema durante transferencias rápidas.
+10. **Modo de descarga avanzado (HTTP/HTTPS):** Descargas en chunks paralelos, soporta reanudación.
+11. **Soporte de proxy:** HTTP, HTTPS, SOCKS5 con autenticación.
+12. **Características de optimización:** Compresión (para caché), caché de archivos, límite de velocidad.
+13. **Descargas de Torrent:** Añade enlaces magnet al `transmission-daemon` para descarga.
+14. **Descargas FTP/SFTP:** Conecta a servidores FTP/SFTP para transferir archivos.
 
 ## Características
 
@@ -83,10 +87,10 @@ Puede instalar el binario publicado en crates.io (la GUI es opt-in mediante feat
 
 ```bash
 # Instala el binario sin GUI (por defecto)
-cargo install kget
+cargo install Kget
 
 # Instala el binario con GUI (compila dependencias GUI)
-cargo install kget --features gui
+cargo install Kget --features gui
 ```
 
 Si encuentra problemas con la GUI al instalar vía `cargo install`, compilar desde la fuente es más confiable.
@@ -96,8 +100,8 @@ Verifique la sección [Releases](https://github.com/davimf721/KGet/releases) par
 
 #### Linux/macOS:
 ```bash
-chmod +x kelpsget  # Hacer ejecutable
-./kelpsget [URL]   # Ejecutar directamente
+chmod +x kget  # Hacer ejecutable
+./kget [URL]   # Ejecutar directamente
 ```
 #### Windows:
 Ejecute el archivo `.exe` directamente.

@@ -1,4 +1,4 @@
-# KelpsGet agora é KGet! v1.5.1 (Novo Lançamento)
+# KelpsGet agora é KGet! v1.5.2 (Novo Lançamento)
 
 Um downloader moderno, leve e versátil escrito em Rust para downloads rápidos e confiáveis via linha de comando (CLI) e interface gráfica (GUI).
 
@@ -12,10 +12,10 @@ Um downloader moderno, leve e versátil escrito em Rust para downloads rápidos 
  <img src="https://github.com/user-attachments/assets/d80b60d7-f53e-4198-8e11-1cacf0e78958"  width="600"/>
 
 - CLI:
- <img src="https://github.com/user-attachments/assets/c2e512fe-be46-42b7-8763-fdc51a7233df"  width="600"/>
+ <img src="https://github.com/user-attachments/assets/a835c4df-5424-4aaa-b687-2445a99ba067"  width="600"/>
 
 - Interativo:
-<img src="../Interactive.png"  width="600"/>
+<img src="https://github.com/user-attachments/assets/c8d03a5c-6459-4f3d-a581-5180797f8b1c"  width="600"/>
 
 ## Como Funciona (Resumo)
 1. **Barra de Progresso (CLI):** Mostra velocidade, tempo estimado e bytes transferidos.
@@ -25,11 +25,15 @@ Um downloader moderno, leve e versátil escrito em Rust para downloads rápidos 
 3. **Tratamento de Erros:** Encerra com código 1 em erros HTTP (ex: 404).
 4. **Verificação de Espaço:** Verifica espaço disponível em disco.
 5. **Retry Automático:** Tenta novamente o download em falhas de rede.
-6. **Modo de Download Avançado (HTTP/HTTPS):** Downloads em chunks paralelos, suporta retomada.
-7. **Suporte a Proxy:** HTTP, HTTPS, SOCKS5 com autenticação.
-8. **Recursos de Otimização:** Compressão (para cache), cache de arquivos, limite de velocidade.
-9. **Downloads de Torrent:** Adiciona links magnet ao `transmission-daemon` para download.
-10. **Downloads FTP/SFTP:** Conecta a servidores FTP/SFTP para transferir arquivos.
+6. **Detecção Inteligente de ISO:** Detecta arquivos `.iso` para garantir transferência binária pura e evitar corrupção.
+7. **Verificação de Integridade:** Verificação opcional de SHA256 para imagens de disco após o download.
+8. **Eficiência de Memória:** Downloads paralelos usam buffers de stream para manter baixo uso de RAM, independente do tamanho do arquivo.
+9. **Otimização de Disco:** Utiliza I/O com buffer para evitar alta ocupação do disco e travamentos do sistema durante transferências rápidas.
+10. **Modo de Download Avançado (HTTP/HTTPS):** Downloads em chunks paralelos, suporta retomada.
+11. **Suporte a Proxy:** HTTP, HTTPS, SOCKS5 com autenticação.
+12. **Recursos de Otimização:** Compressão (para cache), cache de arquivos, limite de velocidade.
+13. **Downloads de Torrent:** Adiciona links magnet ao `transmission-daemon` para download.
+14. **Downloads FTP/SFTP:** Conecta a servidores FTP/SFTP para transferir arquivos.
 
 ## Funcionalidades
 

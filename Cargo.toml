@@ -1,6 +1,6 @@
 [package]
 name = "Kget"
-version = "1.5.1"
+version = "1.5.2"
 edition = "2024"
 description = "A powerful and versatile download manager and library"
 authors = ["Davi Moreira Fuzatto <davimoreiraf@gmail.com>"]
@@ -53,7 +53,6 @@ reqwest = { version = "0.12.15", features = [
 rustyline = "16.0.0"
 sha2 = "0.11.0-rc.3"
 hex = "0.4.3"
-
 [features]
 default = []
 # Opt-in GUI feature pulls GUI-related dependencies

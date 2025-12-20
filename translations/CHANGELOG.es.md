@@ -7,6 +7,37 @@ Todos los cambios notables en este proyecto serán documentados en este archivo.
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 y este proyecto se adhiere al [Versionado Semántico](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.2] - 2025-12-19
+
+### Añadido
+- **Manejo Inteligente de ISO**: Detección automática de archivos `.iso` mediante URL y tipo MIME.
+- **Prevención de Corrupción**: Los archivos ISO ahora omiten las capas de descompresión/optimización para garantizar la integridad binaria 1:1.
+- **Verificación de Integridad**: Se agregó una verificación opcional de suma de comprobación SHA256 al final de las descargas de ISO.
+
+### Corregido
+- **Optimización de Memoria y Disco**: Se refactorizó `AdvancedDownloader` para usar escritas en stream con `BufWriter`, reduciendo drásticamente el uso de RAM y evitando problemas de 100% de tiempo activo del disco.
+- **Confirmación de Verificación**: Se corrigió un error por el cual la verificación de integridad se ejecutaba automáticamente en modo avanzado; ahora el programa solicita confirmación al usuario correctamente.
+- **UI/UX**: Se limpió la salida de la terminal durante las descargas paralelas para una experiencia de barra de progreso más fluida.
+- Se corrigió el error del compilador Rust `E0382` con respecto a la propiedad (ownership) del tipo `Mime` en `download.rs`.
+- Se mejoró la seguridad de escritura de chunks paralelos para archivos binarios pesados.
+
+## [1.5.1] - 2025-12-18
+
+### Añadido
+- Feature opcional `gui` en Cargo para que las dependencias de la interfaz gráfica sean opcionales; compile con `--features gui` para habilitar el soporte de GUI.
+- Funciones de conveniencia de alto nivel: `kget::download(...)` y `kget::advanced_download(...)` para facilitar el uso como biblioteca.
+- `create_progress_bar_factory(...)` exportado para permitir que los consumidores creen barras de progreso `indicatif`.
+- Ejemplo `examples/lib_usage.rs` demostrando el uso de la biblioteca.
+- Instrucciones de desarrollo Docker e integración `docker-compose` para simplificar la compilación, pruebas y contribuciones.
+
+### Cambiado
+- Actualizado README y `LIB.md` con instrucciones de uso de la biblioteca y ejemplos.
+- `CONTRIBUTING.md` y traducciones actualizadas con el flujo de trabajo para colaboradores a través de Docker.
+- División del código GUI: se agregó el módulo `gui_types` para que las compilaciones CLI funcionen sin la feature de GUI.
+
+### Corregido / Varios
+- Pequeñas correcciones en la documentación y actualizaciones de traducción (PT-BR/ES).
+
 ## [1.5.0] - 2025-05-26
 
 ### Añadido

@@ -27,11 +27,13 @@ A modern, lightweight, and versatile downloader written in Rust for fast and rel
 5.  **Automatic Retry:** Retries download on network failure.
 6.  **ISO Smart Detection:** Detects `.iso` files to ensure raw binary transfer and prevent corruption.
 7.  **Integrity Check:** Optional SHA256 verification for disk images after download.
-8.  **Advanced Download Mode (HTTP/HTTPS):** Downloads in parallel chunks, supports resume.
-9. **Proxy Support:** HTTP, HTTPS, SOCKS5 with authentication.
-10. **Optimization Features:** Compression (for cache), file caching, speed limiting.
-11. **Torrent Downloads:** Adds magnet links to `transmission-daemon` for download.
-12. **FTP/SFTP Downloads:** Connects to FTP/SFTP servers to transfer files.
+8.  **Memory Efficient:** Parallel downloads use streaming buffers to maintain a low RAM footprint regardless of file size.
+9.  **Disk Optimization:** Uses buffered I/O to prevent high disk active time and system freezes during fast transfers.
+10. **Advanced Download Mode (HTTP/HTTPS):** Downloads in parallel chunks, supports resume.
+11. **Proxy Support:** HTTP, HTTPS, SOCKS5 with authentication.
+12. **Optimization Features:** Compression (for cache), file caching, speed limiting.
+13. **Torrent Downloads:** Adds magnet links to `transmission-daemon` for download.
+14. **FTP/SFTP Downloads:** Connects to FTP/SFTP servers to transfer files.
 
 ## Features
 

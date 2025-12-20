@@ -12,11 +12,12 @@ use std::path::{Path, PathBuf};
 use sha2::Digest;
 use crate::config::ProxyConfig;
 use crate::optimization::Optimizer;
+use crate::DownloadOptions;
 
 const MAX_RETRIES: u32 = 3;
 const RETRY_DELAY: Duration = Duration::from_secs(2);
 
-fn check_disk_space(path: &Path, required_size: u64) -> Result<(), Box<dyn Error + Send + Sync>> {
+pub fn check_disk_space(path: &Path, required_size: u64) -> Result<(), Box<dyn Error + Send + Sync>> {
     let dir = path.parent().unwrap_or(Path::new("."));
     let available_space = fs2::available_space(dir)?;
     
@@ -30,7 +31,7 @@ fn check_disk_space(path: &Path, required_size: u64) -> Result<(), Box<dyn Error
     Ok(())
 }
 
-fn validate_filename(filename: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+pub fn validate_filename(filename: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
     if filename.contains(std::path::MAIN_SEPARATOR) {
         return Err("Filename cannot contain directory separators".into());
     }
@@ -42,11 +43,13 @@ fn validate_filename(filename: &str) -> Result<(), Box<dyn Error + Send + Sync>>
 
 pub fn download(
     target: &str,
-    quiet_mode: bool,
-    output_filename_option: Option<String>,
     proxy: ProxyConfig,
     optimizer: Optimizer,
+    options: DownloadOptions, 
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let quiet_mode = options.quiet_mode;
+    // ... restante da lógica de download (client builder, retries, etc) ...
+
     let mut client_builder = Client::builder()
         .timeout(Duration::from_secs(30));
 
@@ -128,7 +131,7 @@ pub fn download(
 
     let mut tentative_path: PathBuf;
 
-    if let Some(output_arg_str) = output_filename_option {
+    if let Some(output_arg_str) = options.output_path { // Corrigido para output_path
         let user_path = PathBuf::from(output_arg_str.clone());
 
         let is_target_dir = user_path.is_dir() || 
@@ -199,22 +202,20 @@ pub fn download(
     let mut buffer = Vec::new();
     buffered_reader.read_to_end(&mut buffer)?;
     
+    // ... lógica de salvamento existente ...
         dest.write_all(&buffer)?;
         progress.finish_with_message("Download completed\n");
 
-        if is_iso && !quiet_mode {
-            println!("\nThis is an ISO file. Would you like to verify its integrity? (y/N)");
-            let mut input = String::new();
-            if std::io::stdin().read_line(&mut input).is_ok() && input.trim().to_lowercase() == "y" {
-                verify_iso_integrity(&final_path)?;
-            }
-        }
-
-        print("Thanks for using KGet!", quiet_mode);
-        Ok(())
+    // A LIB decide se verifica baseada na OPÇÃO recebida, não em perguntas
+    if is_iso && options.verify_iso {
+        verify_iso_integrity(&final_path)?;
     }
 
-fn verify_iso_integrity(path: &Path) -> Result<(), Box<dyn Error + Send + Sync>> {
+    Ok(())
+}
+
+// Tornamos pública para que outros desenvolvedores possam usar só a verificação se quiserem
+pub fn verify_iso_integrity(path: &Path) -> Result<(), Box<dyn Error + Send + Sync>> {
     println!("Calculating SHA256 hash... (this may take a while for large ISOs)");
     let mut file = File::open(path)?;
     let mut hasher = sha2::Sha256::new();

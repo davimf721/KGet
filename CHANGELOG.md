@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Integrity Verification**: Added optional SHA256 checksum calculation at the end of ISO downloads.
 
 ### Fixed
+- **Memory & Disk Optimization**: Refactored `AdvancedDownloader` to use streaming writes with `BufWriter`, drastically reducing RAM usage and preventing 100% disk active time issues.
+- **Verification Prompt**: Fixed bug where integrity check was running automatically in advanced mode; it now correctly asks the user for confirmation.
+- **UI/UX**: Cleaned up terminal output during parallel downloads for a smoother progress bar experience.
 - Fixed Rust compiler error `E0382` regarding `Mime` type ownership in `download.rs`.
 - Improved parallel chunk writing safety for binary-heavy files.
 
