@@ -6,7 +6,7 @@ A modern, lightweight, and versatile downloader written in Rust for fast and rel
 
 ## Screenshots
 - GUI:
- <img src="https://github.com/user-attachments/assets/30f77e72-aaac-454f-ace4-947b92411bf7"  width="600"/>
+ <img src="https://github.com/user-attachments/assets/6da6dbd4-b3ae-4669-b64b-ffe3b961beb2"  width="600"/>
  
 - Torrent on `localhost:9091/transmission/web/`:
  <img src="https://github.com/user-attachments/assets/d80b60d7-f53e-4198-8e11-1cacf0e78958"  width="600"/>
