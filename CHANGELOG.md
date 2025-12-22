@@ -13,11 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **ISO Smart Handling**: Automatic detection of `.iso` files via URL and MIME type.
 - **Corruption Prevention**: ISO files now bypass decompression/optimization layers to ensure binary 1:1 integrity.
 - **Integrity Verification**: Added optional SHA256 checksum calculation at the end of ISO downloads.
+- **Windows Dual Mode**: The application now runs without a console window when launched via Explorer, but automatically attaches to the terminal when run via CLI.
 
 ### Fixed
 - **Memory & Disk Optimization**: Refactored `AdvancedDownloader` to use streaming writes with `BufWriter`, drastically reducing RAM usage and preventing 100% disk active time issues.
 - **Verification Prompt**: Fixed bug where integrity check was running automatically in advanced mode; it now correctly asks the user for confirmation.
 - **UI/UX**: Cleaned up terminal output during parallel downloads for a smoother progress bar experience.
+- **GUI Icon**: Fixed issue with loading the application window icon.
 - Fixed Rust compiler error `E0382` regarding `Mime` type ownership in `download.rs`.
 - Improved parallel chunk writing safety for binary-heavy files.
 

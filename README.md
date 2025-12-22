@@ -54,11 +54,9 @@ cargo run --features gui -- --gui
 If you don't enable the `gui` feature, the binary and library will compile without GUI dependencies.
 
 
-
-
 ## Installation
 
-### Option 1: Compile from source (Recommended to get all features)
+### Option 1: Compile from source
 
 You will need Rust installed. If you don't have it, install it from [rustup.rs](https://rustup.rs/).
 
@@ -247,8 +245,8 @@ kget --gui
 ```
 The GUI allows you to enter the URL, output path, and start downloads. Status and progress are displayed in the interface.
 
-## KelpsGet Configuration
-KelpsGet uses a configuration file at:
+## KGet Configuration
+KGet uses a configuration file at:
 - Windows: `%APPDATA%\kget\config.json`
 - Linux/macOS: `~/.config/kget/config.json`
 

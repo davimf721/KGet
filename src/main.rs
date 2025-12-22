@@ -1,6 +1,5 @@
-// #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-// Silencia warnings chatos para focar no que importa
 #![allow(unused_imports)]
 #![allow(unused_variables)]
 #![allow(dead_code)]
@@ -12,7 +11,9 @@ use std::sync::mpsc::{self, Receiver as MpscReceiver, Sender as MpscSender};
 use std::thread;
 use std::time::Duration;
 
-// Módulos locais
+#[cfg(all(windows, not(debug_assertions)))]
+use windows_sys::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
+
 mod download;
 mod progress;
 mod utils;
@@ -40,7 +41,7 @@ pub use crate::ftp::FtpDownloader;
 pub use crate::sftp::SftpDownloader;
 pub use crate::torrent::TorrentDownloader;
 
-// Importante: Usando tipos da Lib para compatibilidade
+
 use kget::{DownloadOptions, verify_iso_integrity};
 
 #[derive(Parser, Debug)]
@@ -138,13 +139,24 @@ fn download_worker(
                 let proxy = config.proxy.clone();
 
                 let result: Result<(), Box<dyn Error + Send + Sync>> = if is_advanced {
-                    let downloader = AdvancedDownloader::new(
+                    let mut downloader = AdvancedDownloader::new(
                         url.clone(),
                         output_path.clone(),
-                        true, // quiet_mode para não poluir o stdout do worker
+                        true, 
                         proxy,
                         optimizer,
                     );
+
+                    let status_tx_clone = status_tx.clone();
+                    downloader.set_progress_callback(move |p| {
+                        status_tx_clone.send(WorkerToGuiMessage::Progress(p)).ok();
+                    });
+                    
+                    let status_tx_clone2 = status_tx.clone();
+                    downloader.set_status_callback(move |msg| {
+                        status_tx_clone2.send(WorkerToGuiMessage::StatusUpdate(msg)).ok();
+                    });
+
                     downloader.download()
                 } else {
                     let options = kget::DownloadOptions {
@@ -152,7 +164,12 @@ fn download_worker(
                         output_path: Some(output_path.clone()),
                         verify_iso,
                     };
-                    cli_download(&url, proxy, optimizer, options)
+                    let status_tx_clone = status_tx.clone();
+                    let status_cb = move |msg: String| {
+                        status_tx_clone.send(WorkerToGuiMessage::StatusUpdate(msg)).ok();
+                        ()
+                    };
+                    cli_download(&url, proxy, optimizer, options, Some(&status_cb))
                 };
 
                 match result {
@@ -172,6 +189,12 @@ fn download_worker(
 }
 
 fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
+   
+    #[cfg(all(windows, not(debug_assertions)))]
+    unsafe {
+        AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+
     let args = Args::parse();
     let mut config = Config::load()?;
 
@@ -180,10 +203,10 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         return Ok(());
     }
 
-    // NOVA LÓGICA: Determina se deve abrir a GUI (flag --gui OU nenhum argumento de download passado)
+    
     let should_start_gui = args.gui || (args.url.is_empty() && !args.ftp && !args.sftp && !args.torrent);
 
-    // Se NÃO for abrir a GUI, configuramos o ambiente CLI com base nos argumentos
+    
     if !should_start_gui {
         if let Some(proxy_url) = args.proxy.clone() {
             config.proxy.enabled = true;
@@ -224,7 +247,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         config.save()?;
     }
 
-    // Se deve abrir a GUI, executa o bloco gráfico e encerra o programa depois
+    
     if should_start_gui {
         #[cfg(feature = "gui")]
         {
@@ -238,15 +261,30 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                 download_worker(worker_config, download_rx_worker, status_tx_worker, runtime);
             });
 
-            // Configurações da janela atualizadas conforme seu pedido
+            
             let mut native_options = eframe::NativeOptions::default();
-            native_options.viewport.inner_size = Some(egui::Vec2::new(800.0, 550.0));
+            native_options.viewport.inner_size = Some(egui::Vec2::new(800.0, 600.0));
             native_options.viewport.resizable = Some(true);
+            
+            
+            if let Ok(img) = image::open("logo.png") {
+                let rgba_img = img.into_rgba8();
+                let (width, height) = rgba_img.dimensions();
+                let rgba = rgba_img.into_raw();
+                let icon = egui::IconData {
+                    rgba,
+                    width,
+                    height,
+                };
+                native_options.viewport.icon = Some(std::sync::Arc::new(icon));
+            }
 
             if let Err(e) = eframe::run_native(
                 "KGet Downloader",
                 native_options,
                 Box::new(move |cc| {
+                    
+                    egui_extras::install_image_loaders(&cc.egui_ctx);
                     Ok(Box::new(KGetGui::new(cc, download_tx, status_rx_gui)))
                 }),
             ) {
@@ -254,19 +292,18 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                 return Err("Failed to launch GUI".into());
             }
 
-            // Encerra o programa após fechar a GUI para não tentar rodar o modo CLI sem URL
+            
             return Ok(());
         }
 
         #[cfg(not(feature = "gui"))]
         {
             eprintln!("GUI support was not compiled in. Rebuild with `--features gui` to enable it.");
-            // Se tentou abrir GUI sem suporte, mas tem URL, deixa cair pro modo CLI?
-            // Não, melhor avisar e sair se foi intencional.
+            
             if args.gui {
                 return Err("GUI not available (compile with --features gui)".into());
             }
-            // Se caiu aqui porque não tinha URL, mostra o help
+            
             if args.url.is_empty() {
                 Args::command().print_help()?;
                 return Ok(());
@@ -275,14 +312,14 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     }
 
     // ==========================================================
-    // MODO CLI (Só executa se não entrou no bloco da GUI acima)
+    //                         CLI MODE 
     // ==========================================================
 
     let optimizer = Optimizer::new(config.optimization.clone());
 
     if args.ftp {
         let url = args.url.clone();
-        let output = args.output.unwrap_or_else(|| utils::get_filename_from_url_or_default(&url, "ftp_output"));
+        let output = utils::resolve_output_path(args.output, &url, "ftp_output");
         let downloader = FtpDownloader::new(
             url.to_owned(),
             output,
@@ -295,7 +332,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     if args.sftp {
         let url = args.url.clone();
-        let output = args.output.unwrap_or_else(|| utils::get_filename_from_url_or_default(&url, "sftp_output"));
+        let output = utils::resolve_output_path(args.output, &url, "sftp_output");
         let downloader = SftpDownloader::new(
             url.to_owned(),
             output,
@@ -317,33 +354,34 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         tokio::runtime::Runtime::new()?
             .block_on(downloader.download())?;
     } else if args.advanced {
+        let output = utils::resolve_output_path(args.output, &args.url, "advanced_output");
         let downloader = AdvancedDownloader::new(
             args.url.clone(),
-            args.output.unwrap_or_else(|| utils::get_filename_from_url_or_default(&args.url, "advanced_output")),
+            output,
             args.quiet,
             config.proxy,
             optimizer,
         );
         downloader.download()?;
     } else {
-        // Criamos as opções uma única vez
+        
         let options = DownloadOptions {
             quiet_mode: args.quiet,
             output_path: args.output.clone(),
-            verify_iso: false, // O CLI gerencia a pergunta manualmente abaixo
+            verify_iso: false, 
         };
 
-        cli_download(&args.url, config.proxy, optimizer, options)?;
+        cli_download(&args.url, config.proxy, optimizer, options, None)?;
 
-        // COMPORTAMENTO CLI: Pergunta apenas se for um arquivo ISO e não estiver em modo quiet
+       
         if !args.quiet && args.url.to_lowercase().ends_with(".iso") {
             println!("\nThis is an ISO file. Would you like to verify its integrity? (y/N)");
             let mut input = String::new();
             if std::io::stdin().read_line(&mut input).is_ok() && input.trim().to_lowercase() == "y" {
-                // Descobrimos o nome do arquivo para passar para a função de verificação
+               
                 let filename = utils::get_filename_from_url_or_default(&args.url, "download.iso");
                 let path = std::path::Path::new(&filename);
-                verify_iso_integrity(path)?;
+                verify_iso_integrity(path, None)?;
             }
         }
     }

@@ -37,3 +37,22 @@ pub fn get_filename_from_url_or_default(url_str: &str, default_filename: &str) -
     // Returns the default filename if parsing fails or the path is empty/invalid
     default_filename.to_string()
 }
+
+/// Resolves the final output path.
+/// If output_arg is None, extracts filename from URL.
+/// If output_arg is a directory, appends filename from URL.
+/// If output_arg is a file path, uses it as is.
+pub fn resolve_output_path(output_arg: Option<String>, url: &str, default_name: &str) -> String {
+    if let Some(path_str) = output_arg {
+        let path = std::path::Path::new(&path_str);
+        if path.is_dir() {
+            let filename = get_filename_from_url_or_default(url, default_name);
+            path.join(filename).to_string_lossy().to_string()
+        } else {
+            path_str
+        }
+    } else {
+        get_filename_from_url_or_default(url, default_name)
+    }
+}
+

@@ -45,13 +45,16 @@ pub fn download(
     target: &str,
     proxy: ProxyConfig,
     optimizer: Optimizer,
-    options: DownloadOptions, 
+    options: DownloadOptions,
+    status_callback: Option<&(dyn Fn(String) + Send + Sync)>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let quiet_mode = options.quiet_mode;
-    // ... restante da lógica de download (client builder, retries, etc) ...
+   
 
     let mut client_builder = Client::builder()
-        .timeout(Duration::from_secs(30));
+        .timeout(Duration::from_secs(30))
+        .no_gzip()
+        .no_deflate();
 
     if proxy.enabled {
         if let Some(proxy_url) = &proxy.url {
@@ -131,7 +134,7 @@ pub fn download(
 
     let mut tentative_path: PathBuf;
 
-    if let Some(output_arg_str) = options.output_path { // Corrigido para output_path
+    if let Some(output_arg_str) = options.output_path { 
         let user_path = PathBuf::from(output_arg_str.clone());
 
         let is_target_dir = user_path.is_dir() || 
@@ -199,24 +202,30 @@ pub fn download(
     let mut source = response.take(response_content_length.unwrap_or(u64::MAX));
     let mut buffered_reader = progress.wrap_read(&mut source);
     
-    let mut buffer = Vec::new();
-    buffered_reader.read_to_end(&mut buffer)?;
+    // Stream data instead of reading all into memory
+    let mut buffer = [0u8; 8192];
+    loop {
+        let n = buffered_reader.read(&mut buffer)?;
+        if n == 0 { break; }
+        dest.write_all(&buffer[..n])?;
+    }
     
-    // ... lógica de salvamento existente ...
-        dest.write_all(&buffer)?;
-        progress.finish_with_message("Download completed\n");
+    progress.finish_with_message("Download completed\n");
 
-    // A LIB decide se verifica baseada na OPÇÃO recebida, não em perguntas
+    
     if is_iso && options.verify_iso {
-        verify_iso_integrity(&final_path)?;
+        verify_iso_integrity(&final_path, status_callback)?;
     }
 
     Ok(())
 }
 
-// Tornamos pública para que outros desenvolvedores possam usar só a verificação se quiserem
-pub fn verify_iso_integrity(path: &Path) -> Result<(), Box<dyn Error + Send + Sync>> {
-    println!("Calculating SHA256 hash... (this may take a while for large ISOs)");
+
+pub fn verify_iso_integrity(path: &Path, callback: Option<&(dyn Fn(String) + Send + Sync)>) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let msg = "Calculating SHA256 hash... (this may take a while for large ISOs)";
+    if let Some(cb) = callback { cb(msg.to_string()); }
+    println!("{}", msg);
+
     let mut file = File::open(path)?;
     let mut hasher = sha2::Sha256::new();
     let mut buffer = [0; 8192];
@@ -226,8 +235,15 @@ pub fn verify_iso_integrity(path: &Path) -> Result<(), Box<dyn Error + Send + Sy
         hasher.update(&buffer[..n]);
     }
     let hash = hex::encode(hasher.finalize());
-    println!("Integrity check finished.");
+    
+    let msg_done = "Integrity check finished.";
+    if let Some(cb) = callback { cb(msg_done.to_string()); }
+    println!("{}", msg_done);
+
+    let msg_hash = format!("SHA256: {}", hash);
+    if let Some(cb) = callback { cb(msg_hash); }
     println!("SHA256: {}", hash);
+    
     println!("You can compare this hash with the one provided by the source.");
     Ok(())
 }

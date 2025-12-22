@@ -152,39 +152,66 @@ impl eframe::App for KGetGui {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.process_status_updates();
 
+        // Custom Dark Theme Colors
+        let mut visuals = egui::Visuals::dark();
+        visuals.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(20, 20, 25); // Darker background
+        visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(35, 35, 45);
+        visuals.selection.bg_fill = egui::Color32::from_rgb(60, 140, 220); // KGet Blue
+        ctx.set_visuals(visuals);
+
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.vertical_centered(|ui| {
-                ui.add_space(5.0);
-                ui.heading("📥 KGet Downloader");
-                ui.add_space(15.0);
+                ui.add_space(10.0);
+                
+                // Logo Display
+                // Tenta carregar o logo.png do diretório atual. Se falhar, mostra o texto.
+                ui.add(egui::Image::new("file://logo.png")
+                    .max_width(120.0)
+                    .rounding(10.0));
+                
+                ui.add_space(10.0);
+                ui.heading(egui::RichText::new("KGet Downloader").size(24.0).strong());
+                ui.label(egui::RichText::new("Fast & Reliable Download Manager").italics().weak());
+                ui.add_space(20.0);
             });
 
             egui::ScrollArea::vertical().show(ui, |ui| {
-                egui::Frame::group(ui.style()).show(ui, |ui| {
+                egui::Frame::group(ui.style())
+                    .fill(egui::Color32::from_rgb(30, 30, 35))
+                    .rounding(8.0)
+                    .inner_margin(15.0)
+                    .show(ui, |ui| {
                     ui.set_width(ui.available_width());
 
-                    ui.strong("Download Details");
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("🔗").size(16.0));
+                        ui.strong("Download Source");
+                    });
                     ui.add_space(5.0);
 
-                    ui.label("URL de Origem:");
                     ui.horizontal(|ui| {
                         ui.add(egui::TextEdit::singleline(&mut self.url)
-                            .hint_text("Cole o link aqui...")
+                            .hint_text("Paste your link here (HTTP, FTP, Magnet)...")
                             .desired_width(ui.available_width() - 90.0));
 
-                        if ui.button("📋 Colar").clicked() {
+                        if ui.button("📋 Paste").clicked() {
                             if let Ok(mut cb) = arboard::Clipboard::new() {
                                 if let Ok(text) = cb.get_text() { self.url = text; }
                             }
                         }
                     });
 
-                    ui.add_space(10.0);
+                    ui.add_space(15.0);
 
-                    ui.label("Caminho de Destino:");
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("📂").size(16.0));
+                        ui.strong("Destination Folder");
+                    });
+                    ui.add_space(5.0);
+                    
                     ui.horizontal(|ui| {
                         ui.add(egui::TextEdit::singleline(&mut self.output_path).desired_width(ui.available_width() - 90.0));
-                        if ui.button("📂 Abrir").clicked() {
+                        if ui.button("📂 Browse").clicked() {
                             self.select_output_directory();
                         }
                     });
@@ -194,16 +221,17 @@ impl eframe::App for KGetGui {
 
                 ui.group(|ui| {
                     ui.set_width(ui.available_width());
-                    ui.strong("Configurações");
+                    ui.strong("⚙ Options");
+                    ui.add_space(5.0);
                     ui.horizontal(|ui| {
-                        ui.checkbox(&mut self.is_advanced, "⚡ Download Paralelo (Mais Rápido)");
-                        ui.checkbox(&mut self.verify_iso, "🔍 Verificar ISO ao finalizar");
+                        ui.checkbox(&mut self.is_advanced, "⚡ Parallel Download (Faster)");
+                        ui.checkbox(&mut self.verify_iso, "🔍 Verify Integrity (SHA256)");
                     });
                 });
 
                 ui.add_space(20.0);
 
-                // Seção de Progresso
+                
                 ui.vertical_centered(|ui| {
                     let pb = egui::ProgressBar::new(self.current_progress)
                         .show_percentage()
@@ -221,9 +249,15 @@ impl eframe::App for KGetGui {
                             .fill(egui::Color32::from_rgb(39, 174, 96));
                         if ui.add_sized([250.0, 45.0], download_btn).clicked() {
                             if self.validate_input().is_ok() {
+                                let final_output_path = crate::utils::resolve_output_path(
+                                    Some(self.output_path.clone()),
+                                    &self.url,
+                                    "downloaded_file"
+                                );
+
                                 self.download_tx.send(DownloadCommand::Start {
                                     url: self.url.clone(),
-                                    output_path: self.output_path.clone(),
+                                    output_path: final_output_path,
                                     is_advanced: self.is_advanced,
                                     verify_iso: self.verify_iso,
                                 }).ok();
@@ -234,7 +268,7 @@ impl eframe::App for KGetGui {
                 });
             });
 
-            // Rodapé com Status
+            
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
                 ui.add_space(5.0);
                 let color = if self.status_text.contains("Error") { egui::Color32::LIGHT_RED }

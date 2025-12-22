@@ -61,7 +61,7 @@ fn run_simple(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn Erro
     };
 
     println!("Starting simple download...");
-    download(&url, config.proxy, Optimizer::new(config.optimization), options)?;
+    download(&url, config.proxy, Optimizer::new(config.optimization), options, None)?;
     Ok(())
 }
 
@@ -101,7 +101,7 @@ fn run_auto_verify(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn
     };
 
     println!("Downloading ISO with automatic integrity check enabled...");
-    download(&url, config.proxy, Optimizer::new(config.optimization), options)?;
+    download(&url, config.proxy, Optimizer::new(config.optimization), options, None)?;
     Ok(())
 }
 
@@ -128,7 +128,7 @@ fn run_progress_demo() {
 fn run_verify_only(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn Error + Send + Sync>> {
     let path = args.next().expect("File path required");
     println!("Running SHA256 check for: {}", path);
-    verify_iso_integrity(Path::new(&path))?;
+    verify_iso_integrity(Path::new(&path), None)?;
     Ok(())
 }
 

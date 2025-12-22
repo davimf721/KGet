@@ -42,6 +42,8 @@ ssh2 = "0.9"
 url = "2.4"
 suppaftp = "5.1"
 socks = "0.3"
+sha2 = "0.11.0-rc.3"
+hex = "0.4"
 transmission-rpc = "0.4"
 reqwest = { version = "0.12.15", features = [
     "blocking",
@@ -51,12 +53,12 @@ reqwest = { version = "0.12.15", features = [
     "rustls-tls"
 ]}
 rustyline = "16.0.0"
-sha2 = "0.11.0-rc.3"
-hex = "0.4.3"
+windows-sys = { version = "0.52", features = ["Win32_System_Console"] }
+
 [features]
 default = []
 # Opt-in GUI feature pulls GUI-related dependencies
-gui = ["eframe", "egui", "rfd", "arboard", "opener"]
+gui = ["eframe", "egui", "rfd", "arboard", "opener", "image", "egui_extras"]
 
 [dependencies.eframe]
 version = "0.31.1"
@@ -76,6 +78,16 @@ optional = true
 
 [dependencies.opener]
 version = "0.8.1"
+optional = true
+
+[dependencies.image]
+version = "0.24"
+features = ["png", "jpeg", "ico"]
+optional = true
+
+[dependencies.egui_extras]
+version = "0.31.1"
+features = ["all_loaders"]
 optional = true
 
 [dev-dependencies]
