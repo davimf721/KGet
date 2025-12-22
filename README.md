@@ -1,4 +1,6 @@
-# KelpsGet now is KGet!  v1.5.2 (Latest Release)
+<img width="1000" height="500" alt="image" src="https://github.com/user-attachments/assets/d0888e3f-90a2-42d6-a9aa-b216dc36f1f4" />
+
+# KGet!  v1.5.2 (Latest Release)
 
 A modern, lightweight, and versatile downloader written in Rust for fast and reliable file downloads via command line (CLI) and graphical user interface (GUI).
 
