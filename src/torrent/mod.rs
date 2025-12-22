@@ -1,17 +1,19 @@
 use std::error::Error;
+use std::process::Command;
+use std::sync::Arc;
 use std::time::Duration;
+
 use tokio::time::sleep;
 use url::Url;
 use transmission_rpc::{
     types::{BasicAuth, TorrentAddArgs, Id, TorrentGetField, TorrentStatus},
     TransClient,
 };
+
 use crate::config::ProxyConfig;
 use crate::optimization::Optimizer;
 use crate::progress::create_progress_bar;
 use crate::utils::print;
-#[cfg(feature = "gui")]
-use opener;
 
 pub struct TorrentDownloader {
     url: String,
@@ -19,6 +21,10 @@ pub struct TorrentDownloader {
     quiet: bool,
     proxy: ProxyConfig,
     optimizer: Optimizer,
+
+    // Optional callbacks (useful for GUI)
+    status_cb: Option<Arc<dyn Fn(String) + Send + Sync>>,
+    progress_cb: Option<Arc<dyn Fn(f32) + Send + Sync>>,
 }
 
 impl TorrentDownloader {
@@ -35,217 +41,224 @@ impl TorrentDownloader {
             quiet,
             proxy,
             optimizer,
+            status_cb: None,
+            progress_cb: None,
         }
     }
 
-    pub async fn download(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
-        // Configure transmission URL with proxy if needed
-        let transmission_url = if self.proxy.enabled && self.proxy.url.is_some() {
-            // Só usa o proxy se estiver habilitado E uma URL de proxy for fornecida
-            let base_proxy_url = self.proxy.url.as_ref().unwrap(); // Sabemos que é Some
-            if self.proxy.username.is_some() && self.proxy.password.is_some() {
-                // Proxy com autenticação
-                format!("http://{}:{}@{}/transmission/rpc",
-                    self.proxy.username.as_deref().unwrap_or(""),
-                    self.proxy.password.as_deref().unwrap_or(""),
-                    base_proxy_url.trim_start_matches("http://").trim_start_matches("https://") // Remove esquema se presente
-                )
-            } else {
-                // Proxy sem autenticação
-                format!("http://{}/transmission/rpc", 
-                    base_proxy_url.trim_start_matches("http://").trim_start_matches("https://") // Remove esquema se presente
-                )
-            }
-        } else {
-            // Proxy desabilitado ou URL do proxy não fornecida, usa o endereço padrão do Transmission
-            "http://localhost:9091/transmission/rpc".to_string()
+    pub fn set_status_callback<F>(&mut self, cb: F)
+    where
+        F: Fn(String) + Send + Sync + 'static,
+    {
+        self.status_cb = Some(Arc::new(cb));
+    }
+
+    pub fn set_progress_callback<F>(&mut self, cb: F)
+    where
+        F: Fn(f32) + Send + Sync + 'static,
+    {
+        self.progress_cb = Some(Arc::new(cb));
+    }
+
+    fn emit_status(&self, msg: impl Into<String>) {
+        let msg = msg.into();
+        if let Some(cb) = &self.status_cb {
+            cb(msg.clone());
+        }
+        if !self.quiet {
+            print(&msg, self.quiet);
+        }
+    }
+
+    fn emit_progress(&self, p: f32) {
+        if let Some(cb) = &self.progress_cb {
+            cb(p.clamp(0.0, 1.0));
+        }
+    }
+
+    fn open_url_system(url: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+        #[cfg(windows)]
+        {
+            // "start" is a shell builtin, so we must call via cmd
+            Command::new("cmd")
+                .args(["/C", "start", "", url])
+                .spawn()?;
+            return Ok(());
+        }
+        #[cfg(target_os = "macos")]
+        {
+            Command::new("open").arg(url).spawn()?;
+            return Ok(());
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            Command::new("xdg-open").arg(url).spawn()?;
+            return Ok(());
+        }
+        #[allow(unreachable_code)]
+        Err("Unsupported platform for opening URLs".into())
+    }
+
+    fn transmission_settings_from_env() -> (String, Option<BasicAuth>) {
+        let url = std::env::var("KGET_TRANSMISSION_URL")
+            .unwrap_or_else(|_| "http://localhost:9091/transmission/rpc".to_string());
+
+        let user = std::env::var("KGET_TRANSMISSION_USER").ok();
+        let pass = std::env::var("KGET_TRANSMISSION_PASS").ok();
+
+        let auth = match (user, pass) {
+            (Some(u), Some(p)) if !u.is_empty() => Some(BasicAuth { user: u, password: p }),
+            _ => None,
         };
 
-        // Create Transmission RPC client
-        let mut client = TransClient::with_auth(
-            Url::parse(&transmission_url)?,
-            BasicAuth {
-                user: "transmission".into(), // Usuário padrão do Transmission, ajuste se necessário
-                password: "transmission".into(), // Senha padrão do Transmission, ajuste se necessário
-            },
-        );
+        (url, auth)
+    }
 
-        // Print status
-        if !self.quiet {
-            print(&format!("Adding torrent: {}", self.url), self.quiet);
-        }
+    pub async fn download(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        // NOTE: proxy config is NOT a Transmission RPC URL. Keep proxy for future peer/rpc proxying if needed.
+        let (transmission_url, auth) = Self::transmission_settings_from_env();
 
-        // Add torrent
+        let url = Url::parse(&transmission_url).map_err(|e| {
+            format!(
+                "Invalid Transmission RPC URL '{}': {}. Set KGET_TRANSMISSION_URL.",
+                transmission_url, e
+            )
+        })?;
+
+        // Create Transmission RPC client (with auth only if provided)
+        let mut client = if let Some(auth) = auth {
+            TransClient::with_auth(url, auth)
+        } else {
+            TransClient::new(url)
+        };
+
+        self.emit_status(format!("Adding torrent: {}", self.url));
+
         let args = TorrentAddArgs {
             filename: Some(self.url.clone()),
             download_dir: Some(self.output.clone()),
             paused: Some(false),
-            // Apply optimization settings
             peer_limit: Some(self.optimizer.get_peer_limit() as i64),
             ..Default::default()
         };
 
-        let response = client.torrent_add(args).await.map_err(|e| {
-            Box::<dyn Error + Send + Sync>::from(format!("Failed to add torrent: {}", e))
-        })?;
-        
-        // Extrai o torrent ID corretamente
-        let torrent_id = match &response.arguments {
-            transmission_rpc::types::TorrentAddedOrDuplicate::TorrentAdded(added) => {
-                added.id.map(Id::Id).ok_or_else(|| Box::<dyn Error + Send + Sync>::from("TorrentAdded response missing ID"))?
-            },
-            transmission_rpc::types::TorrentAddedOrDuplicate::TorrentDuplicate(duplicate) => {
-                duplicate.id.map(Id::Id).ok_or_else(|| Box::<dyn Error + Send + Sync>::from("TorrentDuplicate response missing ID"))?
-            },
-            _ => { // Este caso pode precisar de ajuste dependendo se há uma variante de Erro explícita
-                return Err(Box::<dyn Error + Send + Sync>::from("Failed to get torrent ID from response, unexpected variant"));
+        let response = match client.torrent_add(args).await {
+            Ok(r) => r,
+            Err(e) => {
+                let msg = format!(
+                    "Failed to reach Transmission RPC at {}. \
+Ensure Transmission is running and RPC is enabled, or set KGET_TRANSMISSION_URL. \
+Falling back to opening magnet in your default torrent client. Details: {}",
+                    transmission_url, e
+                );
+                self.emit_status(msg);
+
+                // Fallback: open magnet in system default handler
+                Self::open_url_system(&self.url)?;
+                return Ok(());
             }
         };
 
-        // Abrir a interface web do Transmission (somente se o feature `gui` estiver presente)
-        if !self.quiet {
-            let transmission_web_url = "http://localhost:9091/transmission/web/";
-            print(&format!("\nStarting the Download!\n"), self.quiet);
-            print(&format!("\nOpening Transmission web UI: {}\n", transmission_web_url), self.quiet);
-            #[cfg(feature = "gui")]
-            if let Err(e) = opener::open(transmission_web_url) {
-                print(&format!("Warning: Could not open web browser: {}", e), self.quiet);
-                // Não retornar um erro aqui, pois o download pode prosseguir
+        let torrent_id = match &response.arguments {
+            transmission_rpc::types::TorrentAddedOrDuplicate::TorrentAdded(added) => {
+                added.id.map(Id::Id).ok_or_else(|| {
+                    Box::<dyn Error + Send + Sync>::from("TorrentAdded response missing ID")
+                })?
             }
-            #[cfg(not(feature = "gui"))]
-            {
-                // Quando compilado sem GUI, apenas informe a URL ao usuário.
-                print("GUI feature disabled; abra a URL manualmente se quiser gerenciar o download.", self.quiet);
+            transmission_rpc::types::TorrentAddedOrDuplicate::TorrentDuplicate(duplicate) => {
+                duplicate.id.map(Id::Id).ok_or_else(|| {
+                    Box::<dyn Error + Send + Sync>::from("TorrentDuplicate response missing ID")
+                })?
             }
-        }
+            _ => {
+                return Err(Box::<dyn Error + Send + Sync>::from(
+                    "Failed to get torrent ID from response",
+                ));
+            }
+        };
 
-        // Setup progress bar
-        let progress = create_progress_bar(
-            self.quiet,
-            "Downloading torrent".to_string(),
-            None,
-            false
-        );
+        // Open Transmission web UI (best-effort)
+        let transmission_web_url = std::env::var("KGET_TRANSMISSION_WEB")
+            .unwrap_or_else(|_| "http://localhost:9091/transmission/web/".to_string());
+        let _ = Self::open_url_system(&transmission_web_url);
 
-        // Monitor download progress
-        let mut attempt_count = 0;
-        let max_attempts = 1800; // 30 minutes timeout (1800 seconds)
-        
+        // CLI progress bar (GUI uses callback)
+        let progress = create_progress_bar(self.quiet, "Downloading torrent".to_string(), None, false);
+
+        let mut attempt_count = 0u32;
+        let max_attempts = 1800u32; // 30 minutes
+
         loop {
             if attempt_count >= max_attempts {
-                progress.finish_with_message("Download timeout or stalled."); // Mensagem mais informativa
+                progress.finish_with_message("Download timeout or stalled.");
                 return Err("Download timeout after 30 minutes or torrent stalled".into());
             }
-            
-            let torrent_info_result = client.torrent_get( // Renomeado para evitar sombreamento
-                Some(vec![
-                    TorrentGetField::PercentDone,
-                    TorrentGetField::Status,
-                    TorrentGetField::Name,
-                    TorrentGetField::RateDownload,
-                    TorrentGetField::Eta,
-                    TorrentGetField::Error, // Adicionar campo de erro para verificar erros do daemon
-                    TorrentGetField::ErrorString,
-                ]),
-                Some(vec![torrent_id.clone()])
-            ).await;
 
-            if let Err(e) = torrent_info_result {
-                // Se falhar ao obter informações do torrent, pode ser um problema de conexão
-                progress.abandon_with_message("Failed to get torrent info");
-                return Err(e);
-            }
-            let torrent_info = torrent_info_result.unwrap();
+            let torrent_info = client
+                .torrent_get(
+                    Some(vec![
+                        TorrentGetField::PercentDone,
+                        TorrentGetField::Status,
+                        TorrentGetField::Name,
+                        TorrentGetField::RateDownload,
+                        TorrentGetField::Eta,
+                        TorrentGetField::Error,
+                        TorrentGetField::ErrorString,
+                    ]),
+                    Some(vec![torrent_id.clone()]),
+                )
+                .await?;
 
-
-            if let Some(t) = torrent_info.arguments.torrents.first() {
-                let percent_done = t.percent_done.unwrap_or(0.0);
-                let current_progress = (percent_done * 100.0) as u64;
-                progress.set_position(current_progress);
-                
-                if let Some(name) = &t.name {
-                    let speed_kb = t.rate_download.map_or(0, |rate| rate / 1024);
-                    progress.set_message(format!(
-                        "{} - {:.2}% - {} KB/s", 
-                        name, 
-                        percent_done * 100.0, // Usar float para precisão na mensagem
-                        speed_kb
-                    ));
-                }
-
-                // Verificar se há um erro reportado pelo daemon para este torrent
-                if let Some(error_code) = t.error {
-                    if (error_code as i32) != 0 { // 0 geralmente significa sem erro
-                        let error_message = t.error_string.as_deref().unwrap_or("Unknown torrent error");
-                        progress.abandon_with_message(format!("Torrent error: {}", error_message));
-                        return Err(format!("Torrent error (code {:?}): {}", error_code, error_message).into());
-                    }
-                }
-
-                // Check if download is complete
-                if percent_done >= 1.0 {
-                    progress.set_message(format!(
-                        "{} - Complete",
-                        t.name.as_deref().unwrap_or("Torrent")
-                    ));
-                    break; // Sai do loop se completo
-                }
-                
-                // Check for torrent status
-                if let Some(status) = t.status {
-                    match status {
-                        TorrentStatus::Stopped => {
-                            // Se estiver parado, mas não completo, pode ser um problema ou apenas o estado inicial de um duplicado.
-                            // Damos algumas tentativas para ver se ele inicia.
-                            if attempt_count > 5 && percent_done < 1.0 { // Após 5 segundos, se ainda parado e não completo
-                                progress.abandon_with_message("Torrent stopped and not progressing.");
-                                return Err(format!(
-                                    "Torrent '{}' stopped and not progressing.",
-                                    t.name.as_deref().unwrap_or("Unknown")
-                                ).into());
-                            }
-                            // Se estiver parado e completo, o break acima já teria sido acionado.
-                        }
-                        TorrentStatus::Downloading => { 
-                            // Tudo ok, está baixando
-                        }
-                        TorrentStatus::Seeding => {    
-                            // Se estiver semeando, e percent_done < 1.0, algo está estranho, mas vamos deixar o loop de percent_done tratar.
-                            // Se percent_done >= 1.0, o break acima trata.
-                        }
-                        
-                        _ => {
-                            // Para outros status não explicitamente tratados (como DownloadWait, SeedWait)
-                            // você pode querer apenas continuar ou logar, dependendo da sua lógica.
-                        }
-                    }
-                }
-            } else {
-                // Não deveria acontecer se o ID do torrent for válido
+            let Some(t) = torrent_info.arguments.torrents.first() else {
                 progress.abandon_with_message("Torrent info not found.");
                 return Err("Torrent info not found after adding.".into());
+            };
+
+            let percent_done = t.percent_done.unwrap_or(0.0).clamp(0.0, 1.0);
+            self.emit_progress(percent_done);
+
+            progress.set_position((percent_done * 100.0) as u64);
+
+            if let Some(name) = &t.name {
+                let speed_kb = t.rate_download.map_or(0, |rate| rate / 1024);
+                let msg = format!("{} - {:.2}% - {} KB/s", name, percent_done * 100.0, speed_kb);
+                progress.set_message(msg.clone());
+                // Keep GUI status useful but not too spammy
+                if attempt_count % 2 == 0 {
+                    self.emit_status(msg);
+                }
+            }
+
+            if let Some(error_code) = t.error {
+                if (error_code as i32) != 0 {
+                    let error_message = t.error_string.as_deref().unwrap_or("Unknown torrent error");
+                    progress.abandon_with_message(format!("Torrent error: {}", error_message));
+                    return Err(format!("Torrent error (code {:?}): {}", error_code, error_message).into());
+                }
+            }
+
+            if percent_done >= 1.0 {
+                progress.set_message(format!("{} - Complete", t.name.as_deref().unwrap_or("Torrent")));
+                self.emit_progress(1.0);
+                break;
+            }
+
+            if let Some(status) = t.status {
+                if matches!(status, TorrentStatus::Stopped) && attempt_count > 5 && percent_done < 1.0 {
+                    progress.abandon_with_message("Torrent stopped and not progressing.");
+                    return Err(format!(
+                        "Torrent '{}' stopped and not progressing.",
+                        t.name.as_deref().unwrap_or("Unknown")
+                    ).into());
+                }
             }
 
             attempt_count += 1;
             sleep(Duration::from_secs(1)).await;
         }
 
-        progress.finish_with_message(format!(
-            "Download of '{}' completed successfully!",
-            // Tenta obter o nome do torrent uma última vez para a mensagem final
-            client.torrent_get(Some(vec![TorrentGetField::Name]), Some(vec![torrent_id]))
-                  .await
-                  .ok()
-                  .and_then(|resp| resp.arguments.torrents.first().and_then(|t| t.name.clone()))
-                  .unwrap_or_else(|| "Torrent".to_string())
-        ));
-        
-        // Apply optimizer if needed
-        if self.optimizer.is_compression_enabled() {
-            print("Optimizing downloaded files...", self.quiet);
-            // Implement compression here if needed
-        }
-
+        progress.finish_with_message("Torrent completed successfully!");
+        self.emit_status("Torrent completed successfully!".to_string());
         Ok(())
     }
 }

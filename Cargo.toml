@@ -53,7 +53,6 @@ reqwest = { version = "0.12.15", features = [
     "rustls-tls"
 ]}
 rustyline = "16.0.0"
-windows-sys = { version = "0.52", features = ["Win32_System_Console"] }
 
 [features]
 default = []
@@ -93,3 +92,6 @@ optional = true
 [dev-dependencies]
 tempfile = "3.2"
 mockito = "0.31"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = ["Win32_System_Console", "Win32_Foundation"] }

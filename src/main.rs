@@ -128,7 +128,7 @@ fn download_worker(
     config: Config,
     download_rx: MpscReceiver<DownloadCommand>,
     status_tx: MpscSender<WorkerToGuiMessage>,
-    _runtime: tokio::runtime::Runtime,
+    mut runtime: tokio::runtime::Runtime,
 ) {
     for command in download_rx {
         match command {
@@ -138,11 +138,37 @@ fn download_worker(
                 let optimizer = Optimizer::new(config.optimization.clone());
                 let proxy = config.proxy.clone();
 
-                let result: Result<(), Box<dyn Error + Send + Sync>> = if is_advanced {
+                // --- FIX: magnet links must go through the torrent downloader ---
+                let is_magnet = url.starts_with("magnet:?");
+                let result: Result<(), Box<dyn Error + Send + Sync>> = if is_magnet {
+                    let _ = status_tx.send(WorkerToGuiMessage::StatusUpdate(
+                        "Starting torrent download (magnet link)...".to_string(),
+                    ));
+
+                    let mut downloader = TorrentDownloader::new(
+                        url.clone(),
+                        output_path.clone(), // directory
+                        true,                // quiet: GUI mode
+                        proxy,
+                        optimizer,
+                    );
+
+                    let status_tx_clone = status_tx.clone();
+                    downloader.set_status_callback(move |msg| {
+                        status_tx_clone.send(WorkerToGuiMessage::StatusUpdate(msg)).ok();
+                    });
+
+                    let status_tx_clone2 = status_tx.clone();
+                    downloader.set_progress_callback(move |p| {
+                        status_tx_clone2.send(WorkerToGuiMessage::Progress(p)).ok();
+                    });
+
+                    runtime.block_on(downloader.download())
+                } else if is_advanced {
                     let mut downloader = AdvancedDownloader::new(
                         url.clone(),
                         output_path.clone(),
-                        true, 
+                        true,
                         proxy,
                         optimizer,
                     );
@@ -151,7 +177,7 @@ fn download_worker(
                     downloader.set_progress_callback(move |p| {
                         status_tx_clone.send(WorkerToGuiMessage::Progress(p)).ok();
                     });
-                    
+
                     let status_tx_clone2 = status_tx.clone();
                     downloader.set_status_callback(move |msg| {
                         status_tx_clone2.send(WorkerToGuiMessage::StatusUpdate(msg)).ok();
@@ -263,7 +289,8 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
             
             let mut native_options = eframe::NativeOptions::default();
-            native_options.viewport.inner_size = Some(egui::Vec2::new(800.0, 600.0));
+            native_options.viewport.inner_size = Some(egui::Vec2::new(980.0, 680.0));
+            native_options.viewport.min_inner_size = Some(egui::Vec2::new(820.0, 560.0));
             native_options.viewport.resizable = Some(true);
             
             

@@ -154,21 +154,50 @@ impl eframe::App for KGetGui {
 
         // Custom Dark Theme Colors
         let mut visuals = egui::Visuals::dark();
-        visuals.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(20, 20, 25); // Darker background
+        visuals.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(20, 20, 25);
         visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(35, 35, 45);
-        visuals.selection.bg_fill = egui::Color32::from_rgb(60, 140, 220); // KGet Blue
+        visuals.selection.bg_fill = egui::Color32::from_rgb(60, 140, 220);
         ctx.set_visuals(visuals);
+
+        // Footer fixo (altura pequena) - NÃO ocupa a tela toda
+        egui::TopBottomPanel::bottom("kget_footer")
+            .resizable(false)
+            .exact_height(28.0)
+            .show(ctx, |ui| {
+                let color = if self.status_text.contains("Error") {
+                    egui::Color32::LIGHT_RED
+                } else if self.status_text.contains("Completed") {
+                    egui::Color32::GREEN
+                } else {
+                    ui.style().visuals.weak_text_color()
+                };
+
+                let version = env!("CARGO_PKG_VERSION");
+
+                ui.horizontal(|ui| {
+                    ui.colored_label(color, &self.status_text);
+
+                    // Empurra a versão pro canto direito
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new(format!("v{}", version))
+                                .small()
+                                .weak(),
+                        );
+                    });
+                });
+            });
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.vertical_centered(|ui| {
                 ui.add_space(10.0);
-                
-                // Logo Display
-                // Tenta carregar o logo.png do diretório atual. Se falhar, mostra o texto.
-                ui.add(egui::Image::new("file://logo.png")
-                    .max_width(120.0)
-                    .rounding(10.0));
-                
+
+                ui.add(
+                    egui::Image::new("file://logo.png")
+                        .max_width(120.0)
+                        .rounding(10.0),
+                );
+
                 ui.add_space(10.0);
                 ui.heading(egui::RichText::new("KGet Downloader").size(24.0).strong());
                 ui.label(egui::RichText::new("Fast & Reliable Download Manager").italics().weak());
@@ -181,41 +210,47 @@ impl eframe::App for KGetGui {
                     .rounding(8.0)
                     .inner_margin(15.0)
                     .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
+                        ui.set_width(ui.available_width());
 
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("🔗").size(16.0));
-                        ui.strong("Download Source");
-                    });
-                    ui.add_space(5.0);
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("🔗").size(16.0));
+                            ui.strong("Download Source");
+                        });
+                        ui.add_space(5.0);
 
-                    ui.horizontal(|ui| {
-                        ui.add(egui::TextEdit::singleline(&mut self.url)
-                            .hint_text("Paste your link here (HTTP, FTP, Magnet)...")
-                            .desired_width(ui.available_width() - 90.0));
+                        ui.horizontal(|ui| {
+                            let w = (ui.available_width() - 90.0).max(120.0);
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.url)
+                                    .hint_text("Paste your link here (HTTP, FTP, Magnet)...")
+                                    .desired_width(w),
+                            );
 
-                        if ui.button("📋 Paste").clicked() {
-                            if let Ok(mut cb) = arboard::Clipboard::new() {
-                                if let Ok(text) = cb.get_text() { self.url = text; }
+                            if ui.button("📋 Paste").clicked() {
+                                if let Ok(mut cb) = arboard::Clipboard::new() {
+                                    if let Ok(text) = cb.get_text() {
+                                        self.url = text;
+                                    }
+                                }
                             }
-                        }
-                    });
+                        });
 
-                    ui.add_space(15.0);
+                        ui.add_space(15.0);
 
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("📂").size(16.0));
-                        ui.strong("Destination Folder");
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("📂").size(16.0));
+                            ui.strong("Destination Folder");
+                        });
+                        ui.add_space(5.0);
+
+                        ui.horizontal(|ui| {
+                            let w = (ui.available_width() - 90.0).max(120.0);
+                            ui.add(egui::TextEdit::singleline(&mut self.output_path).desired_width(w));
+                            if ui.button("📂 Browse").clicked() {
+                                self.select_output_directory();
+                            }
+                        });
                     });
-                    ui.add_space(5.0);
-                    
-                    ui.horizontal(|ui| {
-                        ui.add(egui::TextEdit::singleline(&mut self.output_path).desired_width(ui.available_width() - 90.0));
-                        if ui.button("📂 Browse").clicked() {
-                            self.select_output_directory();
-                        }
-                    });
-                });
 
                 ui.add_space(15.0);
 
@@ -231,7 +266,6 @@ impl eframe::App for KGetGui {
 
                 ui.add_space(20.0);
 
-                
                 ui.vertical_centered(|ui| {
                     let pb = egui::ProgressBar::new(self.current_progress)
                         .show_percentage()
@@ -241,26 +275,36 @@ impl eframe::App for KGetGui {
                     ui.add_space(10.0);
 
                     if self.is_downloading {
-                        if ui.add_sized([120.0, 40.0], egui::Button::new("🛑 Cancelar")).clicked() {
+                        if ui
+                            .add_sized([120.0, 40.0], egui::Button::new("🛑 Cancelar"))
+                            .clicked()
+                        {
                             self.download_tx.send(DownloadCommand::Cancel).ok();
                         }
                     } else {
-                        let download_btn = egui::Button::new("🚀 Iniciar Download")
-                            .fill(egui::Color32::from_rgb(39, 174, 96));
+                        let download_btn =
+                            egui::Button::new("🚀 Iniciar Download").fill(egui::Color32::from_rgb(39, 174, 96));
                         if ui.add_sized([250.0, 45.0], download_btn).clicked() {
                             if self.validate_input().is_ok() {
-                                let final_output_path = crate::utils::resolve_output_path(
-                                    Some(self.output_path.clone()),
-                                    &self.url,
-                                    "downloaded_file"
-                                );
+                                let is_magnet = self.url.starts_with("magnet:?");
+                                let final_output_path = if is_magnet {
+                                    self.output_path.clone()
+                                } else {
+                                    crate::utils::resolve_output_path(
+                                        Some(self.output_path.clone()),
+                                        &self.url,
+                                        "downloaded_file",
+                                    )
+                                };
 
-                                self.download_tx.send(DownloadCommand::Start {
-                                    url: self.url.clone(),
-                                    output_path: final_output_path,
-                                    is_advanced: self.is_advanced,
-                                    verify_iso: self.verify_iso,
-                                }).ok();
+                                self.download_tx
+                                    .send(DownloadCommand::Start {
+                                        url: self.url.clone(),
+                                        output_path: final_output_path,
+                                        is_advanced: self.is_advanced,
+                                        verify_iso: self.verify_iso,
+                                    })
+                                    .ok();
                                 self.is_downloading = true;
                             }
                         }
@@ -269,16 +313,10 @@ impl eframe::App for KGetGui {
             });
 
             
-            ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
-                ui.add_space(5.0);
-                let color = if self.status_text.contains("Error") { egui::Color32::LIGHT_RED }
-                else if self.status_text.contains("Completed") { egui::Color32::GREEN }
-                else { ui.style().visuals.weak_text_color() };
-                ui.colored_label(color, &self.status_text);
-                ui.separator();
-            });
         });
 
-        if self.is_downloading { ctx.request_repaint_after(std::time::Duration::from_millis(100)); }
+        if self.is_downloading {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
     }
 }
