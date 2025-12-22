@@ -231,11 +231,11 @@ kget [OPTIONS] <URL>
     ```bash
     kget -l 1048576 https://example.com/file.txt  # Limit to 1MB/s
     ```
-*   **Disable Compression (KelpsGet-specific, not HTTP):**
+*   **Disable Compression (KGet-specific, not HTTP):**
     ```bash
-    kelpsget --no-compress https://example.com/file.txt
+    kget --no-compress https://example.com/file.txt
     ```
-*   **Disable Cache (KelpsGet-specific):**
+*   **Disable Cache (KGet-specific):**
     ```bash
     kget --no-cache https://example.com/file.txt
     ```
@@ -246,53 +246,6 @@ To start the GUI:
 kget --gui
 ```
 The GUI allows you to enter the URL, output path, and start downloads. Status and progress are displayed in the interface.
-
-## KGet Configuration
-KGet uses a configuration file at:
-- Windows: `%APPDATA%\kget\config.json`
-- Linux/macOS: `~/.config/kget/config.json`
-
-**Example `config.json` for KGet:**
-```json
-{
-  "proxy": {
-    "enabled": false,
-    "url": null,
-    "username": null,
-    "password": null,
-    "proxy_type": "Http"
-  },
-  "optimization": {
-    "compression": true, // Compression for KGet cache
-    "compression_level": 6,
-    "cache_enabled": true,
-    "cache_dir": "~/.cache/kget", // Expand ~ manually or use absolute path
-    "speed_limit": null,
-    "max_connections": 4
-  },
-  "torrent": {
-    "enabled": true,
-    "transmission_url": "http://localhost:9091/transmission/rpc",
-    "username": "transmission", // User configured in Transmission's settings.json
-    "password": "transmission", // Password configured in Transmission's settings.json
-    "max_peers": 50,
-    "max_seeds": 50,
-    "port": null,
-    "dht_enabled": true,
-    "default_download_dir": null // Default directory for torrent downloads via KGet
-  },
-  "ftp": {
-    "default_port": 21,
-    "passive_mode": true
-  },
-  "sftp": {
-    "default_port": 22,
-    "key_path": null // Path to private SSH key, e.g., "~/.ssh/id_rsa"
-  }
-}
-```
-**Note on `cache_dir` and `key_path`:** If using `~`, ensure your program correctly expands the tilde to the user's home directory, or use absolute paths.
-
 
 
 ## 🔗 Important Links
