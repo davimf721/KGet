@@ -23,8 +23,8 @@ mod optimization;
 mod ftp;
 mod gui_types;
 mod sftp;
-mod torrent;
 mod interactive;
+mod torrent;
 
 #[cfg(feature = "gui")]
 mod gui;
@@ -39,7 +39,6 @@ use crate::gui::KGetGui;
 use crate::gui_types::{DownloadCommand, WorkerToGuiMessage};
 pub use crate::ftp::FtpDownloader;
 pub use crate::sftp::SftpDownloader;
-pub use crate::torrent::TorrentDownloader;
 
 
 use kget::{DownloadOptions, verify_iso_integrity};
@@ -138,32 +137,26 @@ fn download_worker(
                 let optimizer = Optimizer::new(config.optimization.clone());
                 let proxy = config.proxy.clone();
 
-                // --- FIX: magnet links must go through the torrent downloader ---
-                let is_magnet = url.starts_with("magnet:?");
-                let result: Result<(), Box<dyn Error + Send + Sync>> = if is_magnet {
-                    let _ = status_tx.send(WorkerToGuiMessage::StatusUpdate(
-                        "Starting torrent download (magnet link)...".to_string(),
-                    ));
+                let result: Result<(), Box<dyn Error + Send + Sync>> = if url.starts_with("magnet:?") {
+                    let cb = crate::torrent::TorrentCallbacks {
+                        status: Some(std::sync::Arc::new({
+                            let status_tx = status_tx.clone();
+                            move |msg| { status_tx.send(WorkerToGuiMessage::StatusUpdate(msg)).ok(); }
+                        })),
+                        progress: Some(std::sync::Arc::new({
+                            let status_tx = status_tx.clone();
+                            move |p| { status_tx.send(WorkerToGuiMessage::Progress(p)).ok(); }
+                        })),
+                    };
 
-                    let mut downloader = TorrentDownloader::new(
-                        url.clone(),
-                        output_path.clone(), // directory
-                        true,                // quiet: GUI mode
+                    crate::torrent::download_magnet(
+                        &url,
+                        &output_path,
+                        true,
                         proxy,
                         optimizer,
-                    );
-
-                    let status_tx_clone = status_tx.clone();
-                    downloader.set_status_callback(move |msg| {
-                        status_tx_clone.send(WorkerToGuiMessage::StatusUpdate(msg)).ok();
-                    });
-
-                    let status_tx_clone2 = status_tx.clone();
-                    downloader.set_progress_callback(move |p| {
-                        status_tx_clone2.send(WorkerToGuiMessage::Progress(p)).ok();
-                    });
-
-                    runtime.block_on(downloader.download())
+                        cb,
+                    )
                 } else if is_advanced {
                     let mut downloader = AdvancedDownloader::new(
                         url.clone(),
@@ -190,21 +183,18 @@ fn download_worker(
                         output_path: Some(output_path.clone()),
                         verify_iso,
                     };
+
                     let status_tx_clone = status_tx.clone();
                     let status_cb = move |msg: String| {
                         status_tx_clone.send(WorkerToGuiMessage::StatusUpdate(msg)).ok();
-                        ()
                     };
+
                     cli_download(&url, proxy, optimizer, options, Some(&status_cb))
                 };
 
                 match result {
-                    Ok(_) => {
-                        let _ = status_tx.send(WorkerToGuiMessage::Completed(output_path));
-                    }
-                    Err(e) => {
-                        let _ = status_tx.send(WorkerToGuiMessage::Error(e.to_string()));
-                    }
+                    Ok(_) => { let _ = status_tx.send(WorkerToGuiMessage::Completed(output_path)); }
+                    Err(e) => { let _ = status_tx.send(WorkerToGuiMessage::Error(e.to_string())); }
                 }
             }
             DownloadCommand::Cancel => {
@@ -371,15 +361,17 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     }
 
     if args.torrent || args.url.starts_with("magnet:?") {
-        let downloader = TorrentDownloader::new(
-            args.url,
-            args.output.unwrap_or_else(|| "torrent_output".to_string()),
+        let output_dir = args.output.unwrap_or_else(|| "torrent_output".to_string());
+
+        
+        crate::torrent::download_magnet(
+            &args.url,
+            &output_dir,
             args.quiet,
             config.proxy,
             optimizer,
-        );
-        tokio::runtime::Runtime::new()?
-            .block_on(downloader.download())?;
+            crate::torrent::TorrentCallbacks::default(),
+        )?;
     } else if args.advanced {
         let output = utils::resolve_output_path(args.output, &args.url, "advanced_output");
         let downloader = AdvancedDownloader::new(

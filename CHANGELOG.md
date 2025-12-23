@@ -4,8 +4,23 @@
 
 All notable changes to this project will be documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0.html),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [1.5.3] - 2025-12-23
+
+### Added
+- **Torrent backend selection:** magnet links can now be handled by different backends.
+- **Default torrent behavior (no extra features):** if the URL is a `magnet:?` link, KGet opens it using the system's default BitTorrent client (automatic detection via OS handler).
+- **Optional Transmission RPC backend:** build with `--features torrent-transmission` and set `KGET_TORRENT_BACKEND=transmission` to download via Transmission RPC.
+- **Transmission settings helper:** centralized settings for host/port/paths and optional auth (env-compatible).
+
+### Changed
+- **GUI footer:** app version is displayed in the bottom-right corner.
+- **GUI window sizing:** improved default/min window sizing for a better first launch experience.
+
+### Fixed
+- Build fixes and feature-gating improvements for optional components (torrent backends / GUI split).
 
 ## [1.5.2] - 2025-12-19
 

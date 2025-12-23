@@ -1,8 +1,8 @@
 use rustyline::error::ReadlineError;
-use rustyline::Editor;
+use rustyline::DefaultEditor;
 
 pub fn interactive_mode() {
-    let mut rl = Editor::<(), _>::new().unwrap();
+    let mut rl = DefaultEditor::new().unwrap();
     println!("KGet Interactive Mode. Type 'help' for commands, 'exit' to quit.");
 
     loop {
@@ -38,4 +38,25 @@ pub fn interactive_mode() {
             }
         }
     }
+}
+
+pub fn run_interactive_mode() -> Result<(), Box<dyn std::error::Error>> {
+    let mut rl = DefaultEditor::new()?;
+
+    loop {
+        let line = match rl.readline("kget> ") {
+            Ok(l) => l,
+            Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => break,
+            Err(e) => return Err(Box::new(e)),
+        };
+
+        let input = line.trim();
+        if input.is_empty() {
+            continue;
+        }
+
+        // Seu parser/dispatch do modo interativo
+    }
+
+    Ok(())
 }

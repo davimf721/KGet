@@ -1,6 +1,6 @@
 [package]
 name = "Kget"
-version = "1.5.2"
+version = "1.5.3"
 edition = "2024"
 description = "A powerful and versatile download manager and library"
 authors = ["Davi Moreira Fuzatto <davimoreiraf@gmail.com>"]
@@ -44,20 +44,14 @@ suppaftp = "5.1"
 socks = "0.3"
 sha2 = "0.11.0-rc.3"
 hex = "0.4"
-transmission-rpc = "0.4"
-reqwest = { version = "0.12.15", features = [
-    "blocking",
-    "json",
-    "stream",
-    "socks",
-    "rustls-tls"
-]}
-rustyline = "16.0.0"
+transmission-rpc = { version = "0.4", optional = true }
+reqwest = { version = "0.11", features = ["blocking", "json", "gzip", "brotli", "deflate", "stream", "trust-dns"] }
+rustyline = "15"
 
 [features]
 default = []
-# Opt-in GUI feature pulls GUI-related dependencies
-gui = ["eframe", "egui", "rfd", "arboard", "opener", "image", "egui_extras"]
+gui = ["eframe", "egui", "rfd", "arboard", "image", "egui_extras"]
+torrent-transmission = ["transmission-rpc"]
 
 [dependencies.eframe]
 version = "0.31.1"
