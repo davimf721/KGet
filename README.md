@@ -143,10 +143,15 @@ If you encounter issues with the GUI when installing via `cargo install`, compil
 ### Option 3: Download Pre-compiled Binaries
 Check the [Releases](https://github.com/davimf721/KGet/releases) section for the latest binaries for your OS.
 
-#### Linux/macOS:
+#### macOS (.app bundle):
+Download `KGet.app` or the `.dmg` installer, then:
+1. Drag `KGet.app` to your Applications folder
+2. Double-click to launch the GUI, or use the CLI via `KGet.app/Contents/MacOS/kget`
+
+#### Linux/macOS (binary):
 ```bash
-chmod +x ksget  # Make executable
-./kelpsget [URL]    # Run directly
+chmod +x kget  # Make executable
+./kget [URL]   # Run directly
 ```
 #### Windows:
 Run the `.exe` file directly.

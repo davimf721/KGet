@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.5.4] - 2026-02-27
 
 ### Added
+- **macOS App Bundle:** Native `.app` bundle for macOS users with easy drag-and-drop installation.
 - **Easier version flag:** Use `kget -v` or `kget --version` to display version (changed from `-V`).
 - **Comprehensive test suite:** Added 65+ tests covering unit tests, CLI integration tests, and mock server tests.
   - Unit tests for `utils`, `config`, `download`, `optimizer`, `progress`, and URL parsing.
