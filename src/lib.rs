@@ -16,7 +16,10 @@ pub use config::{Config, ProxyConfig, ProxyType};
 pub use optimization::Optimizer;
 pub use download::{download, verify_iso_integrity};
 pub use advanced_download::AdvancedDownloader;
-pub use progress::create_progress_bar; 
+pub use progress::create_progress_bar;
+
+// Re-export utils for tests
+pub use utils::{get_filename_from_url_or_default, resolve_output_path, print}; 
 
 
 #[derive(Debug, Clone)]

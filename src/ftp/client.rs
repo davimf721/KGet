@@ -1,6 +1,5 @@
 use std::error::Error;
-use std::path::Path;
-use std::io::{Read, Write};
+use std::io::Write;
 use url::Url;
 use suppaftp::FtpStream;
 use crate::progress::create_progress_bar;
@@ -13,6 +12,7 @@ pub struct FtpDownloader {
     output_path: String,
     quiet_mode: bool,
     proxy: ProxyConfig,
+    #[allow(dead_code)]
     optimizer: Optimizer,
 }
 

@@ -42,10 +42,10 @@ fn selected_backend() -> String {
 
 pub fn download_magnet(
     magnet: &str,
-    output_dir: &str,
-    quiet: bool,
-    proxy: ProxyConfig,
-    optimizer: Optimizer,
+    _output_dir: &str,
+    _quiet: bool,
+    _proxy: ProxyConfig,
+    _optimizer: Optimizer,
     cb: TorrentCallbacks,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     emit_progress(&cb, 0.0);

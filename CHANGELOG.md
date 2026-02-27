@@ -7,6 +7,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0.html),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.4] - 2026-02-27
+
+### Added
+- **Easier version flag:** Use `kget -v` or `kget --version` to display version (changed from `-V`).
+- **Comprehensive test suite:** Added 65+ tests covering unit tests, CLI integration tests, and mock server tests.
+  - Unit tests for `utils`, `config`, `download`, `optimizer`, `progress`, and URL parsing.
+  - CLI tests verifying all command-line flags and options.
+  - Mock server tests using `wiremock` for HTTP download simulation without real network requests.
+- **Testing infrastructure:** Added `wiremock`, `assert_cmd`, `predicates`, and `tokio-test` as dev-dependencies.
+
+### Changed
+- **Code cleanup:** Resolved all 25 compiler warnings for a cleaner build output.
+- **Removed duplicate SFTP stub:** Consolidated SFTP implementation by removing unused `ftp/sftp.rs` file that conflicted with `sftp/mod.rs`.
+- **Public API improvements:** Exported `get_filename_from_url_or_default`, `resolve_output_path`, and `print` functions from library root.
+
+### Fixed
+- Removed unused imports across multiple modules (`BufWriter`, `Path`, `Read`, `Write`, `Url`, `Session`, `Sftp`, etc.).
+- Fixed unnecessary `mut` declarations in `download_whole()`, `download_chunks_parallel()`, and `download_worker()`.
+- Prefixed intentionally unused function parameters with `_` (`output_dir`, `quiet`, `proxy`, `optimizer` in torrent module).
+- Added `#[allow(dead_code)]` annotations for fields and structs reserved for future use (`TransmissionSettings`, `optimizer` field in downloaders).
+
 ## [1.5.3] - 2025-12-23
 
 ### Added

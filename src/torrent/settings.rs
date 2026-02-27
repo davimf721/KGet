@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransmissionSettings {
     pub host: String,
@@ -23,6 +24,7 @@ impl Default for TransmissionSettings {
     }
 }
 
+#[allow(dead_code)]
 impl TransmissionSettings {
     pub fn rpc_url(&self) -> String {
         let path = if self.rpc_path.starts_with('/') { self.rpc_path.clone() } else { format!("/{}", self.rpc_path) };

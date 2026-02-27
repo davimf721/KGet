@@ -7,7 +7,9 @@ pub struct SftpDownloader {
     url: String,
     output: String,
     quiet: bool,
+    #[allow(dead_code)]
     proxy: ProxyConfig,
+    #[allow(dead_code)]
     optimizer: Optimizer,
 }
 

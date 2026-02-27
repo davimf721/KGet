@@ -1,4 +1,10 @@
 /target
-/tests
-
-
+target2/
+/dmg_assets
+/.idea
+/.github
+/.vscode
+Kget.app
+KGet-1.5.4-macOS.dmg
+.DS_Store
+build-macos.sh

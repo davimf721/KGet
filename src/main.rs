@@ -45,7 +45,12 @@ use kget::{DownloadOptions, verify_iso_integrity};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
+#[command(disable_version_flag = true)]
 struct Args {
+    /// Show version information
+    #[arg(short = 'v', long = "version", action = clap::ArgAction::Version)]
+    version: (),
+
     /// URL file for the download
     #[arg(default_value_t = String::new())]
     url: String,
@@ -123,87 +128,133 @@ struct Args {
     interactive: bool,
 }
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 fn download_worker(
     config: Config,
     download_rx: MpscReceiver<DownloadCommand>,
     status_tx: MpscSender<WorkerToGuiMessage>,
-    mut runtime: tokio::runtime::Runtime,
+    _runtime: tokio::runtime::Runtime,
 ) {
-    for command in download_rx {
-        match command {
-            DownloadCommand::Start { url, output_path, is_advanced, verify_iso } => {
-                let _ = status_tx.send(WorkerToGuiMessage::StatusUpdate(format!("Initializing: {}", url)));
+    let cancel_token = std::sync::Arc::new(AtomicBool::new(false));
+    let mut download_handle: Option<std::thread::JoinHandle<()>> = None;
+    
+    loop {
+        // Check for commands with a short timeout to remain responsive
+        match download_rx.recv_timeout(std::time::Duration::from_millis(50)) {
+            Ok(command) => {
+                match command {
+                    DownloadCommand::Start { url, output_path, is_advanced, verify_iso } => {
+                        // Reset cancel token for new download
+                        cancel_token.store(false, Ordering::SeqCst);
+                        
+                        let _ = status_tx.send(WorkerToGuiMessage::StatusUpdate(format!("Initializing: {}", url)));
 
-                let optimizer = Optimizer::new(config.optimization.clone());
-                let proxy = config.proxy.clone();
+                        let optimizer = Optimizer::new(config.optimization.clone());
+                        let proxy = config.proxy.clone();
+                        let cancel_token_clone = cancel_token.clone();
+                        let status_tx_clone = status_tx.clone();
 
-                let result: Result<(), Box<dyn Error + Send + Sync>> = if url.starts_with("magnet:?") {
-                    let cb = crate::torrent::TorrentCallbacks {
-                        status: Some(std::sync::Arc::new({
-                            let status_tx = status_tx.clone();
-                            move |msg| { status_tx.send(WorkerToGuiMessage::StatusUpdate(msg)).ok(); }
-                        })),
-                        progress: Some(std::sync::Arc::new({
-                            let status_tx = status_tx.clone();
-                            move |p| { status_tx.send(WorkerToGuiMessage::Progress(p)).ok(); }
-                        })),
-                    };
+                        // Spawn download in a separate thread
+                        download_handle = Some(std::thread::spawn(move || {
+                            let result: Result<(), Box<dyn Error + Send + Sync>> = if url.starts_with("magnet:?") {
+                                let cb = crate::torrent::TorrentCallbacks {
+                                    status: Some(std::sync::Arc::new({
+                                        let status_tx = status_tx_clone.clone();
+                                        move |msg| { status_tx.send(WorkerToGuiMessage::StatusUpdate(msg)).ok(); }
+                                    })),
+                                    progress: Some(std::sync::Arc::new({
+                                        let status_tx = status_tx_clone.clone();
+                                        move |p| { status_tx.send(WorkerToGuiMessage::Progress(p)).ok(); }
+                                    })),
+                                };
 
-                    crate::torrent::download_magnet(
-                        &url,
-                        &output_path,
-                        true,
-                        proxy,
-                        optimizer,
-                        cb,
-                    )
-                } else if is_advanced {
-                    let mut downloader = AdvancedDownloader::new(
-                        url.clone(),
-                        output_path.clone(),
-                        true,
-                        proxy,
-                        optimizer,
-                    );
+                                crate::torrent::download_magnet(
+                                    &url,
+                                    &output_path,
+                                    true,
+                                    proxy,
+                                    optimizer,
+                                    cb,
+                                )
+                            } else if is_advanced {
+                                let mut downloader = AdvancedDownloader::new(
+                                    url.clone(),
+                                    output_path.clone(),
+                                    true,
+                                    proxy,
+                                    optimizer,
+                                );
+                                
+                                downloader.set_cancel_token(cancel_token_clone.clone());
 
-                    let status_tx_clone = status_tx.clone();
-                    downloader.set_progress_callback(move |p| {
-                        status_tx_clone.send(WorkerToGuiMessage::Progress(p)).ok();
-                    });
+                                let status_tx_cb = status_tx_clone.clone();
+                                downloader.set_progress_callback(move |p| {
+                                    status_tx_cb.send(WorkerToGuiMessage::Progress(p)).ok();
+                                });
 
-                    let status_tx_clone2 = status_tx.clone();
-                    downloader.set_status_callback(move |msg| {
-                        status_tx_clone2.send(WorkerToGuiMessage::StatusUpdate(msg)).ok();
-                    });
+                                let status_tx_cb2 = status_tx_clone.clone();
+                                downloader.set_status_callback(move |msg| {
+                                    status_tx_cb2.send(WorkerToGuiMessage::StatusUpdate(msg)).ok();
+                                });
 
-                    downloader.download()
-                } else {
-                    let options = kget::DownloadOptions {
-                        quiet_mode: true,
-                        output_path: Some(output_path.clone()),
-                        verify_iso,
-                    };
+                                downloader.download()
+                            } else {
+                                let options = kget::DownloadOptions {
+                                    quiet_mode: true,
+                                    output_path: Some(output_path.clone()),
+                                    verify_iso,
+                                };
 
-                    let status_tx_clone = status_tx.clone();
-                    let status_cb = move |msg: String| {
-                        status_tx_clone.send(WorkerToGuiMessage::StatusUpdate(msg)).ok();
-                    };
+                                let status_tx_cb = status_tx_clone.clone();
+                                let status_cb = move |msg: String| {
+                                    status_tx_cb.send(WorkerToGuiMessage::StatusUpdate(msg)).ok();
+                                };
 
-                    cli_download(&url, proxy, optimizer, options, Some(&status_cb))
-                };
+                                cli_download(&url, proxy, optimizer, options, Some(&status_cb))
+                            };
 
-                match result {
-                    Ok(_) => { let _ = status_tx.send(WorkerToGuiMessage::Completed(output_path)); }
-                    Err(e) => { let _ = status_tx.send(WorkerToGuiMessage::Error(e.to_string())); }
+                            // Report result
+                            if cancel_token_clone.load(Ordering::SeqCst) {
+                                let _ = status_tx_clone.send(WorkerToGuiMessage::StatusUpdate("Download cancelled".into()));
+                            } else {
+                                match result {
+                                    Ok(_) => { let _ = status_tx_clone.send(WorkerToGuiMessage::Completed(output_path)); }
+                                    Err(e) => {
+                                        let err_msg = e.to_string();
+                                        if err_msg.contains("cancelled") {
+                                            let _ = status_tx_clone.send(WorkerToGuiMessage::StatusUpdate("Download cancelled".into()));
+                                        } else {
+                                            let _ = status_tx_clone.send(WorkerToGuiMessage::Error(err_msg));
+                                        }
+                                    }
+                                }
+                            }
+                        }));
+                    }
+                    DownloadCommand::Cancel => {
+                        cancel_token.store(true, Ordering::SeqCst);
+                        let _ = status_tx.send(WorkerToGuiMessage::StatusUpdate("Cancelling download...".into()));
+                    }
                 }
             }
-            DownloadCommand::Cancel => {
-                let _ = status_tx.send(WorkerToGuiMessage::StatusUpdate("Download cancelled.".into()));
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // Check if download thread finished
+                if let Some(handle) = download_handle.take() {
+                    if handle.is_finished() {
+                        let _ = handle.join();
+                    } else {
+                        download_handle = Some(handle);
+                    }
+                }
+                continue;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                break;
             }
         }
     }
 }
-
 fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
    
     #[cfg(all(windows, not(debug_assertions)))]
@@ -283,8 +334,9 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             native_options.viewport.min_inner_size = Some(egui::Vec2::new(820.0, 560.0));
             native_options.viewport.resizable = Some(true);
             
-            
-            if let Ok(img) = image::open("logo.png") {
+            // Embed logo in binary so it works in .app bundle
+            let logo_bytes = include_bytes!("../logo.png");
+            if let Ok(img) = image::load_from_memory(logo_bytes) {
                 let rgba_img = img.into_rgba8();
                 let (width, height) = rgba_img.dimensions();
                 let rgba = rgba_img.into_raw();

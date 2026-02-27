@@ -44,7 +44,7 @@ pub fn validate_filename(filename: &str) -> Result<(), Box<dyn Error + Send + Sy
 pub fn download(
     target: &str,
     proxy: ProxyConfig,
-    optimizer: Optimizer,
+    _optimizer: Optimizer,
     options: DownloadOptions,
     status_callback: Option<&(dyn Fn(String) + Send + Sync)>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -132,7 +132,7 @@ pub fn download(
         print("ISO file detected. Ensuring raw download to prevent corruption...", quiet_mode);
     }
 
-    let mut tentative_path: PathBuf;
+    let tentative_path: PathBuf;
 
     if let Some(output_arg_str) = options.output_path { 
         let user_path = PathBuf::from(output_arg_str.clone());

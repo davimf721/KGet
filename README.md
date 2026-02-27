@@ -1,6 +1,6 @@
 <img width="1000" height="500" alt="image" src="https://github.com/user-attachments/assets/d0888e3f-90a2-42d6-a9aa-b216dc36f1f4" />
 
-# KGet!  v1.5.3 (Latest Release)
+# KGet!  v1.5.4 (Latest Release)
 
 A modern, lightweight, and versatile downloader written in Rust for fast and reliable file downloads via command line (CLI) and graphical user interface (GUI).
 
@@ -41,6 +41,13 @@ A modern, lightweight, and versatile downloader written in Rust for fast and rel
 
 ## Features
 See the full list of features and recent changes in the [CHANGELOG](CHANGELOG.md).
+
+## Testing
+KGet includes a comprehensive test suite with 65+ tests covering core functionality, CLI behavior, and HTTP downloads via mock servers. Run all tests with:
+```bash
+cargo test
+```
+See [CONTRIBUTING.md](CONTRIBUTING.md) for more details on running specific test suites.
 
 ## KGet now is a Library too!
 If you want to use KGet as a library you can click [here](LIB.md).

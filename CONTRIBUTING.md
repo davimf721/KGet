@@ -56,6 +56,41 @@ If you have a suggestion for the project, we'd love to hear about it! Just follo
 9. Push to the branch: `git push origin feature/my-new-feature`
 10. Submit a pull request
 
+## Testing
+
+KGet has a comprehensive test suite that must pass before any PR is merged. The tests are designed to run quickly without making real network requests.
+
+### Running Tests
+
+```bash
+# Run all tests
+cargo test
+
+# Run specific test suites
+cargo test --test unit_tests       # Unit tests
+cargo test --test cli_tests        # CLI integration tests
+cargo test --test mock_server_tests # Mock HTTP server tests
+
+# Run tests with output
+cargo test -- --nocapture
+```
+
+### Test Categories
+
+| Suite | Description | Network Required |
+|-------|-------------|------------------|
+| `unit_tests` | Core functionality (utils, config, validation) | No |
+| `cli_tests` | CLI argument parsing and behavior | No |
+| `mock_server_tests` | HTTP downloads using wiremock | No (localhost only) |
+
+### Writing Tests
+
+When contributing new features, please:
+1. Add unit tests for new functions in `tests/unit_tests.rs`
+2. Add CLI tests if new arguments are added in `tests/cli_tests.rs`
+3. Use mock servers for any HTTP-related tests (see `tests/mock_server_tests.rs`)
+4. Ensure all tests pass: `cargo test`
+
 ## Development with Docker (recommended for contributors)
 
 We provide a `Dockerfile` and `docker-compose.yml` to make development reproducible across machines. The container contains the Rust toolchain and common development tools so contributors can build, test and run examples without installing dependencies on the host.

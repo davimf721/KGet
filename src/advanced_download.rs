@@ -1,13 +1,13 @@
 use std::error::Error;
 use std::fs::File;
-use std::io::{BufReader, Read, Seek, SeekFrom, Write, BufWriter};
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use rayon::prelude::*;
 use reqwest::blocking::Client;
 use indicatif::{ProgressBar, ProgressStyle};
-use crate::utils::print;
 use crate::config::ProxyConfig;
 use sha2::{Sha256, Digest};
 use hex;
@@ -31,11 +31,12 @@ pub struct AdvancedDownloader {
     optimizer: Optimizer,
     progress_callback: Option<Arc<dyn Fn(f32) + Send + Sync>>,
     status_callback: Option<Arc<dyn Fn(String) + Send + Sync>>,
+    cancel_token: Arc<AtomicBool>,
 }
 
 impl AdvancedDownloader {
     pub fn new(url: String, output_path: String, quiet_mode: bool, proxy_config: ProxyConfig, optimizer: Optimizer) -> Self {
-        let is_iso = url.to_lowercase().ends_with(".iso");
+        let _is_iso = url.to_lowercase().ends_with(".iso");
         
         let mut client_builder = Client::builder()
             .timeout(std::time::Duration::from_secs(300))
@@ -73,7 +74,16 @@ impl AdvancedDownloader {
             optimizer,
             progress_callback: None,
             status_callback: None,
+            cancel_token: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    pub fn set_cancel_token(&mut self, token: Arc<AtomicBool>) {
+        self.cancel_token = token;
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel_token.load(Ordering::Relaxed)
     }
 
     pub fn set_progress_callback(&mut self, callback: impl Fn(f32) + Send + Sync + 'static) {
@@ -263,7 +273,7 @@ impl AdvancedDownloader {
     }
 
     fn download_whole(&self, file: &File, offset: u64, progress: Option<Arc<Mutex<ProgressBar>>>) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let mut response = self.client.get(&self.url).send()?;
+        let response = self.client.get(&self.url).send()?;
         if offset > 0 {
             // Resume not possible without range; warn
             return Err("Server does not support range; cannot resume partial file".into());
@@ -283,7 +293,7 @@ impl AdvancedDownloader {
             fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
                 let n = self.inner.write(buf)?;
                 if let Some(ref bar) = self.progress {
-                    let mut guard = bar.lock().unwrap();
+                    let guard = bar.lock().unwrap();
                     guard.inc(n as u64);
                     if let Some(cb) = self.callback {
                         let pos = guard.position();
@@ -316,13 +326,24 @@ impl AdvancedDownloader {
         let url = Arc::new(self.url.clone());
         let _optimizer = Arc::new(self.optimizer.clone());
         let progress_callback = self.progress_callback.clone();
+        let cancel_token = self.cancel_token.clone();
 
         chunks.par_iter().try_for_each(|&(start, end)| {
+            // Check for cancellation before starting chunk
+            if cancel_token.load(Ordering::Relaxed) {
+                return Err("Download cancelled".into());
+            }
+
             let range = format!("bytes={}-{}", start, end - 1);
             let range_header = reqwest::header::HeaderValue::from_str(&range)
                 .map_err(|e| format!("Invalid range header {}: {}", range, e))?;
 
             for retry in 0..=MAX_RETRIES {
+                // Check for cancellation on each retry
+                if cancel_token.load(Ordering::Relaxed) {
+                    return Err("Download cancelled".into());
+                }
+
                 let request = client.get(url.as_str());
                 let request = request.header(reqwest::header::RANGE, range_header.clone());
 
@@ -337,6 +358,11 @@ impl AdvancedDownloader {
                             let mut buffer = [0u8; 16384]; 
                             
                             while current_pos < end {
+                                // Check for cancellation periodically during download
+                                if cancel_token.load(Ordering::Relaxed) {
+                                    return Err("Download cancelled".into());
+                                }
+
                                 let limit = (end - current_pos).min(buffer.len() as u64);
                                 let n = response.read(&mut buffer[..limit as usize])?;
                                 if n == 0 { break; }
@@ -350,7 +376,7 @@ impl AdvancedDownloader {
                                 current_pos += n as u64;
                             
                                 if let Some(ref bar) = progress {
-                                    let mut guard = bar.lock().unwrap();
+                                    let guard = bar.lock().unwrap();
                                     guard.inc(n as u64);
                                     if let Some(ref cb) = progress_callback {
                                         let pos = guard.position();
