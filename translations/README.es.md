@@ -98,6 +98,19 @@ Si encuentra problemas con la GUI al instalar vía `cargo install`, compilar des
 ### Opción 3: Descargar binarios precompilados
 Verifique la sección [Releases](https://github.com/davimf721/KGet/releases) para los binarios más recientes para su SO.
 
+#### macOS (bundle .app):
+Descargue `KGet.app` o el instalador `.dmg`, luego:
+1. Abra el DMG y arrastre `KGet.app` a la carpeta Aplicaciones (siga la guía visual)
+2. Haga doble clic para iniciar la GUI, o use el CLI vía `KGet.app/Contents/MacOS/kget`
+
+La app nativa macOS incluye:
+- Interfaz SwiftUI nativa con soporte para modo oscuro
+- Esquemas de URL (`kget://`, `magnet:`) para integración con navegadores
+- Asociaciones de archivo `.torrent`
+- Acciones rápidas en la barra de menú
+- Soporte para el menú de Servicios de macOS
+- Notificaciones nativas
+
 #### Linux/macOS:
 ```bash
 chmod +x kget  # Hacer ejecutable

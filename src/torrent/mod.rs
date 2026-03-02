@@ -1,3 +1,50 @@
+//! BitTorrent download support.
+//!
+//! This module provides torrent downloading capabilities through multiple backends:
+//!
+//! - **Native** (`torrent-native` feature): Built-in BitTorrent client using librqbit
+//! - **Transmission** (`torrent-transmission` feature): Transmission daemon RPC
+//! - **External**: Opens magnet links in the system's default torrent client
+//!
+//! # Native Torrent Client
+//!
+//! The native client provides full BitTorrent protocol support:
+//! - Magnet link parsing and metadata download
+//! - DHT (Distributed Hash Table) for peer discovery
+//! - Parallel piece downloading
+//! - Progress callbacks for UI integration
+//!
+//! # Example
+//!
+//! ```rust,no_run
+//! use kget::torrent::{download_magnet, TorrentCallbacks};
+//! use kget::{ProxyConfig, Optimizer};
+//! use std::sync::Arc;
+//!
+//! let callbacks = TorrentCallbacks {
+//!     status: Some(Arc::new(|msg| println!("{}", msg))),
+//!     progress: Some(Arc::new(|p| println!("{:.1}%", p * 100.0))),
+//! };
+//!
+//! download_magnet(
+//!     "magnet:?xt=urn:btih:...",
+//!     "./downloads",
+//!     false,
+//!     ProxyConfig::default(),
+//!     Optimizer::new(),
+//!     callbacks,
+//! ).expect("Torrent download failed");
+//! ```
+//!
+//! # Backend Selection
+//!
+//! The backend is selected via the `KGET_TORRENT_BACKEND` environment variable:
+//! - `native`: Use built-in client (requires `torrent-native` feature)
+//! - `transmission`: Use Transmission RPC (requires `torrent-transmission` feature)
+//! - Any other value: Open in system's default torrent client
+//!
+//! If not set, defaults to `native` when available, otherwise `external`.
+
 use std::error::Error;
 use std::sync::Arc;
 
@@ -10,12 +57,39 @@ mod settings;
 #[cfg(feature = "torrent-transmission")]
 mod transmission;
 
+#[cfg(feature = "torrent-native")]
+mod native;
+
+/// Type alias for status message callbacks.
 pub type StatusCb = Arc<dyn Fn(String) + Send + Sync>;
+
+/// Type alias for progress callbacks (0.0 to 1.0).
 pub type ProgressCb = Arc<dyn Fn(f32) + Send + Sync>;
 
+/// Callbacks for torrent download progress and status updates.
+///
+/// Both callbacks are optional. If not provided, no updates are sent.
+///
+/// # Example
+///
+/// ```rust
+/// use kget::torrent::TorrentCallbacks;
+/// use std::sync::Arc;
+///
+/// // With callbacks
+/// let callbacks = TorrentCallbacks {
+///     status: Some(Arc::new(|msg| println!("Status: {}", msg))),
+///     progress: Some(Arc::new(|p| println!("Progress: {:.1}%", p * 100.0))),
+/// };
+///
+/// // Without callbacks
+/// let silent = TorrentCallbacks::default();
+/// ```
 #[derive(Default, Clone)]
 pub struct TorrentCallbacks {
+    /// Callback for human-readable status messages
     pub status: Option<StatusCb>,
+    /// Callback for progress updates (0.0 to 1.0)
     pub progress: Option<ProgressCb>,
 }
 
@@ -31,26 +105,114 @@ fn emit_progress(cb: &TorrentCallbacks, p: f32) {
     }
 }
 
-/// Backend selection:
-/// - default: "external" (abre no cliente instalado)
-/// - "transmission": usa Transmission RPC (requer feature torrent-transmission)
 fn selected_backend() -> String {
     std::env::var("KGET_TORRENT_BACKEND")
-        .unwrap_or_else(|_| "external".to_string())
+        .unwrap_or_else(|_| {
+            // Default to native if available, otherwise external
+            #[cfg(feature = "torrent-native")]
+            { "native".to_string() }
+            #[cfg(not(feature = "torrent-native"))]
+            { "external".to_string() }
+        })
         .to_lowercase()
 }
 
+/// Download a torrent from a magnet link.
+///
+/// This function automatically selects the best available backend:
+/// 1. Native client (if `torrent-native` feature is enabled)
+/// 2. Transmission RPC (if `torrent-transmission` feature is enabled)
+/// 3. External client (opens in system default torrent app)
+///
+/// Override the backend with `KGET_TORRENT_BACKEND` environment variable.
+///
+/// # Arguments
+///
+/// * `magnet` - Magnet link starting with `magnet:?`
+/// * `output_dir` - Directory to save downloaded files
+/// * `quiet` - Suppress console output
+/// * `proxy` - Proxy configuration (native backend only)
+/// * `optimizer` - Optimizer for peer limits
+/// * `cb` - Callbacks for progress and status updates
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use kget::torrent::{download_magnet, TorrentCallbacks};
+/// use kget::{ProxyConfig, Optimizer};
+/// use std::sync::Arc;
+///
+/// // Simple download
+/// download_magnet(
+///     "magnet:?xt=urn:btih:HASH&dn=filename",
+///     "/home/user/Downloads",
+///     false,
+///     ProxyConfig::default(),
+///     Optimizer::new(),
+///     TorrentCallbacks::default(),
+/// ).unwrap();
+///
+/// // With progress tracking
+/// let callbacks = TorrentCallbacks {
+///     status: Some(Arc::new(|msg| log::info!("{}", msg))),
+///     progress: Some(Arc::new(|p| {
+///         update_progress_bar(p);
+///     })),
+/// };
+///
+/// download_magnet(
+///     "magnet:?xt=urn:btih:HASH",
+///     "./downloads",
+///     true, // quiet mode
+///     ProxyConfig::default(),
+///     Optimizer::new(),
+///     callbacks,
+/// ).unwrap();
+///
+/// fn update_progress_bar(p: f32) {
+///     // Update UI
+/// }
+/// ```
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - Magnet link is invalid
+/// - Network connection fails
+/// - Output directory cannot be accessed
+/// - Download is interrupted
 pub fn download_magnet(
     magnet: &str,
-    _output_dir: &str,
-    _quiet: bool,
-    _proxy: ProxyConfig,
-    _optimizer: Optimizer,
+    output_dir: &str,
+    quiet: bool,
+    proxy: ProxyConfig,
+    optimizer: Optimizer,
     cb: TorrentCallbacks,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     emit_progress(&cb, 0.0);
 
     match selected_backend().as_str() {
+        "native" => {
+            #[cfg(feature = "torrent-native")]
+            {
+                return native::download_magnet_native(
+                    magnet,
+                    output_dir,
+                    quiet,
+                    proxy,
+                    optimizer,
+                    cb,
+                );
+            }
+
+            #[cfg(not(feature = "torrent-native"))]
+            {
+                emit_status(
+                    &cb,
+                    "Native torrent backend not available (compile with --features torrent-native). Falling back to external client.",
+                );
+            }
+        }
         "transmission" => {
             #[cfg(feature = "torrent-transmission")]
             {

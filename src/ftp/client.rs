@@ -1,3 +1,5 @@
+//! FTP client implementation.
+
 use std::error::Error;
 use std::io::Write;
 use url::Url;
@@ -7,6 +9,46 @@ use crate::config::ProxyConfig;
 use crate::optimization::Optimizer;
 use crate::utils::print;
 
+/// FTP file downloader with progress tracking.
+///
+/// Supports:
+/// - Anonymous FTP (use "anonymous" as username)
+/// - Authenticated FTP with username/password in URL
+/// - Binary transfer mode (safe for all file types)
+/// - SOCKS5 proxy connections
+///
+/// # URL Format
+///
+/// ```text
+/// ftp://[user[:password]@]host[:port]/path/to/file
+/// ```
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use kget::ftp::FtpDownloader;
+/// use kget::{ProxyConfig, Optimizer};
+///
+/// // Anonymous download
+/// let dl = FtpDownloader::new(
+///     "ftp://ftp.gnu.org/gnu/emacs/emacs-28.2.tar.gz".to_string(),
+///     "emacs-28.2.tar.gz".to_string(),
+///     false,
+///     ProxyConfig::default(),
+///     Optimizer::new(),
+/// );
+/// dl.download().expect("FTP download failed");
+///
+/// // Authenticated download
+/// let dl = FtpDownloader::new(
+///     "ftp://user:pass@private-server.com/file.zip".to_string(),
+///     "file.zip".to_string(),
+///     false,
+///     ProxyConfig::default(),
+///     Optimizer::new(),
+/// );
+/// dl.download().expect("FTP download failed");
+/// ```
 pub struct FtpDownloader {
     url: String,
     output_path: String,
@@ -17,6 +59,15 @@ pub struct FtpDownloader {
 }
 
 impl FtpDownloader {
+    /// Create a new FTP downloader.
+    ///
+    /// # Arguments
+    ///
+    /// * `url` - FTP URL including path to file
+    /// * `output_path` - Local path to save the file
+    /// * `quiet_mode` - Suppress console output
+    /// * `proxy` - Proxy configuration (SOCKS5 only)
+    /// * `optimizer` - Optimizer instance
     pub fn new(
         url: String,
         output_path: String,

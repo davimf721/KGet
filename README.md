@@ -1,233 +1,130 @@
-<img width="1000" height="500" alt="image" src="https://github.com/user-attachments/assets/d0888e3f-90a2-42d6-a9aa-b216dc36f1f4" />
+<img width="1000" height="500" alt="KGet Banner" src="https://github.com/user-attachments/assets/d0888e3f-90a2-42d6-a9aa-b216dc36f1f4" />
 
-# KGet!  v1.5.4 (Latest Release)
+# KGet v1.6.0
 
-A modern, lightweight, and versatile downloader written in Rust for fast and reliable file downloads via command line (CLI) and graphical user interface (GUI).
+A fast, modern download manager written in Rust. Supports HTTP/HTTPS, FTP/SFTP, and **magnet links** with a built-in torrent client.
 
 [English](README.md) | [Português](translations/README.pt-BR.md) | [Español](translations/README.es.md)
 
-## Screenshots
-- GUI:
- <img src="https://github.com/user-attachments/assets/6da6dbd4-b3ae-4669-b64b-ffe3b961beb2"  width="600"/>
- 
-- Torrent on `localhost:9091/transmission/web/`:
- <img src="https://github.com/user-attachments/assets/d80b60d7-f53e-4198-8e11-1cacf0e78958"  width="600"/>
-
-- CLI:
- <img src="https://github.com/user-attachments/assets/a835c4df-5424-4aaa-b687-2445a99ba067"  width="600"/>
-
-- Interactive:
-<img src="https://github.com/user-attachments/assets/c8d03a5c-6459-4f3d-a581-5180797f8b1c"  width="600"/>
-
-## How It Works (Summary)
-1.  **Progress Bar (CLI):** Shows speed, ETA, and transferred bytes.
-2.  **Smart File Naming:**
-    *   Uses the filename from the URL.
-    *   Defaults to `index.html` if the URL ends with `/`.
-3.  **Error Handling:** Exits with code 1 on HTTP errors (e.g., 404).
-4.  **Space Check:** Verifies available disk space.
-5.  **Automatic Retry:** Retries download on network failure.
-6.  **ISO Smart Detection:** Detects `.iso` files to ensure raw binary transfer and prevent corruption.
-7.  **Integrity Check:** Optional SHA256 verification for disk images after download.
-8.  **Memory Efficient:** Parallel downloads use streaming buffers to maintain a low RAM footprint regardless of file size.
-9.  **Disk Optimization:** Uses buffered I/O to prevent high disk active time and system freezes during fast transfers.
-10. **Advanced Download Mode (HTTP/HTTPS):** Downloads in parallel chunks, supports resume.
-11. **Proxy Support:** HTTP, HTTPS, SOCKS5 with authentication.
-12. **Optimization Features:** Compression (for cache), file caching, speed limiting.
-13. **Torrent Downloads (Magnet Links):**
-    * **Default:** opens the magnet link using your system's default BitTorrent client (qBittorrent/Transmission/etc).
-    * **Optional (feature):** can download via Transmission RPC (`torrent-transmission` feature).
-14. **FTP/SFTP Downloads:** Connects to FTP/SFTP servers to transfer files.
-
 ## Features
-See the full list of features and recent changes in the [CHANGELOG](CHANGELOG.md).
 
-## Testing
-KGet includes a comprehensive test suite with 65+ tests covering core functionality, CLI behavior, and HTTP downloads via mock servers. Run all tests with:
-```bash
-cargo test
-```
-See [CONTRIBUTING.md](CONTRIBUTING.md) for more details on running specific test suites.
+- **Multi-protocol:** HTTP, HTTPS, FTP, SFTP, and Magnet links
+- **Native Torrent Client:** Downloads torrents directly — no external apps needed
+- **Turbo Mode:** Parallel connections for faster downloads
+- **GUI & CLI:** Use whichever you prefer
+- **Cross-platform:** macOS, Linux, Windows
+- **ISO Verification:** Optional SHA256 checksum for disk images
 
-## KGet now is a Library too!
-If you want to use KGet as a library you can click [here](LIB.md).
+## Screenshots
 
-## Optional Cargo features
-
-### GUI (`gui`)
-Build/run with GUI support:
-
-```bash
-cargo build --features gui
-cargo run --features gui -- --gui
-```
-
-### Transmission RPC torrent backend (`torrent-transmission`)
-If you want KGet to add magnet links to a Transmission daemon (RPC), build with:
-
-```bash
-cargo build --features torrent-transmission
-# or with GUI:
-cargo build --features "gui torrent-transmission"
-```
-
-Select the backend at runtime:
-
-- Default (no env var): uses the system torrent client (`xdg-open`/`open`/`start`)
-- Transmission RPC:
-
-```bash
-# Linux/macOS
-export KGET_TORRENT_BACKEND=transmission
-
-# Windows PowerShell (current session)
-$env:KGET_TORRENT_BACKEND="transmission"
-```
-
-Transmission settings (env vars):
-- `KGET_TRANSMISSION_HOST` (default: `localhost`)
-- `KGET_TRANSMISSION_PORT` (default: `9091`)
-- `KGET_TRANSMISSION_RPC_PATH` (default: `/transmission/rpc`)
-- `KGET_TRANSMISSION_WEB_PATH` (default: `/transmission/web/`)
-- Optional auth: `KGET_TRANSMISSION_USER`, `KGET_TRANSMISSION_PASS`
-
-Compatibility:
-- You can also use `KGET_TRANSMISSION_URL` and `KGET_TRANSMISSION_WEB` (full URLs).
+| GUI | CLI |
+|-----|-----|
+| <img src="https://github.com/user-attachments/assets/6da6dbd4-b3ae-4669-b64b-ffe3b961beb2" width="400"/> | <img src="https://github.com/user-attachments/assets/a835c4df-5424-4aaa-b687-2445a99ba067" width="400"/> |
 
 ## Installation
 
-### Option 1: Compile from source
-You will need Rust installed. If you don't have it, install it from [rustup.rs](https://rustup.rs/).
+### From Source
 
-Install some dependencies:
-For Debian/Ubuntu based systems:
 ```bash
-sudo apt update
+# Install Rust from https://rustup.rs if needed
+
+# Linux dependencies (Debian/Ubuntu)
 sudo apt install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev pkg-config
-```
-For Fedora:
-```bash
-sudo dnf install -y libxcb-devel libxkbcommon-devel openssl-devel pkg-config
-```
 
-Clone the repository and compile the project:
-```bash
+# Clone and build
 git clone https://github.com/davimf721/KGet.git
 cd KGet
-cargo build --release
-```
-The executable will be in `target/release/kget`. You can copy it to a directory in your `PATH`:
-```bash
-sudo cp target/release/kget /usr/local/bin/
+cargo build --release --features gui
+
+# Run
+./target/release/kget --gui
 ```
 
-### Option 2: Install via Cargo
-You can install the published binary from crates.io (the GUI and Transmission backend are opt-in via features):
+### From crates.io
 
 ```bash
-# Install the binary without GUI (default)
-cargo install Kget
-
-# Install with GUI support
 cargo install Kget --features gui
-
-# Install with Transmission RPC backend (optional)
-cargo install Kget --features torrent-transmission
-
-# Install with both
-cargo install Kget --features "gui torrent-transmission"
 ```
 
-If you encounter issues with the GUI when installing via `cargo install`, compiling from source is more reliable.
+### Pre-built Binaries for macOS/Linux/Windows GUI
 
-### Option 3: Download Pre-compiled Binaries
-Check the [Releases](https://github.com/davimf721/KGet/releases) section for the latest binaries for your OS.
-
-#### macOS (.app bundle):
-Download `KGet.app` or the `.dmg` installer, then:
-1. Drag `KGet.app` to your Applications folder
-2. Double-click to launch the GUI, or use the CLI via `KGet.app/Contents/MacOS/kget`
-
-#### Linux/macOS (binary):
-```bash
-chmod +x kget  # Make executable
-./kget [URL]   # Run directly
-```
-#### Windows:
-Run the `.exe` file directly.
+Download from [Releases](https://github.com/davimf721/KGet/releases).
 
 ## Usage
 
-### Command Line (CLI)
+### GUI Mode
 ```bash
-kget [OPTIONS] <URL>
+kget --gui
 ```
-**Examples:**
-*   **HTTP/HTTPS Download:**
-    ```bash
-    kget https://example.com/file.txt
-    ````
-*   **Rename Output File:**
-    ```bash
-    kget -O new_name.txt https://example.com/file.txt
-    kget -O ~/MyDownloads/ https://example.com/video.mp4 # Saves as ~/MyDownloads/video.mp4
-    ````
-*   **FTP Download:**
-    ```bash
-    kget ftp://user:password@ftp.example.com/archive.zip
-    kget --ftp ftp://ftp.example.com/pub/file.txt
-    ````
-*   **SFTP Download:**
-    (Requires SSH key setup or password if the server allows it)
-    ```bash
-    kget sftp://user@sftp.example.com/path/file.dat
-    kget --sftp sftp://user@sftp.example.com/path/file.dat -O local.dat
-    ````
-*   **Torrent Download (Magnet Link):**
-    (Requires `transmission-daemon` configured and running)
-    ```bash
-    kget "magnet:?xt=urn:btih:YOUR_HASH_HERE&dn=TorrentName"
-    kget --torrent "magnet:?xt=urn:btih:YOUR_HASH_HERE" -O ~/MyTorrents/
-    ````
-    KelpsGet will add the torrent to Transmission and attempt to open the web interface (`http://localhost:9091`) for management.
 
-*   **Silent Mode:**
-    ```bash
-    kget -q https://example.com/file.txt
-    ````
-*   **Advanced Download Mode (HTTP/HTTPS):**
-    ```bash
-    kget -a https://example.com/large_file.zip
-    ```
-    *   **ISO Download with Verification:**
-        KGet will automatically detect the ISO and ask if you want to verify the SHA256 hash once finished.
-*   **Use Proxy:**
-    ```bash
-    kget -p http://proxy:8080 https://example.com/file.txt
-    ````
-*   **Proxy with Authentication:**
-    ```bash
-    kget -p http://proxy:8080 --proxy-user user --proxy-pass pass https://example.com/file.txt
-    ````
-*   **Speed Limit:**
-    ```bash
-    kget -l 1048576 https://example.com/file.txt  # Limit to 1MB/s
-    ````
-*   **Disable Compression (KGet-specific, not HTTP):**
-    ```bash
-    kget --no-compress https://example.com/file.txt
-    ````
-*   **Disable Cache (KGet-specific):**
-    ```bash
-    kget --no-cache https://example.com/file.txt
-    ````
+### CLI Mode
+```bash
+# Basic download
+kget https://example.com/file.zip
 
+# Turbo mode (parallel connections)
+kget -a https://example.com/large.iso
 
-## 🔗 Important Links
-- 📚 [Documentation](https://davimf721.github.io/KGet/)
-- 📦 [crates.io](https://crates.io/crates/Kget)
-- 💻 [GitHub](https://github.com/davimf721/KGet)
-- 📝 [Changelog](CHANGELOG.md)
+# Save to specific location
+kget -O ~/Downloads/myfile.zip https://example.com/file.zip
+
+# Torrent download
+kget "magnet:?xt=urn:btih:HASH..."
+
+# FTP/SFTP
+kget ftp://user:pass@server/file.zip
+kget sftp://user@server/file.dat
+```
+
+### Options
+
+| Flag | Description |
+|------|-------------|
+| `-a, --advanced` | Turbo mode with parallel connections |
+| `-O <path>` | Output file or directory |
+| `-q, --quiet` | Minimal output |
+| `-p <proxy>` | Use HTTP/SOCKS5 proxy |
+| `-l <bytes>` | Speed limit in bytes/sec |
+| `--gui` | Launch graphical interface |
+| `--interactive` | Interactive REPL mode |
+
+## Library Usage
+
+KGet can be used as a Rust library. See [LIB.md](LIB.md) for details.
+
+```rust
+use kget::{download, DownloadOptions};
+
+let options = DownloadOptions::default();
+download("https://example.com/file.zip", options)?;
+```
+
+## Building
+
+```bash
+# CLI only
+cargo build --release
+
+# With GUI
+cargo build --release --features gui
+
+# Cross-compile for Linux/Windows (from macOS)
+./build-cross.sh
+```
+
+## Testing
+
+```bash
+cargo test              # All tests
+./run-tests.sh          # Full test suite with linting
+```
+
+## Links
+
+- [Documentation](https://davimf721.github.io/KGet/)
+- [Changelog](CHANGELOG.md)
+- [crates.io](https://crates.io/crates/Kget)
+- [Contributing](CONTRIBUTING.md)
 
 ## You can see posts about the project in others communities:
 - [Dev.to](https://dev.to/davimf7221/kelpsget-v014-modern-download-manager-in-rust-4b9f)
@@ -235,12 +132,7 @@ kget [OPTIONS] <URL>
 - [PitchHut](https://www.pitchhut.com/project/kelpsget)
 - [Hacker News](https://hn.algolia.com/?query=Show%20HN%3A%20KelpsGet%20%E2%80%93%20Modern%20download%20manager%20built%20in%20Rust&type=story&dateRange=all&sort=byDate&storyText=false&prefix&page=0)
 
-## Contributing
-Want to contribute? Check out our [contribution guide](CONTRIBUTING.md)!
-
-Found a bug or want to add a feature? Open an issue or send a PR!
-
-🚀 Download files effortlessly with the speed and reliability of Rust. 🚀
 
 ## License
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+MIT License - see [LICENSE](LICENSE)

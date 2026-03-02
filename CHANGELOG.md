@@ -7,6 +7,71 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0.html),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-03-02
+
+### Added
+- **Native macOS App (SwiftUI):** Completely redesigned native macOS application with deep system integration.
+  - URL scheme handlers (`kget://`, `magnet:`)
+  - File associations (`.torrent` files)
+  - Menu bar integration with quick actions
+  - macOS Services menu support
+  - Native notifications
+  - Drag-and-drop DMG installer with visual guide (boxes, arrow, instruction text)
+- **Improved Cross-Platform GUI:** Major visual overhaul for the egui-based GUI (Linux/Windows).
+  - Download list with multiple concurrent downloads tracking
+  - TURBO badge for parallel downloads mode
+  - ISO badge for ISO files with automatic integrity verification
+  - Multi-segment progress bar showing parallel connections (C1, C2, C3, C4)
+  - Verification progress bar with purple theme and shield animation
+  - Connections indicator (⚡ 4x) for turbo mode
+  - Real-time speed and ETA display
+  - Empty state with protocol icons
+  - One-line URL input with integrated controls
+  - Compact layout with truncated filenames and URLs
+  - Proper button sizing and alignment
+- **Visual Improvements:**
+  - Enhanced dark theme with better contrast
+  - Animated shimmer effects on progress bars
+  - Status-colored badges and icons
+  - Improved typography and spacing
+  - DMG installer background with dark theme, rounded boxes, chevron arrow, and instruction text
+- **Native Torrent Client (librqbit):** Built-in BitTorrent support - no external apps needed!
+  - Magnet link downloads work directly in the GUI
+  - DHT peer discovery, parallel piece downloading
+  - Real-time progress with speed and ETA
+  - Expandable file list showing individual file progress (macOS app)
+  - Green TORRENT badge in download list
+- **Refactored GUI (Linux/Windows):** Complete visual overhaul
+  - Clean, modern dark theme with consistent color palette
+  - Responsive layout that adapts to window size
+  - Smart truncation for long filenames and paths
+  - Inline folder selector with visual indicator
+  - Turbo mode and SHA256 verification toggles
+  - Shimmer animation on progress bars
+  - Retry button for failed downloads
+  - Status bar with active/completed counts
+- **Cross-Platform Build Script:** `build-cross.sh` for compiling Linux and Windows binaries from macOS
+- **Automated Test Suite:** 108+ tests covering torrents, CLI, config, and downloads
+  - New `tests/torrent_tests.rs` with 42 torrent-specific tests
+  - `run-tests.sh` script for full test execution
+  
+### Changed
+- **GUI feature now includes torrent-native:** Building with `--features gui` automatically enables native torrent support
+- **Progress calculation:** Fixed weighted progress for multi-file torrents
+- **Code quality:** Refactored `gui.rs` from 975 to 780 lines following Clean Code principles
+- **Dependencies:** Updated reqwest to 0.13.2 with hickory-dns
+
+### Fixed
+- Torrent downloads opening external app instead of downloading in GUI
+- Progress bar "spasming" during downloads - now only increases
+- DHT persistence lock conflict with `disable_dht_persistence: true`
+- Layout overflow issues with long URLs and filenames
+
+### Technical
+- Uses `librqbit` 8.1.1 for native BitTorrent protocol
+- Session management with `Arc<Session>` for proper cleanup
+- JSON output format for torrent file lists and progress
+
 ## [1.5.4] - 2026-02-27
 
 ### Added

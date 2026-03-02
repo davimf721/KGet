@@ -1,6 +1,6 @@
 [package]
 name = "Kget"
-version = "1.5.4"
+version = "1.6.0"
 edition = "2024"
 description = "A powerful and versatile download manager and library"
 authors = ["Davi Moreira Fuzatto <davimoreiraf@gmail.com>"]
@@ -45,13 +45,15 @@ socks = "0.3"
 sha2 = "0.10.9"
 hex = "0.4"
 transmission-rpc = { version = "0.5.0", optional = true }
-reqwest = { version = "0.11", features = ["blocking", "json", "gzip", "brotli", "deflate", "stream", "trust-dns"] }
+reqwest = { version = "0.13.2", default-features = false, features = ["blocking", "json", "gzip", "brotli", "deflate", "stream", "hickory-dns", "native-tls"] }
 rustyline = "17.0.2"
+urlencoding = "2.1"
 
 [features]
 default = []
-gui = ["eframe", "egui", "rfd", "arboard", "image", "egui_extras"]
+gui = ["eframe", "egui", "rfd", "arboard", "image", "egui_extras", "torrent-native"]
 torrent-transmission = ["transmission-rpc"]
+torrent-native = ["librqbit"]
 
 [dependencies.eframe]
 version = "0.33.3"
@@ -83,6 +85,10 @@ version = "0.33.3"
 features = ["all_loaders"]
 optional = true
 
+[dependencies.librqbit]
+version = "8.1.1"
+optional = true
+
 [dev-dependencies]
 tempfile = "3.10"
 wiremock = "0.6"
@@ -90,6 +96,8 @@ tokio-test = "0.4"
 assert_cmd = "2.0"
 predicates = "3.1"
 hex = "0.4"
+urlencoding = "2.1"
+serde_json = "1.0"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.52", features = ["Win32_System_Console", "Win32_Foundation"] }
+windows-sys = { version = "0.61.2", features = ["Win32_System_Console", "Win32_Foundation"] }

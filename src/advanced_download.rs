@@ -1,10 +1,52 @@
+//! Advanced parallel download functionality with resume support.
+//!
+//! The [`AdvancedDownloader`] provides high-performance downloads using:
+//! - **Parallel connections**: Split files into chunks downloaded simultaneously
+//! - **Resume support**: Continue interrupted downloads from where they left off
+//! - **Progress callbacks**: Real-time progress and status updates
+//! - **Cancellation**: Graceful download cancellation via atomic tokens
+//!
+//! # Example
+//!
+//! ```rust,no_run
+//! use kget::{AdvancedDownloader, ProxyConfig, Optimizer};
+//! use std::sync::Arc;
+//!
+//! let mut downloader = AdvancedDownloader::new(
+//!     "https://releases.ubuntu.com/22.04/ubuntu-22.04-desktop-amd64.iso".to_string(),
+//!     "ubuntu.iso".to_string(),
+//!     false,
+//!     ProxyConfig::default(),
+//!     Optimizer::new(),
+//! );
+//!
+//! // Set progress callback (0.0 to 1.0)
+//! downloader.set_progress_callback(Arc::new(|progress| {
+//!     println!("Progress: {:.1}%", progress * 100.0);
+//! }));
+//!
+//! // Set status callback for messages
+//! downloader.set_status_callback(Arc::new(|msg| {
+//!     println!("Status: {}", msg);
+//! }));
+//!
+//! // Start download
+//! downloader.download().unwrap();
+//! ```
+//!
+//! # Parallel Downloads
+//!
+//! The downloader automatically determines the optimal number of connections
+//! based on the [`Optimizer`] configuration. For large files,
+//! this can provide significant speed improvements.
+
 use std::error::Error;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 use rayon::prelude::*;
 use reqwest::blocking::Client;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -18,9 +60,67 @@ use std::os::unix::fs::FileExt;
 #[cfg(target_family = "windows")]
 use std::os::windows::fs::FileExt;
 
+/// Minimum chunk size for parallel downloads (4 MB)
 const MIN_CHUNK_SIZE: u64 = 4 * 1024 * 1024; 
+/// Maximum retry attempts per chunk
 const MAX_RETRIES: usize = 3;
 
+/// High-performance downloader with parallel connections and resume support.
+///
+/// `AdvancedDownloader` is the recommended way to download large files. It provides:
+///
+/// - **Parallel chunk downloads**: Splits files into segments downloaded simultaneously
+/// - **Automatic resume**: Detects existing partial files and resumes from last position
+/// - **Server compatibility**: Falls back to single-stream if server doesn't support ranges
+/// - **ISO optimization**: Disables compression for binary files to prevent corruption
+/// - **Progress tracking**: Real-time callbacks for UI integration
+/// - **Cancellation support**: Stop downloads gracefully via atomic cancel token
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use kget::{AdvancedDownloader, ProxyConfig, Optimizer};
+///
+/// let downloader = AdvancedDownloader::new(
+///     "https://example.com/large-file.zip".to_string(),
+///     "large-file.zip".to_string(),
+///     false,  // quiet_mode
+///     ProxyConfig::default(),
+///     Optimizer::new(),
+/// );
+///
+/// downloader.download().expect("Download failed");
+/// ```
+///
+/// # With Progress Tracking
+///
+/// ```rust,no_run
+/// use kget::{AdvancedDownloader, ProxyConfig, Optimizer};
+/// use std::sync::Arc;
+///
+/// let mut dl = AdvancedDownloader::new(
+///     "https://example.com/file.iso".to_string(),
+///     "file.iso".to_string(),
+///     true, // quiet mode (no stdout)
+///     ProxyConfig::default(),
+///     Optimizer::new(),
+/// );
+///
+/// dl.set_progress_callback(Arc::new(|p| {
+///     // p is 0.0 to 1.0
+///     update_ui_progress(p);
+/// }));
+///
+/// dl.set_status_callback(Arc::new(|msg| {
+///     log::info!("{}", msg);
+/// }));
+///
+/// dl.download().unwrap();
+///
+/// fn update_ui_progress(p: f32) {
+///     // Update your UI here
+/// }
+/// ```
 pub struct AdvancedDownloader {
     client: Client,
     url: String,
@@ -35,6 +135,29 @@ pub struct AdvancedDownloader {
 }
 
 impl AdvancedDownloader {
+    /// Create a new `AdvancedDownloader` instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `url` - URL to download from
+    /// * `output_path` - Local path for the downloaded file
+    /// * `quiet_mode` - If true, suppress console output
+    /// * `proxy_config` - Proxy settings (use `ProxyConfig::default()` for direct connection)
+    /// * `optimizer` - Optimizer for connection settings
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use kget::{AdvancedDownloader, ProxyConfig, Optimizer};
+    ///
+    /// let dl = AdvancedDownloader::new(
+    ///     "https://example.com/file.zip".to_string(),
+    ///     "./downloads/file.zip".to_string(),
+    ///     false,
+    ///     ProxyConfig::default(),
+    ///     Optimizer::new(),
+    /// );
+    /// ```
     pub fn new(url: String, output_path: String, quiet_mode: bool, proxy_config: ProxyConfig, optimizer: Optimizer) -> Self {
         let _is_iso = url.to_lowercase().ends_with(".iso");
         
@@ -78,18 +201,66 @@ impl AdvancedDownloader {
         }
     }
 
+    /// Set a custom cancellation token for graceful download interruption.
+    ///
+    /// When the token is set to `true`, the download will stop at the next
+    /// checkpoint and return an error.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use kget::{AdvancedDownloader, ProxyConfig, Optimizer};
+    /// use std::sync::Arc;
+    /// use std::sync::atomic::AtomicBool;
+    ///
+    /// let cancel = Arc::new(AtomicBool::new(false));
+    /// let mut dl = AdvancedDownloader::new(/* ... */
+    /// #    "".to_string(), "".to_string(), false, ProxyConfig::default(), Optimizer::new()
+    /// );
+    /// dl.set_cancel_token(cancel.clone());
+    ///
+    /// // In another thread:
+    /// // cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    /// ```
     pub fn set_cancel_token(&mut self, token: Arc<AtomicBool>) {
         self.cancel_token = token;
     }
 
+    /// Check if the download has been cancelled.
     pub fn is_cancelled(&self) -> bool {
         self.cancel_token.load(Ordering::Relaxed)
     }
 
+    /// Set a callback for progress updates.
+    ///
+    /// The callback receives a value from 0.0 (start) to 1.0 (complete).
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use kget::{AdvancedDownloader, ProxyConfig, Optimizer};
+    /// # let mut dl = AdvancedDownloader::new("".to_string(), "".to_string(), false, ProxyConfig::default(), Optimizer::new());
+    /// dl.set_progress_callback(|progress| {
+    ///     println!("Downloaded: {:.1}%", progress * 100.0);
+    /// });
+    /// ```
     pub fn set_progress_callback(&mut self, callback: impl Fn(f32) + Send + Sync + 'static) {
         self.progress_callback = Some(Arc::new(callback));
     }
 
+    /// Set a callback for status messages.
+    ///
+    /// Receives human-readable status updates during the download.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use kget::{AdvancedDownloader, ProxyConfig, Optimizer};
+    /// # let mut dl = AdvancedDownloader::new("".to_string(), "".to_string(), false, ProxyConfig::default(), Optimizer::new());
+    /// dl.set_status_callback(|msg| {
+    ///     log::info!("Download status: {}", msg);
+    /// });
+    /// ```
     pub fn set_status_callback(&mut self, callback: impl Fn(String) + Send + Sync + 'static) {
         self.status_callback = Some(Arc::new(callback));
     }
@@ -103,7 +274,24 @@ impl AdvancedDownloader {
         }
     }
 
-
+    /// Start the download.
+    ///
+    /// This method:
+    /// 1. Checks for existing partial file (resume support)
+    /// 2. Queries server for file size and range support
+    /// 3. Downloads using parallel connections if supported
+    /// 4. Falls back to single-stream if server doesn't support ranges
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on successful download, or an error if the download fails.
+    ///
+    /// # Errors
+    ///
+    /// - Network connection failures
+    /// - Existing file larger than remote (corrupted state)
+    /// - Cancellation via cancel token
+    /// - Disk I/O errors
     pub fn download(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
         let is_iso = self.url.to_lowercase().ends_with(".iso");
         if !self.quiet_mode {
@@ -327,6 +515,11 @@ impl AdvancedDownloader {
         let _optimizer = Arc::new(self.optimizer.clone());
         let progress_callback = self.progress_callback.clone();
         let cancel_token = self.cancel_token.clone();
+        
+        // Shared progress counter for pipe-friendly output
+        let total_bytes: u64 = chunks.iter().map(|(s, e)| e - s).sum();
+        let downloaded_bytes = Arc::new(AtomicU64::new(0));
+        let last_print_time = Arc::new(Mutex::new(Instant::now()));
 
         chunks.par_iter().try_for_each(|&(start, end)| {
             // Check for cancellation before starting chunk
@@ -374,6 +567,20 @@ impl AdvancedDownloader {
                                 file.seek_write(&buffer[..n], current_pos)?;
                                 
                                 current_pos += n as u64;
+                                
+                                // Update shared progress counter
+                                let new_downloaded = downloaded_bytes.fetch_add(n as u64, Ordering::Relaxed) + n as u64;
+                                
+                                // Print progress periodically (every 200ms) for pipe-friendly output
+                                {
+                                    let mut last_time = last_print_time.lock().unwrap();
+                                    if last_time.elapsed() >= Duration::from_millis(200) {
+                                        let percent = (new_downloaded as f64 / total_bytes as f64 * 100.0).min(100.0);
+                                        // PROGRESS: format that Swift can parse
+                                        println!("PROGRESS: {:.1}% ({}/{})", percent, new_downloaded, total_bytes);
+                                        *last_time = Instant::now();
+                                    }
+                                }
                             
                                 if let Some(ref bar) = progress {
                                     let guard = bar.lock().unwrap();

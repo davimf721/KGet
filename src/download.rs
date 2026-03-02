@@ -1,3 +1,31 @@
+//! Simple HTTP/HTTPS download functionality.
+//!
+//! This module provides basic download capabilities with automatic retry,
+//! progress tracking, and ISO integrity verification.
+//!
+//! For advanced features like parallel connections and resume support,
+//! see [`AdvancedDownloader`](crate::AdvancedDownloader).
+//!
+//! # Example
+//!
+//! ```rust,no_run
+//! use kget::{download, DownloadOptions, ProxyConfig, Optimizer};
+//!
+//! let options = DownloadOptions {
+//!     quiet_mode: false,
+//!     output_path: Some("./file.zip".to_string()),
+//!     verify_iso: false,
+//! };
+//!
+//! download(
+//!     "https://example.com/file.zip",
+//!     ProxyConfig::default(),
+//!     Optimizer::new(),
+//!     options,
+//!     None,
+//! ).unwrap();
+//! ```
+
 use reqwest::blocking::Client;
 use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE};
 use std::fs::File;
@@ -17,6 +45,16 @@ use crate::DownloadOptions;
 const MAX_RETRIES: u32 = 3;
 const RETRY_DELAY: Duration = Duration::from_secs(2);
 
+/// Check if there's enough disk space for the download.
+///
+/// # Arguments
+///
+/// * `path` - Target file path
+/// * `required_size` - Required space in bytes
+///
+/// # Errors
+///
+/// Returns an error if available space is less than required.
 pub fn check_disk_space(path: &Path, required_size: u64) -> Result<(), Box<dyn Error + Send + Sync>> {
     let dir = path.parent().unwrap_or(Path::new("."));
     let available_space = fs2::available_space(dir)?;
@@ -31,6 +69,13 @@ pub fn check_disk_space(path: &Path, required_size: u64) -> Result<(), Box<dyn E
     Ok(())
 }
 
+/// Validate that a filename is safe and valid.
+///
+/// # Errors
+///
+/// Returns an error if the filename:
+/// - Contains directory separators
+/// - Is empty
 pub fn validate_filename(filename: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
     if filename.contains(std::path::MAIN_SEPARATOR) {
         return Err("Filename cannot contain directory separators".into());
@@ -41,6 +86,44 @@ pub fn validate_filename(filename: &str) -> Result<(), Box<dyn Error + Send + Sy
     Ok(())
 }
 
+/// Download a file from a URL with automatic retry and progress tracking.
+///
+/// This is the simple download function for basic use cases. For parallel
+/// connections and resume support, use [`AdvancedDownloader`](crate::AdvancedDownloader).
+///
+/// # Arguments
+///
+/// * `target` - URL to download
+/// * `proxy` - Proxy configuration (use `ProxyConfig::default()` for no proxy)
+/// * `_optimizer` - Optimizer instance (reserved for future use)
+/// * `options` - Download options (quiet mode, output path, ISO verification)
+/// * `status_callback` - Optional callback for status messages
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use kget::{download, DownloadOptions, ProxyConfig, Optimizer};
+///
+/// download(
+///     "https://releases.ubuntu.com/22.04/ubuntu-22.04-desktop-amd64.iso",
+///     ProxyConfig::default(),
+///     Optimizer::new(),
+///     DownloadOptions {
+///         quiet_mode: false,
+///         output_path: None, // Uses filename from URL
+///         verify_iso: true,  // Verify SHA256 after download
+///     },
+///     None,
+/// ).unwrap();
+/// ```
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - Network connection fails after MAX_RETRIES attempts
+/// - HTTP response indicates an error
+/// - Insufficient disk space
+/// - File cannot be created
 pub fn download(
     target: &str,
     proxy: ProxyConfig,
@@ -220,7 +303,31 @@ pub fn download(
     Ok(())
 }
 
-
+/// Verify the integrity of an ISO file by calculating its SHA-256 hash.
+///
+/// After download, this function calculates the SHA-256 checksum of the file
+/// and displays it for manual comparison with the source.
+///
+/// # Arguments
+///
+/// * `path` - Path to the ISO file
+/// * `callback` - Optional callback for status messages
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use kget::verify_iso_integrity;
+/// use std::path::Path;
+///
+/// verify_iso_integrity(
+///     Path::new("ubuntu-22.04-desktop-amd64.iso"),
+///     Some(&|msg| println!("Status: {}", msg)),
+/// ).unwrap();
+/// ```
+///
+/// # Output
+///
+/// Prints the SHA256 hash to stdout and sends it via callback if provided.
 pub fn verify_iso_integrity(path: &Path, callback: Option<&(dyn Fn(String) + Send + Sync)>) -> Result<(), Box<dyn Error + Send + Sync>> {
     let msg = "Calculating SHA256 hash... (this may take a while for large ISOs)";
     if let Some(cb) = callback { cb(msg.to_string()); }

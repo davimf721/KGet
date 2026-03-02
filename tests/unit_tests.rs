@@ -291,7 +291,7 @@ mod optimizer_tests {
     #[test]
     fn test_optimizer_creation() {
         let config = Config::default();
-        let optimizer = Optimizer::new(config.optimization.clone());
+        let optimizer = Optimizer::from_config(config.optimization.clone());
         
         assert!(optimizer.speed_limit.is_none());
     }
@@ -301,14 +301,14 @@ mod optimizer_tests {
         let mut config = Config::default();
         config.optimization.speed_limit = Some(1_000_000); // 1 MB/s
         
-        let optimizer = Optimizer::new(config.optimization);
+        let optimizer = Optimizer::from_config(config.optimization);
         assert_eq!(optimizer.speed_limit, Some(1_000_000));
     }
 
     #[test]
     fn test_optimizer_clone() {
         let config = Config::default();
-        let optimizer = Optimizer::new(config.optimization);
+        let optimizer = Optimizer::from_config(config.optimization);
         let cloned = optimizer.clone();
         
         assert_eq!(optimizer.speed_limit, cloned.speed_limit);

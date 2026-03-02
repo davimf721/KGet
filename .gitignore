@@ -8,3 +8,10 @@ Kget.app
 KGet-1.5.4-macOS.dmg
 .DS_Store
 build-macos.sh
+build-cross.sh
+run-tests.sh
+src/gui_old.rs
+RELEASE_POST.md
+macos-app/
+release/
+build-native-macos.sh

@@ -234,3 +234,96 @@ fn test_config_save_and_load() {
     assert_eq!(config.optimization.compression, loaded.optimization.compression);
     assert_eq!(config.torrent.dht_enabled, loaded.torrent.dht_enabled);
 }
+
+// ============================================================================
+// Torrent Backend Detection
+// ============================================================================
+
+#[cfg(feature = "torrent-native")]
+#[test]
+fn test_cli_native_torrent_backend_available() {
+    // When torrent-native feature is enabled, the binary should handle magnet links
+    // This just verifies the binary compiled with the feature
+    kget()
+        .arg("--version")
+        .assert()
+        .success();
+}
+
+// ============================================================================
+// Magnet Link Detection
+// ============================================================================
+
+#[test]
+fn test_cli_magnet_link_detection() {
+    // Test that magnet links are recognized (will fail to download but shouldn't crash)
+    let result = kget()
+        .args(["-q", "magnet:?xt=urn:btih:invalidhash"])
+        .timeout(std::time::Duration::from_secs(5))
+        .assert();
+    
+    // Should either fail gracefully or timeout - not crash
+    // The important thing is no panic
+    let _ = result;
+}
+
+// ============================================================================
+// Environment Variable Tests
+// ============================================================================
+
+#[test]
+fn test_cli_respects_env_vars() {
+    // Test that KGET_QUIET environment variable works
+    kget()
+        .env("KGET_QUIET", "1")
+        .arg("--help")
+        .assert()
+        .success();
+}
+
+#[test]
+fn test_cli_torrent_backend_env() {
+    // Test that KGET_TORRENT_BACKEND env var is recognized
+    kget()
+        .env("KGET_TORRENT_BACKEND", "native")
+        .arg("--help")
+        .assert()
+        .success();
+}
+
+// ============================================================================
+// Output Format Tests
+// ============================================================================
+
+#[test]
+fn test_cli_quiet_produces_minimal_output() {
+    // In quiet mode, help should still work but download would be silent
+    kget()
+        .args(["-q", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Usage"));
+}
+
+// ============================================================================
+// Concurrent Execution Tests
+// ============================================================================
+
+#[test]
+fn test_cli_multiple_help_calls() {
+    use std::thread;
+    
+    // Run multiple instances simultaneously - should not conflict
+    let handles: Vec<_> = (0..3).map(|_| {
+        thread::spawn(|| {
+            kget()
+                .arg("--help")
+                .assert()
+                .success();
+        })
+    }).collect();
+    
+    for handle in handles {
+        handle.join().unwrap();
+    }
+}

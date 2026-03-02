@@ -150,7 +150,7 @@ fn download_worker(
                         
                         let _ = status_tx.send(WorkerToGuiMessage::StatusUpdate(format!("Initializing: {}", url)));
 
-                        let optimizer = Optimizer::new(config.optimization.clone());
+                        let optimizer = Optimizer::from_config(config.optimization.clone());
                         let proxy = config.proxy.clone();
                         let cancel_token_clone = cancel_token.clone();
                         let status_tx_clone = status_tx.clone();
@@ -384,7 +384,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     //                         CLI MODE 
     // ==========================================================
 
-    let optimizer = Optimizer::new(config.optimization.clone());
+    let optimizer = Optimizer::from_config(config.optimization.clone());
 
     if args.ftp {
         let url = args.url.clone();

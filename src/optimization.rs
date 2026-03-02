@@ -1,3 +1,26 @@
+//! Download optimization through compression and caching.
+//!
+//! This module provides the [`Optimizer`] struct for configuring and applying
+//! optimizations to downloads:
+//!
+//! - **Compression**: Automatic compression/decompression using Gzip, LZ4, or Brotli
+//! - **Caching**: Store downloaded files locally to avoid redundant downloads
+//! - **Speed limiting**: Control bandwidth usage
+//!
+//! # Example
+//!
+//! ```rust
+//! use kget::Optimizer;
+//!
+//! // Create with default settings
+//! let optimizer = Optimizer::new();
+//!
+//! // Check if compression is enabled
+//! if optimizer.is_compression_enabled() {
+//!     println!("Compression active");
+//! }
+//! ```
+
 use std::error::Error;
 use std::fs::{self, File};
 use std::io::{Read, Write};
@@ -6,16 +29,57 @@ use flate2::write::{GzEncoder, GzDecoder};
 use lz4::block::{compress, CompressionMode};
 use crate::config::OptimizationConfig;
 
-/// Structure responsible for optimizing download operations through compression and caching
+/// Download optimizer for compression, caching, and speed limiting.
+///
+/// The `Optimizer` manages download performance features:
+///
+/// - **Compression**: Reduces storage size using configurable algorithms
+/// - **Caching**: Stores files locally to avoid re-downloading
+/// - **Speed limits**: Controls maximum download speed
+///
+/// # Compression Levels
+///
+/// | Level | Algorithm | Speed    | Ratio    |
+/// |-------|-----------|----------|----------|
+/// | 1-3   | Gzip      | Fast     | Moderate |
+/// | 4-6   | LZ4       | Balanced | Good     |
+/// | 7-9   | Brotli    | Slow     | Best     |
+///
+/// # Example
+///
+/// ```rust
+/// use kget::{Optimizer, Config};
+///
+/// // From config
+/// let config = Config::default();
+/// let optimizer = Optimizer::from_config(config.optimization);
+///
+/// // Or with defaults
+/// let optimizer = Optimizer::new();
+/// ```
 #[derive(Clone)]
 pub struct Optimizer {
     config: OptimizationConfig,
+    /// Speed limit in bytes per second (None = unlimited)
     pub speed_limit: Option<u64>,
 }
 
 impl Optimizer {
-    /// Make a new Optimizer instance with the provided configuration
-    pub fn new(config: OptimizationConfig) -> Self {
+    /// Create a new `Optimizer` with the provided configuration.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Optimization configuration settings
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use kget::{Optimizer, Config};
+    ///
+    /// let config = Config::default();
+    /// let optimizer = Optimizer::from_config(config.optimization);
+    /// ```
+    pub fn from_config(config: OptimizationConfig) -> Self {
         let speed_limit = config.speed_limit;
         Self { 
             config,
@@ -23,11 +87,14 @@ impl Optimizer {
         }
     }
 
-    /// Compress data using different algorithms based on the configured compression level
+    /// Compress data using the configured algorithm.
     ///
-    /// Levels 1-3: Gzip
-    /// Levels 4-6: LZ4
-    /// Levels 7-9: Brotli
+    /// The algorithm is selected based on `compression_level`:
+    /// - Levels 1-3: Gzip (fast)
+    /// - Levels 4-6: LZ4 (balanced)
+    /// - Levels 7-9: Brotli (high compression)
+    ///
+    /// Returns the original data unchanged if compression is disabled.
     #[allow(dead_code)]
     pub fn compress(&self, data: &[u8]) -> Result<Vec<u8>, Box<dyn Error>> {
         if !self.config.compression {
@@ -79,9 +146,17 @@ impl Optimizer {
         Ok(decompressed)
     }
 
-    /// Retrieve a file from the cache if it exists
+    /// Retrieve a file from the cache if it exists.
     ///
-    /// Returns None if caching is disabled or the file does not exist
+    /// # Arguments
+    ///
+    /// * `url` - The URL that was used to download the file
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(Some(data))` if the file exists in cache
+    /// - `Ok(None)` if caching is disabled or file doesn't exist
+    /// - `Err` on I/O errors
     #[allow(dead_code)]
     pub fn get_cached_file(&self, url: &str) -> Result<Option<Vec<u8>>, Box<dyn Error>> {
         if !self.config.cache_enabled {
@@ -145,11 +220,50 @@ impl Optimizer {
         Ok(cache_dir)
     }
 
+    /// Get the peer connection limit for torrent downloads.
+    ///
+    /// Uses the speed limit as a proxy for connection capacity.
+    /// Returns 50 if no speed limit is set.
     pub fn get_peer_limit(&self) -> usize {
         self.speed_limit.unwrap_or(50) as usize
     }
     
+    /// Check if compression is enabled.
     pub fn is_compression_enabled(&self) -> bool {
         self.config.compression
+    }
+
+    /// Create a new `Optimizer` with default settings.
+    ///
+    /// Equivalent to `Optimizer::default()`.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Deprecated alias for `from_config`. Use `Optimizer::from_config()` instead.
+    #[doc(hidden)]
+    pub fn with_config(config: OptimizationConfig) -> Self {
+        Self::from_config(config)
+    }
+}
+
+impl Default for Optimizer {
+    /// Create an `Optimizer` with sensible defaults:
+    /// - Compression enabled at level 6 (LZ4)
+    /// - Caching enabled in ~/.cache/kget
+    /// - No speed limit
+    /// - 4 max connections
+    fn default() -> Self {
+        Self {
+            config: OptimizationConfig {
+                compression: true,
+                compression_level: 6,
+                cache_enabled: true,
+                cache_dir: "~/.cache/kget".to_string(),
+                speed_limit: None,
+                max_connections: 4,
+            },
+            speed_limit: None,
+        }
     }
 }

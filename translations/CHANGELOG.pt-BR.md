@@ -7,6 +7,49 @@ Todas as mudanças notáveis neste projeto serão documentadas neste arquivo.
 O formato é baseado em [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 e este projeto adere ao [Versionamento Semântico](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-02-28
+
+### Adicionado
+- **App Nativo macOS (SwiftUI):** Aplicativo macOS nativo completamente redesenhado com integração profunda ao sistema.
+  - Manipuladores de esquema de URL (`kget://`, `magnet:`)
+  - Associações de arquivo (`.torrent`)
+  - Integração com barra de menu com ações rápidas
+  - Suporte ao menu de Serviços do macOS
+  - Notificações nativas
+  - Instalador DMG arrasta-e-solta com guia visual (caixas, seta, texto de instrução)
+- **GUI Multiplataforma Melhorada:** Grande reformulação visual para a GUI baseada em egui (Linux/Windows).
+  - Lista de downloads com rastreamento de múltiplos downloads simultâneos
+  - Badge TURBO para modo de downloads paralelos
+  - Badge ISO para arquivos ISO com verificação automática de integridade
+  - Barra de progresso multi-segmento mostrando conexões paralelas (C1, C2, C3, C4)
+  - Barra de progresso de verificação com tema roxo e animação de escudo
+  - Indicador de conexões (⚡ 4x) para modo turbo
+  - Exibição de velocidade e ETA em tempo real
+  - Estado vazio com ícones de protocolo
+  - Entrada de URL em linha única com controles integrados
+  - Layout compacto com nomes de arquivos e URLs truncados
+  - Dimensionamento e alinhamento adequados de botões
+- **Melhorias Visuais:**
+  - Tema escuro aprimorado com melhor contraste
+  - Efeitos de brilho animados nas barras de progresso
+  - Badges e ícones coloridos por status
+  - Tipografia e espaçamento melhorados
+  - Fundo do instalador DMG com tema escuro, caixas arredondadas, seta chevron e texto de instrução
+
+### Alterado
+- **Script de Build:** Agora fecha automaticamente instâncias do KGet em execução antes de compilar
+- **Script de Build:** Compila o bundle do app em `/tmp` para evitar que atributos estendidos do iCloud interfiram na assinatura de código
+- **Rastreamento de Progresso:** Removido limite artificial de 99%, agora mostra progresso preciso de 0-100%
+- **Verificação SHA256:** Usa CommonCrypto nativo no macOS com progresso em tempo real
+- **Progresso de Download Avançado:** Agora usa relatório de progresso via stdout em vez de monitoramento de tamanho de arquivo
+
+### Corrigido
+- Barra de progresso travando em 90% no modo de download avançado
+- Barra de progresso "tremendo" (saltos erráticos) durante downloads avançados devido a conflito entre monitoramento de tamanho de arquivo e progresso via stdout
+- Progresso de verificação não mostrando feedback até a conclusão
+- Assinatura de código falhando no macOS devido ao iCloud adicionar atributos estendidos (`com.apple.FinderInfo`, `com.apple.provenance`)
+- Ícones do instalador DMG desalinhados com as caixas de fundo
+
 ## [1.5.2] - 2025-12-19
 
 ### Adicionado
