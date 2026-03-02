@@ -19,7 +19,7 @@ A fast, modern download manager written in Rust. Supports HTTP/HTTPS, FTP/SFTP, 
 
 | GUI | CLI |
 |-----|-----|
-| <img src="https://github.com/user-attachments/assets/6da6dbd4-b3ae-4669-b64b-ffe3b961beb2" width="400"/> | <img src="https://github.com/user-attachments/assets/a835c4df-5424-4aaa-b687-2445a99ba067" width="400"/> |
+| <img src="https://github.com/user-attachments/assets/f2862307-b524-4527-bee0-ce837c056e7d" width="400"/> | <img src="https://github.com/user-attachments/assets/a835c4df-5424-4aaa-b687-2445a99ba067" width="400"/> |
 
 ## Installation
 
