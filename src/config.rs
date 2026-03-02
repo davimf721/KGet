@@ -70,6 +70,19 @@ pub enum ProxyType {
     Socks5,
 }
 
+impl Default for ProxyConfig {
+    /// Create a disabled proxy configuration.
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            url: None,
+            username: None,
+            password: None,
+            proxy_type: ProxyType::Http,
+        }
+    }
+}
+
 /// Configuration for download optimization features.
 ///
 /// Controls compression, caching, speed limiting, and parallel connections.
