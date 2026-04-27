@@ -22,11 +22,11 @@
 //! config.save().unwrap();
 //! ```
 
+use dirs::config_dir;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use std::fs;
 use std::io;
-use dirs::config_dir;
+use std::path::PathBuf;
 
 /// Proxy configuration for routing downloads through a proxy server.
 ///
@@ -107,12 +107,12 @@ pub struct OptimizationConfig {
 
 // Function to provide the default value for max_peer_connections
 fn default_torrent_max_peer_connections() -> u32 {
-     50
+    50
 }
 
 // Function to provide the default value for max_upload_slots
 fn default_torrent_max_upload_slots() -> u32 {
-    4 
+    4
 }
 
 /// Configuration for BitTorrent downloads.
@@ -218,19 +218,19 @@ impl Config {
     /// Returns an error if the config file exists but cannot be read or parsed.
     pub fn load() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let config_path = Self::get_config_path()?;
-        
+
         if !config_path.exists() {
             // If the config file does not exist, return default config
             return Ok(Self::default());
         }
-        
+
         let config_str = fs::read_to_string(config_path)?;
         // The error occurs here if the existing JSON file does not have the field.
         let config: Config = serde_json::from_str(&config_str)?;
 
         Ok(config)
     }
-    
+
     /// Save the current configuration to the standard config file location.
     ///
     /// Creates the config directory if it doesn't exist.
@@ -245,21 +245,21 @@ impl Config {
         if let Some(parent) = config_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        
+
         let config_str = serde_json::to_string_pretty(self)?;
         fs::write(config_path, config_str)?;
-        
+
         Ok(())
     }
-    
+
     fn get_config_path() -> Result<PathBuf, io::Error> {
         let mut path = config_dir().ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotFound, "Not able to find config directory")
         })?;
-        
+
         path.push("kget");
         path.push("config.json");
-        
+
         Ok(path)
     }
 }

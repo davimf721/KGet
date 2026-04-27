@@ -27,12 +27,20 @@ impl Default for TransmissionSettings {
 #[allow(dead_code)]
 impl TransmissionSettings {
     pub fn rpc_url(&self) -> String {
-        let path = if self.rpc_path.starts_with('/') { self.rpc_path.clone() } else { format!("/{}", self.rpc_path) };
+        let path = if self.rpc_path.starts_with('/') {
+            self.rpc_path.clone()
+        } else {
+            format!("/{}", self.rpc_path)
+        };
         format!("http://{}:{}{}", self.host, self.port, path)
     }
 
     pub fn web_url(&self) -> String {
-        let path = if self.web_path.starts_with('/') { self.web_path.clone() } else { format!("/{}", self.web_path) };
+        let path = if self.web_path.starts_with('/') {
+            self.web_path.clone()
+        } else {
+            format!("/{}", self.web_path)
+        };
         format!("http://{}:{}{}", self.host, self.port, path)
     }
 
@@ -48,9 +56,17 @@ impl TransmissionSettings {
             }
             let path = u.path();
             if !path.is_empty() && path != "/" {
-                if is_web { self.web_path = path.to_string(); } else { self.rpc_path = path.to_string(); }
+                if is_web {
+                    self.web_path = path.to_string();
+                } else {
+                    self.rpc_path = path.to_string();
+                }
             } else {
-                if is_web { self.web_path = default_path.to_string(); } else { self.rpc_path = default_path.to_string(); }
+                if is_web {
+                    self.web_path = default_path.to_string();
+                } else {
+                    self.rpc_path = default_path.to_string();
+                }
             }
         }
     }
@@ -92,8 +108,12 @@ impl TransmissionSettings {
             }
         }
 
-        s.username = std::env::var("KGET_TRANSMISSION_USER").ok().filter(|x| !x.is_empty());
-        s.password = std::env::var("KGET_TRANSMISSION_PASS").ok().filter(|x| !x.is_empty());
+        s.username = std::env::var("KGET_TRANSMISSION_USER")
+            .ok()
+            .filter(|x| !x.is_empty());
+        s.password = std::env::var("KGET_TRANSMISSION_PASS")
+            .ok()
+            .filter(|x| !x.is_empty());
 
         s
     }

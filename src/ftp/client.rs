@@ -1,13 +1,13 @@
 //! FTP client implementation.
 
-use std::error::Error;
-use std::io::Write;
-use url::Url;
-use suppaftp::FtpStream;
-use crate::progress::create_progress_bar;
 use crate::config::ProxyConfig;
 use crate::optimization::Optimizer;
+use crate::progress::create_progress_bar;
 use crate::utils::print;
+use std::error::Error;
+use std::io::Write;
+use suppaftp::FtpStream;
+use url::Url;
 
 /// FTP file downloader with progress tracking.
 ///
@@ -90,7 +90,10 @@ impl FtpDownloader {
         let port = url.port().unwrap_or(21);
         let path = url.path();
 
-        print(&format!("Connecting to FTP server {}:{}...", host, port), self.quiet_mode);
+        print(
+            &format!("Connecting to FTP server {}:{}...", host, port),
+            self.quiet_mode,
+        );
 
         let mut ftp = if self.proxy.enabled {
             self.connect_via_proxy(host, port)?
@@ -107,12 +110,12 @@ impl FtpDownloader {
         ftp.transfer_type(suppaftp::types::FileType::Binary)?;
 
         let size = ftp.size(path)? as u64;
-        
+
         let progress = create_progress_bar(
             self.quiet_mode,
             format!("Downloading {}", path),
             Some(size),
-            false
+            false,
         );
 
         let mut file = std::fs::File::create(&self.output_path)?;
@@ -125,7 +128,8 @@ impl FtpDownloader {
                 match reader.read(&mut buffer) {
                     Ok(0) => break,
                     Ok(n) => {
-                        file.write_all(&buffer[..n]).map_err(|e| suppaftp::FtpError::ConnectionError(e))?;
+                        file.write_all(&buffer[..n])
+                            .map_err(|e| suppaftp::FtpError::ConnectionError(e))?;
                         downloaded += n;
                         progress.set_position(downloaded as u64);
                     }
@@ -141,7 +145,11 @@ impl FtpDownloader {
         Ok(())
     }
 
-    fn connect_via_proxy(&self, host: &str, port: u16) -> Result<FtpStream, Box<dyn Error + Send + Sync>> {
+    fn connect_via_proxy(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> Result<FtpStream, Box<dyn Error + Send + Sync>> {
         match self.proxy.proxy_type {
             crate::config::ProxyType::Http | crate::config::ProxyType::Https => {
                 Err("HTTP/HTTPS proxy not supported for FTP".into())
@@ -152,10 +160,8 @@ impl FtpDownloader {
                     let proxy_host = proxy.host_str().ok_or("Invalid proxy host")?;
                     let proxy_port = proxy.port().unwrap_or(1080);
 
-                    let stream = socks::Socks5Stream::connect(
-                        (proxy_host, proxy_port),
-                        (host, port),
-                    )?;
+                    let stream =
+                        socks::Socks5Stream::connect((proxy_host, proxy_port), (host, port))?;
 
                     Ok(FtpStream::connect_with_stream(stream.into_inner())?)
                 } else {

@@ -7,6 +7,26 @@ Todos los cambios notables en este proyecto serán documentados en este archivo.
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 y este proyecto se adhiere al [Versionado Semántico](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.1] - 2026-04-27
+
+### Añadido
+- La app macOS ahora valida enlaces magnet antes de crear la tarjeta de descarga.
+- Las descargas completadas incluyen acciones Abrir Archivo y Abrir Carpeta.
+- Menú contextual en las tarjetas de macOS: Copiar URL, Abrir Carpeta, Reiniciar y Eliminar.
+- Atajos en la app macOS: `Cmd+V`, `Cmd+L`, `Esc` y `Delete`.
+- Verificación SHA256 esperada por CLI `--sha256 <hash>` y por biblioteca con `DownloadOptions::expected_sha256`.
+- Helper público `verify_file_sha256` para usuarios de la biblioteca.
+- Notificaciones nativas de finalización y error en la GUI Rust para Linux y Windows mediante `notify-rust`.
+
+### Cambiado
+- URLs o magnets duplicados ahora enfocan la tarjeta existente en macOS en vez de crear otra.
+- Las descargas avanzadas respetan el límite de conexiones del optimizador y rechazan respuestas inválidas de byte range.
+- Documentación de biblioteca actualizada en inglés, portugués y español para la API actual.
+
+### Corregido
+- Los enlaces magnet inválidos se rechazan antes de activar el backend torrent.
+- Un mismatch de SHA256 ahora hace fallar la descarga en vez de solo imprimir el hash calculado.
+
 ## [1.6.0] - 2026-02-28
 
 ### Añadido

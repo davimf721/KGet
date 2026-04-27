@@ -1,6 +1,6 @@
 # Contributors
 
-This file lists all contributors to the KelpsGet project. Thank you to everyone who has contributed!
+This file lists all contributors to the KGet project. Thank you to everyone who has contributed!
 
 ## Core Team
 
@@ -17,7 +17,7 @@ This file lists all contributors to the KelpsGet project. Thank you to everyone 
 
 ## How to Add Your Name
 
-If you've contributed to KelpsGet and would like to be added to this list, please:
+If you've contributed to KGet and would like to be added to this list, please:
 
 1. Fork the repository
 2. Add your name to the Contributors section
@@ -30,4 +30,4 @@ This list is maintained manually. If you've contributed but don't see your name 
 
 ---
 
-Thank you to all contributors who have helped make KelpsGet better! 🚀 
+Thank you to all contributors who have helped make KGet better! 🚀

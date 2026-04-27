@@ -170,7 +170,12 @@ fn test_cli_invalid_url_handling() {
 fn test_cli_nonexistent_proxy() {
     // Using a non-existent proxy should fail
     kget()
-        .args(["-q", "-p", "http://nonexistent-proxy:9999", "https://example.com/test.txt"])
+        .args([
+            "-q",
+            "-p",
+            "http://nonexistent-proxy:9999",
+            "https://example.com/test.txt",
+        ])
         .timeout(std::time::Duration::from_secs(10))
         .assert()
         .failure();
@@ -199,9 +204,9 @@ fn test_version_format() {
         .arg("-v")
         .output()
         .expect("Failed to execute command");
-    
+
     let version_string = String::from_utf8_lossy(&output.stdout);
-    
+
     // Should contain "Kget" and a version number
     assert!(version_string.contains("Kget"));
     // Version should be in format X.Y.Z
@@ -215,7 +220,7 @@ fn test_version_format() {
 #[test]
 fn test_config_directory_creation() {
     use kget::Config;
-    
+
     // Loading config should not panic even if directory doesn't exist
     let result = Config::load();
     assert!(result.is_ok());
@@ -224,14 +229,17 @@ fn test_config_directory_creation() {
 #[test]
 fn test_config_save_and_load() {
     use kget::Config;
-    
+
     // This test verifies the serialization/deserialization cycle
     let config = Config::default();
     let json = serde_json::to_string_pretty(&config).unwrap();
     let loaded: Config = serde_json::from_str(&json).unwrap();
-    
+
     assert_eq!(config.proxy.enabled, loaded.proxy.enabled);
-    assert_eq!(config.optimization.compression, loaded.optimization.compression);
+    assert_eq!(
+        config.optimization.compression,
+        loaded.optimization.compression
+    );
     assert_eq!(config.torrent.dht_enabled, loaded.torrent.dht_enabled);
 }
 
@@ -244,10 +252,7 @@ fn test_config_save_and_load() {
 fn test_cli_native_torrent_backend_available() {
     // When torrent-native feature is enabled, the binary should handle magnet links
     // This just verifies the binary compiled with the feature
-    kget()
-        .arg("--version")
-        .assert()
-        .success();
+    kget().arg("--version").assert().success();
 }
 
 // ============================================================================
@@ -261,7 +266,7 @@ fn test_cli_magnet_link_detection() {
         .args(["-q", "magnet:?xt=urn:btih:invalidhash"])
         .timeout(std::time::Duration::from_secs(5))
         .assert();
-    
+
     // Should either fail gracefully or timeout - not crash
     // The important thing is no panic
     let _ = result;
@@ -312,17 +317,16 @@ fn test_cli_quiet_produces_minimal_output() {
 #[test]
 fn test_cli_multiple_help_calls() {
     use std::thread;
-    
+
     // Run multiple instances simultaneously - should not conflict
-    let handles: Vec<_> = (0..3).map(|_| {
-        thread::spawn(|| {
-            kget()
-                .arg("--help")
-                .assert()
-                .success();
+    let handles: Vec<_> = (0..3)
+        .map(|_| {
+            thread::spawn(|| {
+                kget().arg("--help").assert().success();
+            })
         })
-    }).collect();
-    
+        .collect();
+
     for handle in handles {
         handle.join().unwrap();
     }

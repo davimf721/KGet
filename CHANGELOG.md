@@ -7,6 +7,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0.html),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.1] - 2026-04-27
+
+### Added
+- macOS app now validates magnet links before creating a download card.
+- Completed downloads include Open File and Open Folder actions.
+- macOS app context menu on download cards: Copy URL, Open Folder, Restart, and Remove.
+- Keyboard shortcuts in the macOS app: `Cmd+V`, `Cmd+L`, `Esc`, and `Delete`.
+- Expected SHA256 verification through CLI `--sha256 <hash>` and library `DownloadOptions::expected_sha256`.
+- Public `verify_file_sha256` helper for library users.
+- Native completion and failure notifications for the Rust GUI on Linux and Windows through `notify-rust`.
+
+### Changed
+- Duplicate URL or magnet submissions now focus the existing macOS download card instead of adding another card.
+- Advanced downloads respect optimizer connection limits and reject invalid byte-range responses.
+- Library documentation was refreshed in English, Portuguese, and Spanish for the current API.
+
+### Fixed
+- Invalid magnet links are rejected before starting the torrent backend.
+- SHA256 mismatch now fails the download instead of only printing the calculated hash.
+
 ## [1.6.0] - 2026-03-02
 
 ### Added

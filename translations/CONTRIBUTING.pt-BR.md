@@ -1,8 +1,8 @@
-# Guia de Contribuição para o KelpsGet
+# Guia de Contribuição para o KGet
 
 [English](../CONTRIBUTING.md) | [Português](CONTRIBUTING.pt-BR.md) | [Español](CONTRIBUTING.es.md)
 
-Primeiramente, obrigado por considerar contribuir com o KelpsGet! São pessoas como você que tornam o KelpsGet uma ferramenta incrível.
+Primeiramente, obrigado por considerar contribuir com o KGet! São pessoas como você que tornam o KGet uma ferramenta incrível.
 
 ## Código de Conduta
 
@@ -20,7 +20,7 @@ Antes de criar relatórios de bugs, por favor verifique as issues existentes, po
 * Descreva o comportamento observado após seguir os passos
 * Explique qual comportamento você esperava ver e por quê
 * Inclua capturas de tela se possível
-* Inclua a versão do KelpsGet que você está usando
+* Inclua a versão do KGet que você está usando
 * Inclua seu sistema operacional e versão
 
 ### Sugerindo Melhorias
@@ -31,7 +31,7 @@ Se você tem uma sugestão para o projeto, adoraríamos ouvir! Basta seguir este
 * Forneça uma descrição passo a passo da melhoria sugerida
 * Forneça exemplos específicos para demonstrar os passos
 * Descreva o comportamento atual e explique qual comportamento você esperava ver
-* Explique por que essa melhoria seria útil para a maioria dos usuários do KelpsGet
+* Explique por que essa melhoria seria útil para a maioria dos usuários do KGet
 
 ### Pull Requests
 
@@ -46,7 +46,7 @@ Se você tem uma sugestão para o projeto, adoraríamos ouvir! Basta seguir este
 ## Processo de Desenvolvimento
 
 1. Faça um fork do repositório
-2. Clone seu fork: `git clone https://github.com/seu-usuario/KelpsGet.git`
+2. Clone seu fork: `git clone https://github.com/seu-usuario/KGet.git`
 3. Crie sua branch de feature: `git checkout -b feature/minha-nova-feature`
 4. Faça suas alterações
 5. Execute os testes: `cargo test`
@@ -168,4 +168,4 @@ docker run --rm -it \
 
 Contribuidores que enviarem um pull request válido serão adicionados ao nosso arquivo [CONTRIBUTORS.md](../CONTRIBUTORS.md).
 
-Obrigado por contribuir com o KelpsGet! 🚀 
+Obrigado por contribuir com o KGet! 🚀

@@ -1,5 +1,5 @@
-use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
+use rustyline::error::ReadlineError;
 
 pub fn interactive_mode() {
     let mut rl = DefaultEditor::new().unwrap();
@@ -38,25 +38,4 @@ pub fn interactive_mode() {
             }
         }
     }
-}
-
-pub fn run_interactive_mode() -> Result<(), Box<dyn std::error::Error>> {
-    let mut rl = DefaultEditor::new()?;
-
-    loop {
-        let line = match rl.readline("kget> ") {
-            Ok(l) => l,
-            Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => break,
-            Err(e) => return Err(Box::new(e)),
-        };
-
-        let input = line.trim();
-        if input.is_empty() {
-            continue;
-        }
-
-        // Seu parser/dispatch do modo interativo
-    }
-
-    Ok(())
 }

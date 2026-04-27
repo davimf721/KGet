@@ -24,10 +24,10 @@
 //! downloader.download().unwrap();
 //! ```
 
-use std::error::Error;
-use std::io::Read;
 use crate::config::ProxyConfig;
 use crate::optimization::Optimizer;
+use std::error::Error;
+use std::io::Read;
 
 /// SFTP file downloader using SSH.
 ///
@@ -58,7 +58,13 @@ impl SftpDownloader {
     /// * `quiet` - Suppress console output
     /// * `proxy` - Proxy configuration
     /// * `optimizer` - Optimizer instance
-    pub fn new(url: String, output: String, quiet: bool, proxy: ProxyConfig, optimizer: Optimizer) -> Self {
+    pub fn new(
+        url: String,
+        output: String,
+        quiet: bool,
+        proxy: ProxyConfig,
+        optimizer: Optimizer,
+    ) -> Self {
         Self {
             url,
             output,
@@ -73,14 +79,14 @@ impl SftpDownloader {
         let mut sess = ssh2::Session::new()?;
         sess.set_tcp_stream(tcp);
         sess.handshake()?;
-        
+
         let sftp = sess.sftp()?;
         let mut remote_file = sftp.open(std::path::Path::new(&self.url))?;
         let mut contents = Vec::new();
         remote_file.read_to_end(&mut contents)?;
-        
+
         std::fs::write(&self.output, contents)?;
-        
+
         if !self.quiet {
             println!("Downloaded {} to {}", self.url, self.output);
         }

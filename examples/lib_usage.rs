@@ -26,9 +26,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use kget::{
-    create_progress_bar, download, verify_iso_integrity, AdvancedDownloader,
-    Config, DownloadOptions, Optimizer, ProxyConfig, ProxyType,
-    torrent::{download_magnet, TorrentCallbacks},
+    AdvancedDownloader, Config, DownloadOptions, Optimizer, ProxyConfig, ProxyType,
+    create_progress_bar, download,
+    torrent::{TorrentCallbacks, download_magnet},
+    verify_iso_integrity,
 };
 
 fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -78,6 +79,7 @@ fn run_simple(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn Erro
         output_path: output,
         quiet_mode: false,
         verify_iso: false,
+        expected_sha256: None,
     };
 
     println!("📥 Starting simple download: {}", url);
@@ -88,7 +90,7 @@ fn run_simple(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn Erro
         options,
         None,
     )?;
-    
+
     println!("✅ Download complete!");
     Ok(())
 }
@@ -100,7 +102,9 @@ fn run_simple(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn Erro
 /// Advanced download with parallel connections and progress tracking.
 ///
 /// Use this for large files or when you need progress callbacks.
-fn run_advanced(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn Error + Send + Sync>> {
+fn run_advanced(
+    mut args: impl Iterator<Item = String>,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     let url = args.next().expect("Usage: advanced <url> <output>");
     let output = args.next().expect("Usage: advanced <url> <output>");
 
@@ -118,9 +122,10 @@ fn run_advanced(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn Er
         let percent = progress * 100.0;
         let filled = (progress * 30.0) as usize;
         let empty = 30 - filled;
-        print!("\r[{}{}] {:.1}%", 
-            "█".repeat(filled), 
-            "░".repeat(empty), 
+        print!(
+            "\r[{}{}] {:.1}%",
+            "█".repeat(filled),
+            "░".repeat(empty),
             percent
         );
         use std::io::Write;
@@ -135,9 +140,9 @@ fn run_advanced(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn Er
     println!("🚀 Starting advanced parallel download...");
     println!("   URL: {}", url);
     println!("   Output: {}", output);
-    
+
     downloader.download()?;
-    
+
     println!("\n✅ Download complete!");
     Ok(())
 }
@@ -147,7 +152,9 @@ fn run_advanced(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn Er
 // ============================================================================
 
 /// Download an ISO file and automatically verify its SHA256 hash.
-fn run_auto_verify(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn Error + Send + Sync>> {
+fn run_auto_verify(
+    mut args: impl Iterator<Item = String>,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     let url = args.next().expect("Usage: auto-verify <url> <output>");
     let output = args.next().expect("Usage: auto-verify <url> <output>");
 
@@ -155,12 +162,13 @@ fn run_auto_verify(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn
         output_path: Some(output.clone()),
         verify_iso: true, // Automatically verify after download
         quiet_mode: false,
+        expected_sha256: None,
     };
 
     println!("💿 Downloading ISO with automatic integrity check...");
     println!("   URL: {}", url);
     println!("   Output: {}", output);
-    
+
     download(
         &url,
         ProxyConfig::default(),
@@ -168,7 +176,7 @@ fn run_auto_verify(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn
         options,
         Some(&|status| println!("📊 {}", status)), // Status callback
     )?;
-    
+
     println!("✅ Download and verification complete!");
     Ok(())
 }
@@ -180,9 +188,9 @@ fn run_auto_verify(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn
 /// Use KGet's progress bar for your own tasks.
 fn run_progress_demo() {
     println!("🎨 KGet Progress Bar Demo\n");
-    
+
     let total_steps: u64 = 100;
-    
+
     // Create progress bar with KGet's styling
     let bar = create_progress_bar(
         false,                          // quiet_mode
@@ -197,7 +205,7 @@ fn run_progress_demo() {
     }
 
     bar.finish_with_message("✅ All files processed!");
-    
+
     // Demo: Indeterminate spinner
     println!("\n🔄 Spinner demo (unknown duration)...");
     let spinner = create_progress_bar(
@@ -206,12 +214,12 @@ fn run_progress_demo() {
         None, // No total = spinner mode
         false,
     );
-    
+
     for _ in 0..50 {
         std::thread::sleep(Duration::from_millis(50));
         spinner.tick();
     }
-    
+
     spinner.finish_with_message("✅ Connected!");
 }
 
@@ -220,17 +228,16 @@ fn run_progress_demo() {
 // ============================================================================
 
 /// Verify SHA256 integrity of any file.
-fn run_verify_only(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn Error + Send + Sync>> {
+fn run_verify_only(
+    mut args: impl Iterator<Item = String>,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     let path = args.next().expect("Usage: verify-only <file_path>");
-    
+
     println!("🔐 Calculating SHA256 hash for: {}", path);
     println!("   This may take a while for large files...\n");
-    
-    verify_iso_integrity(
-        Path::new(&path),
-        Some(&|status| println!("   {}", status)),
-    )?;
-    
+
+    verify_iso_integrity(Path::new(&path), Some(&|status| println!("   {}", status)))?;
+
     println!("\n💡 Compare this hash with the one provided by the source.");
     Ok(())
 }
@@ -242,7 +249,7 @@ fn run_verify_only(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn
 /// Programmatically configure proxy and optimization settings.
 fn run_config_custom() -> Result<(), Box<dyn Error + Send + Sync>> {
     println!("⚙️  Custom Configuration Demo\n");
-    
+
     // Load existing config or use defaults
     let mut config = Config::load().unwrap_or_default();
 
@@ -255,29 +262,40 @@ fn run_config_custom() -> Result<(), Box<dyn Error + Send + Sync>> {
     // config.proxy.password = Some("pass".to_string());
 
     // ── Configure Optimization ──
-    config.optimization.max_connections = 8;  // Parallel connections
-    config.optimization.compression = true;   // Enable caching compression
+    config.optimization.max_connections = 8; // Parallel connections
+    config.optimization.compression = true; // Enable caching compression
     config.optimization.speed_limit = Some(5_000_000); // 5 MB/s limit
-    
+
     // ── Configure Torrent ──
     config.torrent.enabled = true;
     config.torrent.dht_enabled = true;
     config.torrent.max_peers = 100;
 
     println!("📋 Configuration Summary:");
-    println!("   Proxy: {} ({})", 
+    println!(
+        "   Proxy: {} ({})",
         config.proxy.url.as_deref().unwrap_or("none"),
-        if config.proxy.enabled { "enabled" } else { "disabled" }
+        if config.proxy.enabled {
+            "enabled"
+        } else {
+            "disabled"
+        }
     );
-    println!("   Max Connections: {}", config.optimization.max_connections);
-    println!("   Speed Limit: {:?} bytes/s", config.optimization.speed_limit);
+    println!(
+        "   Max Connections: {}",
+        config.optimization.max_connections
+    );
+    println!(
+        "   Speed Limit: {:?} bytes/s",
+        config.optimization.speed_limit
+    );
     println!("   Torrent DHT: {}", config.torrent.dht_enabled);
-    
+
     // Save config for future use
     // config.save()?;
-    
+
     println!("\n✅ Config ready! Pass config.proxy to download functions.");
-    
+
     // Example: Using custom config with AdvancedDownloader
     let _downloader = AdvancedDownloader::new(
         "https://example.com/file.zip".to_string(),
@@ -286,7 +304,7 @@ fn run_config_custom() -> Result<(), Box<dyn Error + Send + Sync>> {
         config.proxy.clone(),
         Optimizer::from_config(config.optimization),
     );
-    
+
     Ok(())
 }
 
@@ -296,7 +314,9 @@ fn run_config_custom() -> Result<(), Box<dyn Error + Send + Sync>> {
 
 /// Download a file via magnet link using the native torrent client.
 fn run_torrent(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let magnet = args.next().expect("Usage: torrent <magnet_link> [output_dir]");
+    let magnet = args
+        .next()
+        .expect("Usage: torrent <magnet_link> [output_dir]");
     let output_dir = args.next().unwrap_or_else(|| ".".to_string());
 
     println!("🧲 Starting torrent download...");
@@ -312,9 +332,10 @@ fn run_torrent(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn Err
             let percent = progress * 100.0;
             let filled = (progress * 30.0) as usize;
             let empty = 30 - filled;
-            print!("\r🧲 [{}{}] {:.1}%", 
-                "█".repeat(filled), 
-                "░".repeat(empty), 
+            print!(
+                "\r🧲 [{}{}] {:.1}%",
+                "█".repeat(filled),
+                "░".repeat(empty),
                 percent
             );
             use std::io::Write;

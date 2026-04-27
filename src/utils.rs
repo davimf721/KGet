@@ -18,9 +18,9 @@
 //! ```
 
 /// Print a message to the console if not in quiet mode.
-/// 
+///
 /// # Arguments
-/// 
+///
 /// * `msg` - The message to print
 /// * `quiet_mode` - If true, suppress printing the message
 ///
@@ -128,4 +128,3 @@ pub fn resolve_output_path(output_arg: Option<String>, url: &str, default_name: 
         get_filename_from_url_or_default(url, default_name)
     }
 }
-

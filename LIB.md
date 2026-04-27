@@ -1,88 +1,146 @@
-# Using KGet as a Library
+# Using KGet as a Rust Library
 
-KGet is a versatile Rust crate that provides a high-performance download engine. It is designed to be integrated into other projects while maintaining the same efficiency (RAM/Disk optimization) as the CLI app.
+KGet is both a desktop download manager and a reusable Rust download engine.
+The library API is intended for apps, CLIs, automations, and future native
+frontends that need HTTP/HTTPS, FTP, SFTP, magnet links, progress callbacks,
+resume support, proxy support, and SHA256 verification.
 
 [English](LIB.md) | [Português](translations/LIB.pt-br.md) | [Español](translations/LIB.es.md)
 
 ## Installation
 
-Add KGet to your `Cargo.toml`:
+```toml
+[dependencies]
+Kget = "1.6.1"
+```
+
+Optional features:
 
 ```toml
 [dependencies]
-kget = { version = "1.5.1", features = ["gui"] }
+Kget = { version = "1.6.1", features = ["torrent-native"] }
+Kget = { version = "1.6.1", features = ["gui"] }
 ```
 
-For local development (when working inside the repository), use a path dependency:
+Inside this repository, examples can use:
 
 ```toml
 [dependencies]
-kget = { path = "." }
+Kget = { path = "." }
 ```
-## Key Components
-The library exposes the following building blocks:
-- download: The standard function for single-stream HTTP/HTTPS/FTP/SFTP downloads.
-- AdvancedDownloader: A struct for multi-threaded, parallel chunk downloads with automatic RAM/Disk I/O optimization.
-- DownloadOptions: A struct to control library behavior (Quiet mode, Output path, Auto-verification).
-- create_progress_bar: A factory function to create KGet-styled progress bars (green, smooth, with ETA).
-- verify_iso_integrity: A standalone SHA256 checksum calculator.
 
-## Complete Usage Guide
-For a live demonstration of all features, see the [Cookbook Example](src/lib_usage.rs).
+## Main API
 
-## Quick Example: Standard Download
+- `download`: single-stream HTTP/HTTPS download with retry, streaming I/O, proxy support, safe output path handling, and optional SHA256 verification.
+- `AdvancedDownloader`: resumable HTTP/HTTPS downloader using parallel byte ranges.
+- `download_magnet`: magnet link downloader with native torrent support when built with `torrent-native`.
+- `DownloadOptions`: quiet mode, output path, ISO verification, and expected SHA256 hash.
+- `Config`, `ProxyConfig`, `Optimizer`: reusable configuration objects.
+- `verify_file_sha256` and `verify_iso_integrity`: standalone checksum helpers.
 
-```rust
-use kget::{download, DownloadOptions, Config, Optimizer};
+## Basic Download
+
+```rust,no_run
+use kget::{download, DownloadOptions, Optimizer, ProxyConfig};
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let config = Config::default();
     let options = DownloadOptions {
         output_path: Some("file.zip".to_string()),
         ..Default::default()
     };
 
-    download("https://example.com/file.zip", config.proxy, Optimizer::new(config.optimization), options)?;
+    download(
+        "https://example.com/file.zip",
+        ProxyConfig::default(),
+        Optimizer::new(),
+        options,
+        None,
+    )?;
+
     Ok(())
 }
 ```
-## Quick Example: Parallel Download
-```rust
-use kget::{AdvancedDownloader, Config, Optimizer};
 
-let config = Config::default();
-let downloader = AdvancedDownloader::new(
-    "https://example.com/large.iso".into(),
-    "large.iso".into(),
-    false, // quiet_mode
-    config.proxy,
-    Optimizer::new(config.optimization)
+## Download with Expected SHA256
+
+```rust,no_run
+use kget::{download, DownloadOptions, Optimizer, ProxyConfig};
+
+let options = DownloadOptions {
+    output_path: Some("image.iso".to_string()),
+    verify_iso: true,
+    expected_sha256: Some("expected_lowercase_sha256_hash".to_string()),
+    ..Default::default()
+};
+
+download(
+    "https://example.com/image.iso",
+    ProxyConfig::default(),
+    Optimizer::new(),
+    options,
+    Some(&|status| println!("{status}")),
+)?;
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+```
+
+If the calculated SHA256 does not match, KGet returns an error instead of
+silently accepting the file.
+
+## Advanced Parallel Download
+
+```rust,no_run
+use kget::{AdvancedDownloader, Optimizer, ProxyConfig};
+
+let mut downloader = AdvancedDownloader::new(
+    "https://example.com/large.iso".to_string(),
+    "large.iso".to_string(),
+    true,
+    ProxyConfig::default(),
+    Optimizer::new(),
 );
 
+downloader.set_progress_callback(|progress| {
+    println!("{:.1}%", progress * 100.0);
+});
+downloader.set_expected_sha256("expected_lowercase_sha256_hash");
 downloader.download()?;
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 ```
-## Interactivity vs Library Behavior
-The core library functions never use `stdin` or prompt the user. All decisions are made via the `DownloadOptions` struct:
-- In the CLI App: We prompt the user "Do you want to verify?"
-- In your Library code: You decide programmatically by setting `verify_iso`: `true` or `false`.
 
-## Efficiency by Design
-When using KGet as a library, you automatically benefit from:
-1. Streaming I/O: 16KB read-write cycles to keep RAM usage low (~30MB).
-2. Buffered Writes: 2MB BufWriter per thread to protect disk health and prevent system freezes.
-3. Smart Detection: ISO files are automatically handled as raw binary to prevent corruption.
+`AdvancedDownloader` uses server byte ranges and refuses to write mismatched
+data when a server claims range support but responds with a full `200 OK`.
 
+## Magnet Links
 
-For more details, check the source of `src/lib.rs`.
-## Supported Protocols
+```rust,no_run
+use kget::{download_magnet, Optimizer, ProxyConfig, TorrentCallbacks};
+use std::sync::Arc;
 
-- HTTP/HTTPS
-- FTP
-- SFTP
-- Magnet links (torrents, requires `transmission-daemon`)
+let callbacks = TorrentCallbacks {
+    status: Some(Arc::new(|message| println!("{message}"))),
+    progress: Some(Arc::new(|progress| println!("{:.1}%", progress * 100.0))),
+};
 
-## More
+download_magnet(
+    "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+    "./downloads",
+    true,
+    ProxyConfig::default(),
+    Optimizer::new(),
+    callbacks,
+)?;
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+```
 
-See [docs.rs/kget](https://docs.rs/kget) for full API documentation.
+Build with `torrent-native` for the built-in torrent client. Without it, KGet
+falls back to the platform's default external magnet handler.
 
----
+## Library Behavior
+
+- Library calls never prompt through `stdin`.
+- Progress and status are exposed through callbacks.
+- Files are streamed to disk instead of loaded fully into memory.
+- Output filenames are validated against path separators.
+- SHA256 helpers return errors on expected-hash mismatches.
+
+See [examples/lib_usage.rs](examples/lib_usage.rs) for a larger cookbook.

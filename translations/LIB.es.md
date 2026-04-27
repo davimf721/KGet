@@ -1,63 +1,135 @@
-# Uso de KGet como una Crate (Librería)
+# Usar KGet como Biblioteca Rust
 
-KGet es un motor de descarga de alto rendimiento para Rust. Proporciona características avanzadas como división en partes paralelas, E/S de flujo y protección de la salud del disco (Escritura con Búfer), todo envuelto en una API amigable para el desarrollador.
+KGet es un gestor de descargas y también un motor Rust reutilizable para
+HTTP/HTTPS, FTP, SFTP, enlaces magnet, callbacks de progreso, reanudación,
+proxy y verificación SHA256.
 
 [English](../LIB.md) | [Português](LIB.pt-br.md) | [Español](LIB.es.md)
 
 ## Instalación
 
-Añade KGet a tu `Cargo.toml`:
-
 ```toml
 [dependencies]
-kget = "1.5.2"
+Kget = "1.6.1"
 ```
 
-## Componentes Principales
+Features opcionales:
 
-La librería expone los siguientes bloques fundamentales:
+```toml
+Kget = { version = "1.6.1", features = ["torrent-native"] }
+Kget = { version = "1.6.1", features = ["gui"] }
+```
 
-- **`download`**: Función estándar para transferencias de flujo único (HTTP/HTTPS/FTP/SFTP).
-- **`AdvancedDownloader`**: Una estructura para descargas paralelas multi-hilo con optimización automática de RAM/Disco.
-- **`DownloadOptions`**: Controla el comportamiento de la librería (Modo silencioso, Ruta de salida, Verificación de ISO).
-- **`create_progress_bar`**: Fábrica para crear barras de progreso con el estilo de KGet (verde, fluida, con ETA).
-- **`verify_iso_integrity`**: Utilidad independiente para el cálculo de sumas de comprobación SHA256.
-- **`Config` / `Optimizer`**: Gestión integral de la configuración.
+## API Principal
 
-## Guía Práctica (Cookbook)
+- `download`: descarga HTTP/HTTPS de flujo único con reintentos, proxy, streaming a disco y SHA256 opcional.
+- `AdvancedDownloader`: descarga HTTP/HTTPS paralela y reanudable usando byte ranges.
+- `download_magnet`: descarga de magnet links con cliente nativo cuando se compila con `torrent-native`.
+- `DownloadOptions`: modo silencioso, ruta de salida, verificación ISO y SHA256 esperado.
+- `Config`, `ProxyConfig`, `Optimizer`: configuración reutilizable.
+- `verify_file_sha256` y `verify_iso_integrity`: utilidades de checksum.
 
-La mejor manera de aprender es consultando nuestro [Ejemplo Completo](examples/lib_usage.rs).
+## Descarga Simple
 
-### Ejemplo: Integración Personalizada
-
-```rust
-use kget::{download, DownloadOptions, Config, Optimizer};
+```rust,no_run
+use kget::{download, DownloadOptions, Optimizer, ProxyConfig};
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let config = Config::default();
     let options = DownloadOptions {
-        output_path: Some("archivo_personalizado.zip".into()),
-        verify_iso: false,
-        quiet_mode: false,
+        output_path: Some("archivo.zip".to_string()),
+        ..Default::default()
     };
 
-    // Llamada simple de una línea al motor
-    download("https://example.com/file.zip", config.proxy, Optimizer::new(config.optimization), options)?;
+    download(
+        "https://example.com/archivo.zip",
+        ProxyConfig::default(),
+        Optimizer::new(),
+        options,
+        None,
+    )?;
+
     Ok(())
 }
 ```
 
-## Comportamiento: Librería vs CLI
+## SHA256 Esperado
 
-Para asegurar que KGet funcione perfectamente como una librería, seguimos estas reglas:
+```rust,no_run
+use kget::{download, DownloadOptions, Optimizer, ProxyConfig};
 
-1. **Sin Prompts de Stdin**: Las funciones de la librería **nunca** usan `stdin`. No pausarán su programa para hacer preguntas.
-2. **Control Programático**: Use `DownloadOptions { verify_iso: true }` para forçar la verificación, o `false` para omitirla.
-3. **Optimizado por Defecto**: Incluso cuando se usa como lib, KGet utiliza `BufWriter` de 2MB por hilo y flujo de 16KB para asegurar que el sistema anfitrión siga respondiendo y el uso de RAM sea bajo (~30MB).
+let options = DownloadOptions {
+    output_path: Some("imagen.iso".to_string()),
+    verify_iso: true,
+    expected_sha256: Some("hash_sha256_esperado".to_string()),
+    ..Default::default()
+};
 
-## Uso Avanzado
+download(
+    "https://example.com/imagen.iso",
+    ProxyConfig::default(),
+    Optimizer::new(),
+    options,
+    Some(&|status| println!("{status}")),
+)?;
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+```
 
-Para escenarios complejos, como el cambio programático de proxy o la construcción de su propia GUI sobre el descargador, explore la estructura `AdvancedDownloader` y el módulo `Config` en el código fuente.
+Si el SHA256 calculado no coincide, la función devuelve un error.
 
----
-KGet está construido con ❤️ en Rust para velocidad y confiabilidad.
+## Descarga Avanzada
+
+```rust,no_run
+use kget::{AdvancedDownloader, Optimizer, ProxyConfig};
+
+let mut downloader = AdvancedDownloader::new(
+    "https://example.com/grande.iso".to_string(),
+    "grande.iso".to_string(),
+    true,
+    ProxyConfig::default(),
+    Optimizer::new(),
+);
+
+downloader.set_progress_callback(|progress| {
+    println!("{:.1}%", progress * 100.0);
+});
+downloader.set_expected_sha256("hash_sha256_esperado");
+downloader.download()?;
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+```
+
+El downloader avanzado usa byte ranges y rechaza servidores que anuncian range
+pero responden con contenido completo, evitando corrupción silenciosa.
+
+## Enlaces Magnet
+
+```rust,no_run
+use kget::{download_magnet, Optimizer, ProxyConfig, TorrentCallbacks};
+use std::sync::Arc;
+
+let callbacks = TorrentCallbacks {
+    status: Some(Arc::new(|message| println!("{message}"))),
+    progress: Some(Arc::new(|progress| println!("{:.1}%", progress * 100.0))),
+};
+
+download_magnet(
+    "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+    "./downloads",
+    true,
+    ProxyConfig::default(),
+    Optimizer::new(),
+    callbacks,
+)?;
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+```
+
+Use `download_magnet` con la feature `torrent-native` para el cliente torrent integrado. Sin esa feature, KGet intenta usar la aplicación predeterminada del sistema para enlaces magnet.
+
+## Comportamiento de la Biblioteca
+
+- Las llamadas de biblioteca nunca preguntan nada por `stdin`.
+- Progreso y estado se envían por callbacks.
+- Los archivos se escriben en streaming en disco.
+- Los nombres de salida se validan contra separadores de ruta.
+- Los helpers SHA256 devuelven error cuando el hash esperado no coincide.
+
+Vea [examples/lib_usage.rs](../examples/lib_usage.rs) para ejemplos mayores.

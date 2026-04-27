@@ -4,7 +4,6 @@ use std::process::Command;
 pub fn open_magnet_in_default_client(magnet: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
     #[cfg(windows)]
     {
-    
         Command::new("cmd")
             .args(["/C", "start", "", magnet])
             .spawn()?;

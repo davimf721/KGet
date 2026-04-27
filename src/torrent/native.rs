@@ -50,7 +50,7 @@ impl DownloadStats {
 }
 
 // ============================================================================
-// Helper Functions  
+// Helper Functions
 // ============================================================================
 
 fn format_eta(seconds: f64) -> String {
@@ -61,24 +61,42 @@ fn format_eta(seconds: f64) -> String {
     }
 }
 
-fn calculate_progress(file_infos: &FileInfoList, file_progress: &[u64], fallback: (u64, u64)) -> (u64, u64) {
+fn calculate_progress(
+    file_infos: &FileInfoList,
+    file_progress: &[u64],
+    fallback: (u64, u64),
+) -> (u64, u64) {
     if file_infos.is_empty() || file_progress.is_empty() {
         return fallback;
     }
-    
+
     let downloaded: u64 = file_progress.iter().sum();
     let total: u64 = file_infos.iter().map(|(_, size)| *size).sum();
     (downloaded, total)
 }
 
 fn build_file_json(name: &str, size: u64) -> String {
-    format!(r#"{{"name":"{}","size":{}}}"#, name.replace('\"', "\\\""), size)
+    format!(
+        r#"{{"name":"{}","size":{}}}"#,
+        name.replace('\"', "\\\""),
+        size
+    )
 }
 
-fn build_file_progress_json(idx: usize, name: &str, downloaded: u64, size: u64, pct: f64) -> String {
+fn build_file_progress_json(
+    idx: usize,
+    name: &str,
+    downloaded: u64,
+    size: u64,
+    pct: f64,
+) -> String {
     format!(
         r#"{{"idx":{},"name":"{}","downloaded":{},"size":{},"pct":{:.1}}}"#,
-        idx, name.replace('\"', "\\\""), downloaded, size, pct
+        idx,
+        name.replace('\"', "\\\""),
+        downloaded,
+        size,
+        pct
     )
 }
 
@@ -86,7 +104,7 @@ fn emit_files_json(file_infos: &FileInfoList) {
     if file_infos.is_empty() {
         return;
     }
-    
+
     let json: Vec<String> = file_infos
         .iter()
         .map(|(name, size)| build_file_json(name, *size))
@@ -104,11 +122,15 @@ fn emit_file_progress_json(file_infos: &FileInfoList, file_progress: &[u64]) {
         .enumerate()
         .map(|(i, (name, size))| {
             let downloaded = file_progress.get(i).copied().unwrap_or(0);
-            let pct = if *size > 0 { (downloaded as f64 / *size as f64) * 100.0 } else { 100.0 };
+            let pct = if *size > 0 {
+                (downloaded as f64 / *size as f64) * 100.0
+            } else {
+                100.0
+            };
             build_file_progress_json(i, name, downloaded, *size, pct)
         })
         .collect();
-    
+
     println!("FILE_PROGRESS: [{}]", json.join(","));
 }
 
@@ -183,16 +205,19 @@ impl NativeTorrentDownloader {
         let output_path = self.ensure_output_dir()?;
         let session = self.create_session(&output_path).await?;
         let handle = self.add_torrent(&session).await?;
-        
+
         self.wait_for_metadata(&handle).await?;
 
         let name = handle.name().unwrap_or_else(|| "Torrent".to_string());
         let file_infos = self.extract_file_infos(&handle);
-        
+
         emit_files_json(&file_infos);
 
         let stats = handle.stats();
-        self.emit_status(format!("Downloading: {} ({} bytes)", name, stats.total_bytes));
+        self.emit_status(format!(
+            "Downloading: {} ({} bytes)",
+            name, stats.total_bytes
+        ));
 
         let progress_bar = create_progress_bar(
             self.quiet,
@@ -201,7 +226,8 @@ impl NativeTorrentDownloader {
             false,
         );
 
-        self.run_download_loop(&handle, &name, &file_infos, &progress_bar).await?;
+        self.run_download_loop(&handle, &name, &file_infos, &progress_bar)
+            .await?;
 
         self.emit_progress(1.0);
         progress_bar.finish_with_message(format!("✓ {} downloaded successfully!", name));
@@ -223,7 +249,7 @@ impl NativeTorrentDownloader {
 
     async fn create_session(&self, output_path: &PathBuf) -> Result<Arc<Session>, BoxError> {
         self.emit_status("Initializing BitTorrent session...");
-        
+
         let opts = SessionOptions {
             disable_dht: false,
             disable_dht_persistence: true,
@@ -240,7 +266,10 @@ impl NativeTorrentDownloader {
         Ok(session)
     }
 
-    async fn add_torrent(&self, session: &Arc<Session>) -> Result<Arc<librqbit::ManagedTorrent>, BoxError> {
+    async fn add_torrent(
+        &self,
+        session: &Arc<Session>,
+    ) -> Result<Arc<librqbit::ManagedTorrent>, BoxError> {
         self.emit_status("Adding magnet link...");
 
         let opts = AddTorrentOptions {
@@ -248,20 +277,28 @@ impl NativeTorrentDownloader {
             ..Default::default()
         };
 
-        match session.add_torrent(AddTorrent::from_url(&self.magnet), Some(opts)).await {
+        match session
+            .add_torrent(AddTorrent::from_url(&self.magnet), Some(opts))
+            .await
+        {
             Ok(AddTorrentResponse::Added(_, handle)) => Ok(handle),
             Ok(AddTorrentResponse::AlreadyManaged(_, handle)) => {
                 self.emit_status("Torrent already exists, resuming...");
                 Ok(handle)
             }
-            Ok(AddTorrentResponse::ListOnly(_)) => Err("Torrent was added in list-only mode".into()),
+            Ok(AddTorrentResponse::ListOnly(_)) => {
+                Err("Torrent was added in list-only mode".into())
+            }
             Err(e) => Err(format!("Failed to add torrent: {}", e).into()),
         }
     }
 
-    async fn wait_for_metadata(&self, handle: &Arc<librqbit::ManagedTorrent>) -> Result<(), BoxError> {
+    async fn wait_for_metadata(
+        &self,
+        handle: &Arc<librqbit::ManagedTorrent>,
+    ) -> Result<(), BoxError> {
         self.emit_status("Fetching torrent metadata from peers...");
-        
+
         let timeout = Duration::from_secs(METADATA_TIMEOUT_SECS);
         let start = Instant::now();
 
@@ -271,11 +308,11 @@ impl NativeTorrentDownloader {
             }
 
             let stats = handle.stats();
-            
+
             if let Some(error) = &stats.error {
                 return Err(format!("Torrent error: {}", error).into());
             }
-            
+
             if stats.total_bytes > 0 {
                 return Ok(());
             }
@@ -317,13 +354,20 @@ impl NativeTorrentDownloader {
             progress_bar.set_position(download_stats.downloaded);
 
             let (downloaded_str, total_str) = download_stats.format_sizes();
-            let msg = format!("{} - {:.1}% ({}/{})", name, download_stats.progress_pct, downloaded_str, total_str);
+            let msg = format!(
+                "{} - {:.1}% ({}/{})",
+                name, download_stats.progress_pct, downloaded_str, total_str
+            );
             progress_bar.set_message(msg.clone());
 
             // Output for external parsers
             println!(
                 "PROGRESS: {:.1}% ({}/{}) SPEED: {}/s ETA: {}",
-                download_stats.progress_pct, downloaded_str, total_str, download_stats.format_speed(), download_stats.eta
+                download_stats.progress_pct,
+                downloaded_str,
+                total_str,
+                download_stats.format_speed(),
+                download_stats.eta
             );
             emit_file_progress_json(file_infos, &stats.file_progress);
 
@@ -368,7 +412,11 @@ impl NativeTorrentDownloader {
 
         let elapsed = last_time.elapsed().as_secs_f64();
         let bytes_diff = downloaded.saturating_sub(last_bytes);
-        let speed = if elapsed > 0.0 { bytes_diff as f64 / elapsed } else { 0.0 };
+        let speed = if elapsed > 0.0 {
+            bytes_diff as f64 / elapsed
+        } else {
+            0.0
+        };
 
         let eta = if speed > 0.0 && total > downloaded {
             format_eta((total - downloaded) as f64 / speed)
@@ -376,7 +424,13 @@ impl NativeTorrentDownloader {
             "--".to_string()
         };
 
-        DownloadStats { downloaded, total, speed, eta, progress_pct }
+        DownloadStats {
+            downloaded,
+            total,
+            speed,
+            eta,
+            progress_pct,
+        }
     }
 }
 
@@ -404,7 +458,7 @@ pub fn download_magnet_native(
     if let Some(status) = callbacks.status {
         downloader.set_status_callback(move |s| status(s));
     }
-    
+
     if let Some(progress) = callbacks.progress {
         downloader.set_progress_callback(move |p| progress(p));
     }

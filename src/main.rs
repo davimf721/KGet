@@ -1,46 +1,32 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-#![allow(unused_imports)]
-#![allow(unused_variables)]
-#![allow(dead_code)]
-
-use clap::{Parser, CommandFactory};
+#[cfg(not(feature = "gui"))]
+use clap::CommandFactory;
+use clap::Parser;
 use std::error::Error;
-use std::path::PathBuf;
+
+#[cfg(feature = "gui")]
 use std::sync::mpsc::{self, Receiver as MpscReceiver, Sender as MpscSender};
-use std::thread;
-use std::time::Duration;
 
 #[cfg(all(windows, not(debug_assertions)))]
-use windows_sys::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
+use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
 
-mod download;
-mod progress;
-mod utils;
-mod advanced_download;
-mod config;
-mod optimization;
-mod ftp;
-mod gui_types;
-mod sftp;
 mod interactive;
-mod torrent;
 
 #[cfg(feature = "gui")]
 mod gui;
 
-// Imports do Crate
-use crate::download::download as cli_download;
-use crate::advanced_download::AdvancedDownloader;
-use crate::config::Config;
-use crate::optimization::Optimizer;
 #[cfg(feature = "gui")]
 use crate::gui::KGetGui;
-use crate::gui_types::{DownloadCommand, WorkerToGuiMessage};
-pub use crate::ftp::FtpDownloader;
-pub use crate::sftp::SftpDownloader;
-
-
+use kget::advanced_download::AdvancedDownloader;
+#[cfg(feature = "gui")]
+use kget::app::{DownloadCommand, WorkerToGuiMessage, spawn_download_worker};
+use kget::config::{Config, ProxyType};
+use kget::download::download as cli_download;
+use kget::ftp::FtpDownloader;
+use kget::optimization::Optimizer;
+use kget::sftp::SftpDownloader;
+use kget::utils;
 use kget::{DownloadOptions, verify_iso_integrity};
 
 #[derive(Parser, Debug)]
@@ -111,6 +97,10 @@ struct Args {
     #[arg(long = "no-dht")]
     no_dht: bool,
 
+    /// Expected SHA256 hash for automatic verification after download
+    #[arg(long = "sha256")]
+    sha256: Option<String>,
+
     /// Use GUI mode
     #[arg(long = "gui")]
     gui: bool,
@@ -128,135 +118,7 @@ struct Args {
     interactive: bool,
 }
 
-use std::sync::atomic::{AtomicBool, Ordering};
-
-fn download_worker(
-    config: Config,
-    download_rx: MpscReceiver<DownloadCommand>,
-    status_tx: MpscSender<WorkerToGuiMessage>,
-    _runtime: tokio::runtime::Runtime,
-) {
-    let cancel_token = std::sync::Arc::new(AtomicBool::new(false));
-    let mut download_handle: Option<std::thread::JoinHandle<()>> = None;
-    
-    loop {
-        // Check for commands with a short timeout to remain responsive
-        match download_rx.recv_timeout(std::time::Duration::from_millis(50)) {
-            Ok(command) => {
-                match command {
-                    DownloadCommand::Start { url, output_path, is_advanced, verify_iso } => {
-                        // Reset cancel token for new download
-                        cancel_token.store(false, Ordering::SeqCst);
-                        
-                        let _ = status_tx.send(WorkerToGuiMessage::StatusUpdate(format!("Initializing: {}", url)));
-
-                        let optimizer = Optimizer::from_config(config.optimization.clone());
-                        let proxy = config.proxy.clone();
-                        let cancel_token_clone = cancel_token.clone();
-                        let status_tx_clone = status_tx.clone();
-
-                        // Spawn download in a separate thread
-                        download_handle = Some(std::thread::spawn(move || {
-                            let result: Result<(), Box<dyn Error + Send + Sync>> = if url.starts_with("magnet:?") {
-                                let cb = crate::torrent::TorrentCallbacks {
-                                    status: Some(std::sync::Arc::new({
-                                        let status_tx = status_tx_clone.clone();
-                                        move |msg| { status_tx.send(WorkerToGuiMessage::StatusUpdate(msg)).ok(); }
-                                    })),
-                                    progress: Some(std::sync::Arc::new({
-                                        let status_tx = status_tx_clone.clone();
-                                        move |p| { status_tx.send(WorkerToGuiMessage::Progress(p)).ok(); }
-                                    })),
-                                };
-
-                                crate::torrent::download_magnet(
-                                    &url,
-                                    &output_path,
-                                    true,
-                                    proxy,
-                                    optimizer,
-                                    cb,
-                                )
-                            } else if is_advanced {
-                                let mut downloader = AdvancedDownloader::new(
-                                    url.clone(),
-                                    output_path.clone(),
-                                    true,
-                                    proxy,
-                                    optimizer,
-                                );
-                                
-                                downloader.set_cancel_token(cancel_token_clone.clone());
-
-                                let status_tx_cb = status_tx_clone.clone();
-                                downloader.set_progress_callback(move |p| {
-                                    status_tx_cb.send(WorkerToGuiMessage::Progress(p)).ok();
-                                });
-
-                                let status_tx_cb2 = status_tx_clone.clone();
-                                downloader.set_status_callback(move |msg| {
-                                    status_tx_cb2.send(WorkerToGuiMessage::StatusUpdate(msg)).ok();
-                                });
-
-                                downloader.download()
-                            } else {
-                                let options = kget::DownloadOptions {
-                                    quiet_mode: true,
-                                    output_path: Some(output_path.clone()),
-                                    verify_iso,
-                                };
-
-                                let status_tx_cb = status_tx_clone.clone();
-                                let status_cb = move |msg: String| {
-                                    status_tx_cb.send(WorkerToGuiMessage::StatusUpdate(msg)).ok();
-                                };
-
-                                cli_download(&url, proxy, optimizer, options, Some(&status_cb))
-                            };
-
-                            // Report result
-                            if cancel_token_clone.load(Ordering::SeqCst) {
-                                let _ = status_tx_clone.send(WorkerToGuiMessage::StatusUpdate("Download cancelled".into()));
-                            } else {
-                                match result {
-                                    Ok(_) => { let _ = status_tx_clone.send(WorkerToGuiMessage::Completed(output_path)); }
-                                    Err(e) => {
-                                        let err_msg = e.to_string();
-                                        if err_msg.contains("cancelled") {
-                                            let _ = status_tx_clone.send(WorkerToGuiMessage::StatusUpdate("Download cancelled".into()));
-                                        } else {
-                                            let _ = status_tx_clone.send(WorkerToGuiMessage::Error(err_msg));
-                                        }
-                                    }
-                                }
-                            }
-                        }));
-                    }
-                    DownloadCommand::Cancel => {
-                        cancel_token.store(true, Ordering::SeqCst);
-                        let _ = status_tx.send(WorkerToGuiMessage::StatusUpdate("Cancelling download...".into()));
-                    }
-                }
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                // Check if download thread finished
-                if let Some(handle) = download_handle.take() {
-                    if handle.is_finished() {
-                        let _ = handle.join();
-                    } else {
-                        download_handle = Some(handle);
-                    }
-                }
-                continue;
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                break;
-            }
-        }
-    }
-}
 fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
-   
     #[cfg(all(windows, not(debug_assertions)))]
     unsafe {
         AttachConsole(ATTACH_PARENT_PROCESS);
@@ -270,10 +132,9 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         return Ok(());
     }
 
-    
-    let should_start_gui = args.gui || (args.url.is_empty() && !args.ftp && !args.sftp && !args.torrent);
+    let should_start_gui =
+        args.gui || (args.url.is_empty() && !args.ftp && !args.sftp && !args.torrent);
 
-    
     if !should_start_gui {
         if let Some(proxy_url) = args.proxy.clone() {
             config.proxy.enabled = true;
@@ -286,9 +147,9 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             config.proxy.password = Some(pass);
         }
         config.proxy.proxy_type = match args.proxy_type.to_lowercase().as_str() {
-            "https" => crate::config::ProxyType::Https,
-            "socks5" => crate::config::ProxyType::Socks5,
-            _ => crate::config::ProxyType::Http,
+            "https" => ProxyType::Https,
+            "socks5" => ProxyType::Socks5,
+            _ => ProxyType::Http,
         };
         if let Some(limit) = args.speed_limit {
             config.optimization.speed_limit = Some(limit);
@@ -314,26 +175,25 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         config.save()?;
     }
 
-    
     if should_start_gui {
         #[cfg(feature = "gui")]
         {
-            let (download_tx, download_rx_worker): (MpscSender<DownloadCommand>, MpscReceiver<DownloadCommand>) = mpsc::channel();
-            let (status_tx_worker, status_rx_gui): (MpscSender<WorkerToGuiMessage>, MpscReceiver<WorkerToGuiMessage>) = mpsc::channel();
+            let (download_tx, download_rx_worker): (
+                MpscSender<DownloadCommand>,
+                MpscReceiver<DownloadCommand>,
+            ) = mpsc::channel();
+            let (status_tx_worker, status_rx_gui): (
+                MpscSender<WorkerToGuiMessage>,
+                MpscReceiver<WorkerToGuiMessage>,
+            ) = mpsc::channel();
 
-            let worker_config = config.clone();
-            let runtime = tokio::runtime::Runtime::new()?;
+            spawn_download_worker(config.clone(), download_rx_worker, status_tx_worker);
 
-            thread::spawn(move || {
-                download_worker(worker_config, download_rx_worker, status_tx_worker, runtime);
-            });
-
-            
             let mut native_options = eframe::NativeOptions::default();
             native_options.viewport.inner_size = Some(egui::Vec2::new(980.0, 680.0));
             native_options.viewport.min_inner_size = Some(egui::Vec2::new(820.0, 560.0));
             native_options.viewport.resizable = Some(true);
-            
+
             // Embed logo in binary so it works in .app bundle
             let logo_bytes = include_bytes!("../logo.png");
             if let Ok(img) = image::load_from_memory(logo_bytes) {
@@ -352,7 +212,6 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                 "KGet Downloader",
                 native_options,
                 Box::new(move |cc| {
-                    
                     egui_extras::install_image_loaders(&cc.egui_ctx);
                     Ok(Box::new(KGetGui::new(cc, download_tx, status_rx_gui)))
                 }),
@@ -361,18 +220,19 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                 return Err("Failed to launch GUI".into());
             }
 
-            
             return Ok(());
         }
 
         #[cfg(not(feature = "gui"))]
         {
-            eprintln!("GUI support was not compiled in. Rebuild with `--features gui` to enable it.");
-            
+            eprintln!(
+                "GUI support was not compiled in. Rebuild with `--features gui` to enable it."
+            );
+
             if args.gui {
                 return Err("GUI not available (compile with --features gui)".into());
             }
-            
+
             if args.url.is_empty() {
                 Args::command().print_help()?;
                 return Ok(());
@@ -381,7 +241,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     }
 
     // ==========================================================
-    //                         CLI MODE 
+    //                         CLI MODE
     // ==========================================================
 
     let optimizer = Optimizer::from_config(config.optimization.clone());
@@ -389,67 +249,58 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     if args.ftp {
         let url = args.url.clone();
         let output = utils::resolve_output_path(args.output, &url, "ftp_output");
-        let downloader = FtpDownloader::new(
-            url.to_owned(),
-            output,
-            args.quiet,
-            config.proxy,
-            optimizer,
-        );
+        let downloader =
+            FtpDownloader::new(url.to_owned(), output, args.quiet, config.proxy, optimizer);
         return downloader.download();
     }
 
     if args.sftp {
         let url = args.url.clone();
         let output = utils::resolve_output_path(args.output, &url, "sftp_output");
-        let downloader = SftpDownloader::new(
-            url.to_owned(),
-            output,
-            args.quiet,
-            config.proxy,
-            optimizer,
-        );
+        let downloader =
+            SftpDownloader::new(url.to_owned(), output, args.quiet, config.proxy, optimizer);
         return downloader.download();
     }
 
     if args.torrent || args.url.starts_with("magnet:?") {
         let output_dir = args.output.unwrap_or_else(|| "torrent_output".to_string());
 
-        
-        crate::torrent::download_magnet(
+        kget::torrent::download_magnet(
             &args.url,
             &output_dir,
             args.quiet,
             config.proxy,
             optimizer,
-            crate::torrent::TorrentCallbacks::default(),
+            kget::torrent::TorrentCallbacks::default(),
         )?;
     } else if args.advanced {
         let output = utils::resolve_output_path(args.output, &args.url, "advanced_output");
-        let downloader = AdvancedDownloader::new(
+        let mut downloader = AdvancedDownloader::new(
             args.url.clone(),
             output,
             args.quiet,
             config.proxy,
             optimizer,
         );
+        if let Some(expected_sha256) = args.sha256.clone() {
+            downloader.set_expected_sha256(expected_sha256);
+        }
         downloader.download()?;
     } else {
-        
         let options = DownloadOptions {
             quiet_mode: args.quiet,
             output_path: args.output.clone(),
-            verify_iso: false, 
+            verify_iso: args.sha256.is_some(),
+            expected_sha256: args.sha256.clone(),
         };
 
         cli_download(&args.url, config.proxy, optimizer, options, None)?;
 
-       
         if !args.quiet && args.url.to_lowercase().ends_with(".iso") {
             println!("\nThis is an ISO file. Would you like to verify its integrity? (y/N)");
             let mut input = String::new();
-            if std::io::stdin().read_line(&mut input).is_ok() && input.trim().to_lowercase() == "y" {
-               
+            if std::io::stdin().read_line(&mut input).is_ok() && input.trim().to_lowercase() == "y"
+            {
                 let filename = utils::get_filename_from_url_or_default(&args.url, "download.iso");
                 let path = std::path::Path::new(&filename);
                 verify_iso_integrity(path, None)?;

@@ -10,7 +10,6 @@
 //!
 //! ```rust,no_run
 //! use kget::{AdvancedDownloader, ProxyConfig, Optimizer};
-//! use std::sync::Arc;
 //!
 //! let mut downloader = AdvancedDownloader::new(
 //!     "https://releases.ubuntu.com/22.04/ubuntu-22.04-desktop-amd64.iso".to_string(),
@@ -21,14 +20,14 @@
 //! );
 //!
 //! // Set progress callback (0.0 to 1.0)
-//! downloader.set_progress_callback(Arc::new(|progress| {
+//! downloader.set_progress_callback(|progress| {
 //!     println!("Progress: {:.1}%", progress * 100.0);
-//! }));
+//! });
 //!
 //! // Set status callback for messages
-//! downloader.set_status_callback(Arc::new(|msg| {
+//! downloader.set_status_callback(|msg| {
 //!     println!("Status: {}", msg);
-//! }));
+//! });
 //!
 //! // Start download
 //! downloader.download().unwrap();
@@ -40,20 +39,20 @@
 //! based on the [`Optimizer`] configuration. For large files,
 //! this can provide significant speed improvements.
 
+use crate::config::ProxyConfig;
+use crate::optimization::Optimizer;
+use hex;
+use indicatif::{ProgressBar, ProgressStyle};
+use rayon::prelude::*;
+use reqwest::blocking::Client;
+use sha2::{Digest, Sha256};
 use std::error::Error;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use rayon::prelude::*;
-use reqwest::blocking::Client;
-use indicatif::{ProgressBar, ProgressStyle};
-use crate::config::ProxyConfig;
-use sha2::{Sha256, Digest};
-use hex;
-use crate::optimization::Optimizer;
 
 #[cfg(target_family = "unix")]
 use std::os::unix::fs::FileExt;
@@ -61,7 +60,7 @@ use std::os::unix::fs::FileExt;
 use std::os::windows::fs::FileExt;
 
 /// Minimum chunk size for parallel downloads (4 MB)
-const MIN_CHUNK_SIZE: u64 = 4 * 1024 * 1024; 
+const MIN_CHUNK_SIZE: u64 = 4 * 1024 * 1024;
 /// Maximum retry attempts per chunk
 const MAX_RETRIES: usize = 3;
 
@@ -96,7 +95,6 @@ const MAX_RETRIES: usize = 3;
 ///
 /// ```rust,no_run
 /// use kget::{AdvancedDownloader, ProxyConfig, Optimizer};
-/// use std::sync::Arc;
 ///
 /// let mut dl = AdvancedDownloader::new(
 ///     "https://example.com/file.iso".to_string(),
@@ -106,14 +104,12 @@ const MAX_RETRIES: usize = 3;
 ///     Optimizer::new(),
 /// );
 ///
-/// dl.set_progress_callback(Arc::new(|p| {
+/// dl.set_progress_callback(|p| {
 ///     // p is 0.0 to 1.0
 ///     update_ui_progress(p);
-/// }));
+/// });
 ///
-/// dl.set_status_callback(Arc::new(|msg| {
-///     log::info!("{}", msg);
-/// }));
+/// dl.set_status_callback(|msg| println!("{}", msg));
 ///
 /// dl.download().unwrap();
 ///
@@ -132,6 +128,7 @@ pub struct AdvancedDownloader {
     progress_callback: Option<Arc<dyn Fn(f32) + Send + Sync>>,
     status_callback: Option<Arc<dyn Fn(String) + Send + Sync>>,
     cancel_token: Arc<AtomicBool>,
+    expected_sha256: Option<String>,
 }
 
 impl AdvancedDownloader {
@@ -158,14 +155,20 @@ impl AdvancedDownloader {
     ///     Optimizer::new(),
     /// );
     /// ```
-    pub fn new(url: String, output_path: String, quiet_mode: bool, proxy_config: ProxyConfig, optimizer: Optimizer) -> Self {
+    pub fn new(
+        url: String,
+        output_path: String,
+        quiet_mode: bool,
+        proxy_config: ProxyConfig,
+        optimizer: Optimizer,
+    ) -> Self {
         let _is_iso = url.to_lowercase().ends_with(".iso");
-        
+
         let mut client_builder = Client::builder()
             .timeout(std::time::Duration::from_secs(300))
             .connect_timeout(std::time::Duration::from_secs(20))
             .user_agent("KGet/1.0")
-            .no_gzip() 
+            .no_gzip()
             .no_deflate();
 
         if proxy_config.enabled {
@@ -175,19 +178,22 @@ impl AdvancedDownloader {
                     crate::config::ProxyType::Https => reqwest::Proxy::https(proxy_url),
                     crate::config::ProxyType::Socks5 => reqwest::Proxy::all(proxy_url),
                 };
-                
+
                 if let Ok(mut proxy) = proxy {
-                    if let (Some(username), Some(password)) = (&proxy_config.username, &proxy_config.password) {
+                    if let (Some(username), Some(password)) =
+                        (&proxy_config.username, &proxy_config.password)
+                    {
                         proxy = proxy.basic_auth(username, password);
                     }
                     client_builder = client_builder.proxy(proxy);
                 }
             }
         }
-        
-        let client = client_builder.build()
+
+        let client = client_builder
+            .build()
             .expect("Failed to create HTTP client");
-        
+
         Self {
             client,
             url,
@@ -198,6 +204,7 @@ impl AdvancedDownloader {
             progress_callback: None,
             status_callback: None,
             cancel_token: Arc::new(AtomicBool::new(false)),
+            expected_sha256: None,
         }
     }
 
@@ -258,11 +265,16 @@ impl AdvancedDownloader {
     /// # use kget::{AdvancedDownloader, ProxyConfig, Optimizer};
     /// # let mut dl = AdvancedDownloader::new("".to_string(), "".to_string(), false, ProxyConfig::default(), Optimizer::new());
     /// dl.set_status_callback(|msg| {
-    ///     log::info!("Download status: {}", msg);
+    ///     println!("Download status: {}", msg);
     /// });
     /// ```
     pub fn set_status_callback(&mut self, callback: impl Fn(String) + Send + Sync + 'static) {
         self.status_callback = Some(Arc::new(callback));
+    }
+
+    /// Set an expected SHA-256 hash for automatic verification after download.
+    pub fn set_expected_sha256(&mut self, expected_sha256: impl Into<String>) {
+        self.expected_sha256 = Some(expected_sha256.into());
     }
 
     fn send_status(&self, msg: &str) {
@@ -297,7 +309,9 @@ impl AdvancedDownloader {
         if !self.quiet_mode {
             println!("Starting advanced download for: {}", self.url);
             if is_iso {
-                println!("Warning: ISO mode active. Disabling optimizations that could corrupt binary data.");
+                println!(
+                    "Warning: ISO mode active. Disabling optimizations that could corrupt binary data."
+                );
             }
         }
 
@@ -354,7 +368,10 @@ impl AdvancedDownloader {
             println!("Preparing output file: {}", self.output_path);
         }
         let file = if existing_size.is_some() {
-            File::options().read(true).write(true).open(&self.output_path)?
+            File::options()
+                .read(true)
+                .write(true)
+                .open(&self.output_path)?
         } else {
             File::create(&self.output_path)?
         };
@@ -370,7 +387,9 @@ impl AdvancedDownloader {
             }
             self.download_whole(&file, existing_size.unwrap_or(0), progress.clone())?;
             if let Some(ref bar) = progress {
-                bar.lock().unwrap().finish_with_message("Download completed");
+                bar.lock()
+                    .unwrap()
+                    .finish_with_message("Download completed");
             }
             if !self.quiet_mode {
                 println!("Single-threaded download completed");
@@ -394,19 +413,25 @@ impl AdvancedDownloader {
         self.download_chunks_parallel(chunks, &file, progress.clone())?;
 
         if let Some(ref bar) = progress {
-            bar.lock().unwrap().finish_with_message("Download completed");
+            bar.lock()
+                .unwrap()
+                .finish_with_message("Download completed");
         }
 
         // Verify download integrity
         if !self.quiet_mode || self.status_callback.is_some() {
-            if is_iso {
-                
+            if is_iso || self.expected_sha256.is_some() {
                 let should_verify = if self.status_callback.is_some() {
-                    true 
+                    true
+                } else if self.expected_sha256.is_some() {
+                    true
                 } else {
-                    println!("\nThis is an ISO file. Would you like to verify its integrity? (y/N)");
+                    println!(
+                        "\nThis is an ISO file. Would you like to verify its integrity? (y/N)"
+                    );
                     let mut input = String::new();
-                    std::io::stdin().read_line(&mut input).is_ok() && input.trim().to_lowercase() == "y"
+                    std::io::stdin().read_line(&mut input).is_ok()
+                        && input.trim().to_lowercase() == "y"
                 };
 
                 if should_verify {
@@ -415,7 +440,12 @@ impl AdvancedDownloader {
             } else {
                 let metadata = std::fs::metadata(&self.output_path)?;
                 if metadata.len() != total_size {
-                    return Err(format!("File size mismatch: expected {} bytes, got {} bytes", total_size, metadata.len()).into());
+                    return Err(format!(
+                        "File size mismatch: expected {} bytes, got {} bytes",
+                        total_size,
+                        metadata.len()
+                    )
+                    .into());
                 }
             }
             self.send_status("Advanced download completed successfully!");
@@ -426,13 +456,15 @@ impl AdvancedDownloader {
 
     fn get_file_size_and_range(&self) -> Result<(u64, bool), Box<dyn Error + Send + Sync>> {
         let response = self.client.head(&self.url).send()?;
-        let content_length = response.headers()
+        let content_length = response
+            .headers()
             .get(reqwest::header::CONTENT_LENGTH)
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.parse::<u64>().ok())
             .ok_or("Could not determine file size")?;
 
-        let accepts_range = response.headers()
+        let accepts_range = response
+            .headers()
             .get(reqwest::header::ACCEPT_RANGES)
             .and_then(|v| v.to_str().ok())
             .map(|s| s.eq_ignore_ascii_case("bytes"))
@@ -441,13 +473,18 @@ impl AdvancedDownloader {
         Ok((content_length, accepts_range))
     }
 
-    fn calculate_chunks(&self, total_size: u64, existing_size: Option<u64>) -> Result<Vec<(u64, u64)>, Box<dyn Error + Send + Sync>> {
+    fn calculate_chunks(
+        &self,
+        total_size: u64,
+        existing_size: Option<u64>,
+    ) -> Result<Vec<(u64, u64)>, Box<dyn Error + Send + Sync>> {
         let mut chunks = Vec::new();
         let start_from = existing_size.unwrap_or(0);
 
-        
-        let parallelism = rayon::current_num_threads() as u64;
-        let target_chunks = parallelism.saturating_mul(2).max(2); // Reduced to avoid overwhelming servers
+        let configured_parallelism = self.optimizer.max_connections() as u64;
+        let runtime_parallelism = rayon::current_num_threads() as u64;
+        let parallelism = configured_parallelism.min(runtime_parallelism).max(1);
+        let target_chunks = parallelism.saturating_mul(2).max(2); // Keep workers fed without overwhelming servers.
         let chunk_size = ((total_size / target_chunks).max(MIN_CHUNK_SIZE)).min(64 * 1024 * 1024);
 
         let mut start = start_from;
@@ -460,7 +497,12 @@ impl AdvancedDownloader {
         Ok(chunks)
     }
 
-    fn download_whole(&self, file: &File, offset: u64, progress: Option<Arc<Mutex<ProgressBar>>>) -> Result<(), Box<dyn Error + Send + Sync>> {
+    fn download_whole(
+        &self,
+        file: &File,
+        offset: u64,
+        progress: Option<Arc<Mutex<ProgressBar>>>,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let response = self.client.get(&self.url).send()?;
         if offset > 0 {
             // Resume not possible without range; warn
@@ -498,8 +540,8 @@ impl AdvancedDownloader {
             }
         }
 
-        let mut writer = ProgressWriter { 
-            inner: f, 
+        let mut writer = ProgressWriter {
+            inner: f,
             progress,
             callback: self.progress_callback.as_ref(),
         };
@@ -508,14 +550,19 @@ impl AdvancedDownloader {
         Ok(())
     }
 
-    fn download_chunks_parallel(&self, chunks: Vec<(u64, u64)>, file: &File, progress: Option<Arc<Mutex<ProgressBar>>>) -> Result<(), Box<dyn Error + Send + Sync>> {
+    fn download_chunks_parallel(
+        &self,
+        chunks: Vec<(u64, u64)>,
+        file: &File,
+        progress: Option<Arc<Mutex<ProgressBar>>>,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let file = Arc::new(file);
         let client = Arc::new(self.client.clone());
         let url = Arc::new(self.url.clone());
         let _optimizer = Arc::new(self.optimizer.clone());
         let progress_callback = self.progress_callback.clone();
         let cancel_token = self.cancel_token.clone();
-        
+
         // Shared progress counter for pipe-friendly output
         let total_bytes: u64 = chunks.iter().map(|(s, e)| e - s).sum();
         let downloaded_bytes = Arc::new(AtomicU64::new(0));
@@ -543,13 +590,13 @@ impl AdvancedDownloader {
                 match request.send() {
                     Ok(mut response) => {
                         let status = response.status();
-                        if status.is_success() {
+                        if status == reqwest::StatusCode::PARTIAL_CONTENT {
                             // Use FileExt to write at specific offset without seeking shared cursor
                             // This prevents race conditions when multiple threads write to the same file
-                            
+
                             let mut current_pos = start;
-                            let mut buffer = [0u8; 16384]; 
-                            
+                            let mut buffer = [0u8; 16384];
+
                             while current_pos < end {
                                 // Check for cancellation periodically during download
                                 if cancel_token.load(Ordering::Relaxed) {
@@ -558,30 +605,39 @@ impl AdvancedDownloader {
 
                                 let limit = (end - current_pos).min(buffer.len() as u64);
                                 let n = response.read(&mut buffer[..limit as usize])?;
-                                if n == 0 { break; }
-                                
+                                if n == 0 {
+                                    break;
+                                }
+
                                 #[cfg(target_family = "unix")]
                                 file.write_at(&buffer[..n], current_pos)?;
-                                
+
                                 #[cfg(target_family = "windows")]
                                 file.seek_write(&buffer[..n], current_pos)?;
-                                
+
                                 current_pos += n as u64;
-                                
+
                                 // Update shared progress counter
-                                let new_downloaded = downloaded_bytes.fetch_add(n as u64, Ordering::Relaxed) + n as u64;
-                                
+                                let new_downloaded = downloaded_bytes
+                                    .fetch_add(n as u64, Ordering::Relaxed)
+                                    + n as u64;
+
                                 // Print progress periodically (every 200ms) for pipe-friendly output
                                 {
                                     let mut last_time = last_print_time.lock().unwrap();
                                     if last_time.elapsed() >= Duration::from_millis(200) {
-                                        let percent = (new_downloaded as f64 / total_bytes as f64 * 100.0).min(100.0);
+                                        let percent = (new_downloaded as f64 / total_bytes as f64
+                                            * 100.0)
+                                            .min(100.0);
                                         // PROGRESS: format that Swift can parse
-                                        println!("PROGRESS: {:.1}% ({}/{})", percent, new_downloaded, total_bytes);
+                                        println!(
+                                            "PROGRESS: {:.1}% ({}/{})",
+                                            percent, new_downloaded, total_bytes
+                                        );
                                         *last_time = Instant::now();
                                     }
                                 }
-                            
+
                                 if let Some(ref bar) = progress {
                                     let guard = bar.lock().unwrap();
                                     guard.inc(n as u64);
@@ -595,16 +651,30 @@ impl AdvancedDownloader {
                             }
 
                             return Ok::<(), Box<dyn Error + Send + Sync>>(());
+                        } else if status == reqwest::StatusCode::OK {
+                            return Err(format!(
+                                "Server ignored range request for chunk {}-{}; refusing to write mismatched data",
+                                start, end
+                            )
+                            .into());
                         } else if status.as_u16() == 416 {
                             if retry == MAX_RETRIES {
-                                return Err(format!("Failed to download chunk {}-{}: HTTP {}", start, end, status).into());
+                                return Err(format!(
+                                    "Failed to download chunk {}-{}: HTTP {}",
+                                    start, end, status
+                                )
+                                .into());
                             }
                             std::thread::sleep(Duration::from_millis(250 * (retry as u64 + 1)));
                         }
                     }
                     Err(e) => {
                         if retry == MAX_RETRIES {
-                            return Err(format!("Failed to download chunk {}-{}: {}", start, end, e).into());
+                            return Err(format!(
+                                "Failed to download chunk {}-{}: {}",
+                                start, end, e
+                            )
+                            .into());
                         }
                         std::thread::sleep(Duration::from_millis(250 * (retry as u64 + 1)));
                     }
@@ -616,19 +686,23 @@ impl AdvancedDownloader {
         Ok(())
     }
 
-        fn verify_integrity(&self, expected_size: u64) -> Result<(), Box<dyn Error + Send + Sync>> {
-            let metadata = std::fs::metadata(&self.output_path)?;
+    fn verify_integrity(&self, expected_size: u64) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let metadata = std::fs::metadata(&self.output_path)?;
         let actual_size = metadata.len();
-        
+
         if actual_size != expected_size {
-            return Err(format!("File size mismatch: expected {} bytes, got {} bytes", expected_size, actual_size).into());
+            return Err(format!(
+                "File size mismatch: expected {} bytes, got {} bytes",
+                expected_size, actual_size
+            )
+            .into());
         }
-        
+
         self.send_status(&format!("File size verified: {} bytes", actual_size));
 
         // Calculate SHA256 hash for corruption check
         self.send_status("Calculating SHA256 hash...");
-        
+
         let mut file = File::open(&self.output_path)?;
         let mut hasher = Sha256::new();
         let mut buffer = [0; 8192];
@@ -641,8 +715,19 @@ impl AdvancedDownloader {
         }
         let hash = hasher.finalize();
         let hash_hex = hex::encode(hash);
-        
+
         self.send_status(&format!("SHA256 hash: {}", hash_hex));
+        if let Some(expected_sha256) = &self.expected_sha256 {
+            let expected_sha256 = expected_sha256.trim().to_ascii_lowercase();
+            if hash_hex != expected_sha256 {
+                return Err(format!(
+                    "SHA256 mismatch: expected {}, got {}",
+                    expected_sha256, hash_hex
+                )
+                .into());
+            }
+            self.send_status("SHA256 matches expected hash.");
+        }
         self.send_status("Integrity check passed - file is not corrupted");
 
         Ok(())

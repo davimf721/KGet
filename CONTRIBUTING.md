@@ -2,7 +2,7 @@
 
 [English](CONTRIBUTING.md) | [Português](translations/CONTRIBUTING.pt-BR.md) | [Español](translations/CONTRIBUTING.es.md)
 
-First off, thank you for considering contributing to KelpsGet! It's people like you that make KelpsGet such a great tool.
+First off, thank you for considering contributing to KGet! It's people like you that make KGet such a great tool.
 
 ## Code of Conduct
 
@@ -20,7 +20,7 @@ Before creating bug reports, please check the existing issues as you might find 
 * Describe the behavior you observed after following the steps
 * Explain which behavior you expected to see instead and why
 * Include screenshots if possible
-* Include the version of KelpsGet you're using
+* Include the version of KGet you're using
 * Include your operating system and version
 
 ### Suggesting Enhancements
@@ -31,7 +31,7 @@ If you have a suggestion for the project, we'd love to hear about it! Just follo
 * Provide a step-by-step description of the suggested enhancement
 * Provide specific examples to demonstrate the steps
 * Describe the current behavior and explain which behavior you expected to see instead
-* Explain why this enhancement would be useful to most KelpsGet users
+* Explain why this enhancement would be useful to most KGet users
 
 ### Pull Requests
 
@@ -203,4 +203,4 @@ docker run --rm -it \
 
 Contributors who submit a valid pull request will be added to our [CONTRIBUTORS.md](CONTRIBUTORS.md) file.
 
-Thank you for contributing to KelpsGet! 🚀
+Thank you for contributing to KGet! 🚀

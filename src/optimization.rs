@@ -21,13 +21,13 @@
 //! }
 //! ```
 
+use crate::config::OptimizationConfig;
+use flate2::write::{GzDecoder, GzEncoder};
+use lz4::block::{CompressionMode, compress};
 use std::error::Error;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use flate2::write::{GzEncoder, GzDecoder};
-use lz4::block::{compress, CompressionMode};
-use crate::config::OptimizationConfig;
 
 /// Download optimizer for compression, caching, and speed limiting.
 ///
@@ -81,7 +81,7 @@ impl Optimizer {
     /// ```
     pub fn from_config(config: OptimizationConfig) -> Self {
         let speed_limit = config.speed_limit;
-        Self { 
+        Self {
             config,
             speed_limit,
         }
@@ -106,9 +106,7 @@ impl Optimizer {
                 encoder.write_all(data)?;
                 encoder.finish()?
             }
-            4..=6 => {
-                compress(data, Some(CompressionMode::FAST(0)), true)?
-            }
+            4..=6 => compress(data, Some(CompressionMode::FAST(0)), true)?,
             7..=9 => {
                 let mut encoder = brotli::CompressorWriter::new(
                     Vec::new(),
@@ -196,26 +194,24 @@ impl Optimizer {
     /// Uses a simple hash to generate a unique filename
     #[allow(dead_code)]
     fn get_cache_path(&self, url: &str) -> Result<PathBuf, Box<dyn Error>> {
-        let mut cache_dir = PathBuf::from(
-            if self.config.cache_dir.is_empty() {
-                "~/.cache/kget".to_string()
-            } else {
-                self.config.cache_dir.clone()
-            }
-        );
-        
+        let mut cache_dir = PathBuf::from(if self.config.cache_dir.is_empty() {
+            "~/.cache/kget".to_string()
+        } else {
+            self.config.cache_dir.clone()
+        });
+
         if cache_dir.starts_with("~") {
             if let Some(home) = dirs::home_dir() {
                 cache_dir = home.join(cache_dir.strip_prefix("~").unwrap());
             }
         }
-        
+
         // Simple hash function to generate a unique filename
         let mut hash = 0u64;
         for byte in url.bytes() {
             hash = hash.wrapping_mul(31).wrapping_add(byte as u64);
         }
-        
+
         cache_dir.push(format!("{:x}", hash));
         Ok(cache_dir)
     }
@@ -227,7 +223,12 @@ impl Optimizer {
     pub fn get_peer_limit(&self) -> usize {
         self.speed_limit.unwrap_or(50) as usize
     }
-    
+
+    /// Maximum parallel HTTP connections to use for advanced downloads.
+    pub fn max_connections(&self) -> usize {
+        self.config.max_connections.clamp(1, 32)
+    }
+
     /// Check if compression is enabled.
     pub fn is_compression_enabled(&self) -> bool {
         self.config.compression

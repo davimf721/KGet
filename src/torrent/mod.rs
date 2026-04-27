@@ -110,11 +110,22 @@ fn selected_backend() -> String {
         .unwrap_or_else(|_| {
             // Default to native if available, otherwise external
             #[cfg(feature = "torrent-native")]
-            { "native".to_string() }
+            {
+                "native".to_string()
+            }
             #[cfg(not(feature = "torrent-native"))]
-            { "external".to_string() }
+            {
+                "external".to_string()
+            }
         })
         .to_lowercase()
+}
+
+/// Return true when a magnet link looks like a supported BitTorrent magnet.
+pub fn is_supported_magnet_link(magnet: &str) -> bool {
+    let lower = magnet.to_ascii_lowercase();
+    lower.starts_with("magnet:?")
+        && (lower.contains("xt=urn:btih:") || lower.contains("xt=urn:btmh:"))
 }
 
 /// Download a torrent from a magnet link.
@@ -154,7 +165,7 @@ fn selected_backend() -> String {
 ///
 /// // With progress tracking
 /// let callbacks = TorrentCallbacks {
-///     status: Some(Arc::new(|msg| log::info!("{}", msg))),
+///     status: Some(Arc::new(|msg| println!("{}", msg))),
 ///     progress: Some(Arc::new(|p| {
 ///         update_progress_bar(p);
 ///     })),
@@ -183,12 +194,16 @@ fn selected_backend() -> String {
 /// - Download is interrupted
 pub fn download_magnet(
     magnet: &str,
-    output_dir: &str,
-    quiet: bool,
-    proxy: ProxyConfig,
-    optimizer: Optimizer,
+    _output_dir: &str,
+    _quiet: bool,
+    _proxy: ProxyConfig,
+    _optimizer: Optimizer,
     cb: TorrentCallbacks,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
+    if !is_supported_magnet_link(magnet) {
+        return Err("Invalid or unsupported BitTorrent magnet link".into());
+    }
+
     emit_progress(&cb, 0.0);
 
     match selected_backend().as_str() {
@@ -197,10 +212,10 @@ pub fn download_magnet(
             {
                 return native::download_magnet_native(
                     magnet,
-                    output_dir,
-                    quiet,
-                    proxy,
-                    optimizer,
+                    _output_dir,
+                    _quiet,
+                    _proxy,
+                    _optimizer,
                     cb,
                 );
             }
@@ -218,10 +233,10 @@ pub fn download_magnet(
             {
                 return transmission::download_via_transmission(
                     magnet,
-                    output_dir,
-                    quiet,
-                    proxy,
-                    optimizer,
+                    _output_dir,
+                    _quiet,
+                    _proxy,
+                    _optimizer,
                     cb,
                 );
             }

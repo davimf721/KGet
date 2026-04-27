@@ -1,6 +1,6 @@
 <img width="1000" height="500" alt="KGet Banner" src="https://github.com/user-attachments/assets/d0888e3f-90a2-42d6-a9aa-b216dc36f1f4" />
 
-# KGet v1.6.0
+# KGet v1.6.1
 
 A fast, modern download manager written in Rust. Supports HTTP/HTTPS, FTP/SFTP, and **magnet links** with a built-in torrent client.
 
@@ -14,6 +14,7 @@ A fast, modern download manager written in Rust. Supports HTTP/HTTPS, FTP/SFTP, 
 - **GUI & CLI:** Use whichever you prefer
 - **Cross-platform:** macOS, Linux, Windows
 - **ISO Verification:** Optional SHA256 checksum for disk images
+- **Native Notifications:** Completion/error notifications in the Rust GUI on Linux/Windows
 
 ## Screenshots
 
@@ -85,6 +86,7 @@ kget sftp://user@server/file.dat
 | `-q, --quiet` | Minimal output |
 | `-p <proxy>` | Use HTTP/SOCKS5 proxy |
 | `-l <bytes>` | Speed limit in bytes/sec |
+| `--sha256 <hash>` | Verify the completed file against an expected SHA256 hash |
 | `--gui` | Launch graphical interface |
 | `--interactive` | Interactive REPL mode |
 
@@ -93,10 +95,16 @@ kget sftp://user@server/file.dat
 KGet can be used as a Rust library. See [LIB.md](LIB.md) for details.
 
 ```rust
-use kget::{download, DownloadOptions};
+use kget::{download, DownloadOptions, Optimizer, ProxyConfig};
 
 let options = DownloadOptions::default();
-download("https://example.com/file.zip", options)?;
+download(
+    "https://example.com/file.zip",
+    ProxyConfig::default(),
+    Optimizer::new(),
+    options,
+    None,
+)?;
 ```
 
 ## Building

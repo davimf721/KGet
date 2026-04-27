@@ -7,15 +7,15 @@ use tokio::time::sleep;
 use url::Url;
 
 use transmission_rpc::{
-    types::{BasicAuth, Id, TorrentAddArgs, TorrentGetField, TorrentStatus},
     TransClient,
+    types::{BasicAuth, Id, TorrentAddArgs, TorrentGetField, TorrentStatus},
 };
 
 use crate::config::ProxyConfig;
 use crate::optimization::Optimizer;
 use crate::progress::create_progress_bar;
-use crate::torrent::settings::TransmissionSettings;
 use crate::torrent::TorrentCallbacks;
+use crate::torrent::settings::TransmissionSettings;
 use crate::utils::print;
 
 pub struct TorrentDownloader {
@@ -101,7 +101,10 @@ impl TorrentDownloader {
         let s = TransmissionSettings::from_env();
 
         let auth = match (s.username.clone(), s.password.clone()) {
-            (Some(u), Some(p)) if !u.is_empty() => Some(BasicAuth { user: u, password: p }),
+            (Some(u), Some(p)) if !u.is_empty() => Some(BasicAuth {
+                user: u,
+                password: p,
+            }),
             _ => None,
         };
 
@@ -109,7 +112,6 @@ impl TorrentDownloader {
     }
 
     pub async fn download(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
-        
         let (transmission_url, auth, transmission_web_url): (String, Option<BasicAuth>, String) =
             Self::transmission_settings();
 
@@ -170,7 +172,8 @@ impl TorrentDownloader {
 
         let _ = Self::open_url_system(&transmission_web_url);
 
-        let progress = create_progress_bar(self.quiet, "Downloading torrent".to_string(), None, false);
+        let progress =
+            create_progress_bar(self.quiet, "Downloading torrent".to_string(), None, false);
 
         let mut attempt_count = 0u32;
         let max_attempts = 1800u32;
@@ -206,7 +209,12 @@ impl TorrentDownloader {
 
             if let Some(name) = &t.name {
                 let speed_kb = t.rate_download.map_or(0, |rate| rate / 1024);
-                let msg = format!("{} - {:.2}% - {} KB/s", name, percent_done * 100.0, speed_kb);
+                let msg = format!(
+                    "{} - {:.2}% - {} KB/s",
+                    name,
+                    percent_done * 100.0,
+                    speed_kb
+                );
                 progress.set_message(msg.clone());
                 if attempt_count % 2 == 0 {
                     self.emit_status(msg);
@@ -215,9 +223,14 @@ impl TorrentDownloader {
 
             if let Some(error_code) = t.error {
                 if (error_code as i32) != 0 {
-                    let error_message = t.error_string.as_deref().unwrap_or("Unknown torrent error");
+                    let error_message =
+                        t.error_string.as_deref().unwrap_or("Unknown torrent error");
                     progress.abandon_with_message(format!("Torrent error: {}", error_message));
-                    return Err(format!("Torrent error (code {:?}): {}", error_code, error_message).into());
+                    return Err(format!(
+                        "Torrent error (code {:?}): {}",
+                        error_code, error_message
+                    )
+                    .into());
                 }
             }
 
@@ -227,7 +240,10 @@ impl TorrentDownloader {
             }
 
             if let Some(status) = t.status {
-                if matches!(status, TorrentStatus::Stopped) && attempt_count > 5 && percent_done < 1.0 {
+                if matches!(status, TorrentStatus::Stopped)
+                    && attempt_count > 5
+                    && percent_done < 1.0
+                {
                     progress.abandon_with_message("Torrent stopped and not progressing.");
                     return Err("Torrent stopped and not progressing.".into());
                 }
