@@ -101,7 +101,12 @@ impl FtpDownloader {
             FtpStream::connect((host, port))?
         };
 
-        let username = url.username();
+        // url.username() returns "" (empty string) when the URL has no user — fall back to "anonymous"
+        let username = if url.username().is_empty() {
+            "anonymous"
+        } else {
+            url.username()
+        };
         let password = url.password().unwrap_or("anonymous");
 
         print(&format!("Logging in as {}...", username), self.quiet_mode);

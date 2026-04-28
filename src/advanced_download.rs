@@ -388,7 +388,7 @@ impl AdvancedDownloader {
             self.download_whole(&file, existing_size.unwrap_or(0), progress.clone())?;
             if let Some(ref bar) = progress {
                 bar.lock()
-                    .unwrap()
+                    .expect("Progress bar mutex was poisoned")
                     .finish_with_message("Download completed");
             }
             if !self.quiet_mode {
@@ -414,7 +414,7 @@ impl AdvancedDownloader {
 
         if let Some(ref bar) = progress {
             bar.lock()
-                .unwrap()
+                .expect("Progress bar mutex was poisoned")
                 .finish_with_message("Download completed");
         }
 
@@ -523,7 +523,7 @@ impl AdvancedDownloader {
             fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
                 let n = self.inner.write(buf)?;
                 if let Some(ref bar) = self.progress {
-                    let guard = bar.lock().unwrap();
+                    let guard = bar.lock().expect("Progress bar mutex was poisoned");
                     guard.inc(n as u64);
                     if let Some(cb) = self.callback {
                         let pos = guard.position();
@@ -624,7 +624,7 @@ impl AdvancedDownloader {
 
                                 // Print progress periodically (every 200ms) for pipe-friendly output
                                 {
-                                    let mut last_time = last_print_time.lock().unwrap();
+                                    let mut last_time = last_print_time.lock().expect("Timer mutex was poisoned");
                                     if last_time.elapsed() >= Duration::from_millis(200) {
                                         let percent = (new_downloaded as f64 / total_bytes as f64
                                             * 100.0)
@@ -639,7 +639,7 @@ impl AdvancedDownloader {
                                 }
 
                                 if let Some(ref bar) = progress {
-                                    let guard = bar.lock().unwrap();
+                                    let guard = bar.lock().expect("Progress bar mutex was poisoned");
                                     guard.inc(n as u64);
                                     if let Some(ref cb) = progress_callback {
                                         let pos = guard.position();
