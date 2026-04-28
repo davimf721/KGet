@@ -95,7 +95,6 @@ impl Optimizer {
     /// - Levels 7-9: Brotli (high compression)
     ///
     /// Returns the original data unchanged if compression is disabled.
-    #[allow(dead_code)]
     pub fn compress(&self, data: &[u8]) -> Result<Vec<u8>, Box<dyn Error>> {
         if !self.config.compression {
             return Ok(data.to_vec());
@@ -155,7 +154,6 @@ impl Optimizer {
     /// - `Ok(Some(data))` if the file exists in cache
     /// - `Ok(None)` if caching is disabled or file doesn't exist
     /// - `Err` on I/O errors
-    #[allow(dead_code)]
     pub fn get_cached_file(&self, url: &str) -> Result<Option<Vec<u8>>, Box<dyn Error>> {
         if !self.config.cache_enabled {
             return Ok(None);
@@ -172,10 +170,9 @@ impl Optimizer {
         Ok(None)
     }
 
-    /// Store a file in the cache
+    /// Store a file in the cache.
     ///
-    /// Does nothing if caching is disabled
-    #[allow(dead_code)]
+    /// Does nothing if caching is disabled.
     pub fn cache_file(&self, url: &str, data: &[u8]) -> Result<(), Box<dyn Error>> {
         if !self.config.cache_enabled {
             return Ok(());
@@ -189,10 +186,7 @@ impl Optimizer {
         Ok(())
     }
 
-    /// Generate the cache file path based on the URL
-    ///
-    /// Uses a simple hash to generate a unique filename
-    #[allow(dead_code)]
+    /// Generate the cache file path for a URL using a simple hash.
     fn get_cache_path(&self, url: &str) -> Result<PathBuf, Box<dyn Error>> {
         let mut cache_dir = PathBuf::from(if self.config.cache_dir.is_empty() {
             "~/.cache/kget".to_string()
