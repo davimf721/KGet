@@ -7,6 +7,35 @@ Todas as mudanças notáveis neste projeto serão documentadas neste arquivo.
 O formato é baseado em [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 e este projeto adere ao [Versionamento Semântico](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.2] - 2026-04-28
+
+### Corrigido
+- **Downloads SFTP completamente não funcionais.** A implementação anterior passava a string `sftp://…` inteira para `TcpStream::connect` e a usava como caminho remoto, causando falha imediata em toda chamada SFTP. O módulo foi totalmente reescrito:
+  - A URL é parseada corretamente para extrair `host`, `porta`, `usuário` e `caminho remoto`.
+  - Autenticação em ordem de prioridade: senha na URL → SSH agent ativo → arquivos de chave padrão (`~/.ssh/id_ed25519`, `~/.ssh/id_rsa`, `~/.ssh/id_ecdsa`).
+  - Arquivo transmitido em chunks de 32 KB com barra de progresso em tempo real.
+  - Mensagens de erro claras e acionáveis em cada ponto de falha.
+- **Login anônimo FTP falhava quando a URL não continha usuário.** `url.username()` da crate `url` retorna string vazia `""` (não `None`) quando a URL não tem segmento de usuário. Passar `""` para `ftp.login()` fazia servidores FTP anônimos rejeitarem a conexão. O downloader agora usa `"anonymous"` como fallback.
+
+### Adicionado
+- **Modo interativo completamente implementado.** Anteriormente `kget --interactive` abria um REPL que apenas imprimia `"Would download: …"` sem realizar nenhum download. O modo agora está completo:
+  - Banner de entrada com arte ASCII em fonte de blocos Unicode.
+  - Editor de linha `rustyline` com histórico de comandos persistente.
+  - `download [flags] <url>` — aciona o downloader correto conforme os flags:
+    - Padrão: HTTP/HTTPS simples com retry e barra de progresso.
+    - `-a` / `--advanced` / `--turbo`: `AdvancedDownloader` (paralelo com byte range, retomável).
+    - `--ftp`: downloader FTP com fallback anônimo.
+    - `--sftp`: downloader SFTP com autenticação SSH multi-método.
+    - `--torrent` ou prefixo `magnet:?` detectado automaticamente: motor de torrent nativo.
+    - Flags `-o <caminho>`, `-q` (silencioso), `--sha256 <hash>` suportados.
+  - `config [show | set <chave> <valor>]`: lê e persiste configurações (`connections`, `speed-limit`, `compression`, `cache`).
+  - Comandos `clear`, `version`, `help` / `?`; `get` e `dl` como apelidos de `download`.
+  - Erros são impressos e o REPL continua — um download com falha nunca encerra a sessão.
+
+### Alterado
+- **Tratamento de erros em locks Mutex no `AdvancedDownloader`:** todas as chamadas `.unwrap()` em `Mutex::lock()` foram substituídas por `.expect("…")` com mensagens descritivas.
+- **Limpeza da API pública do `Optimizer`:** removidos atributos `#[allow(dead_code)]` dos métodos públicos `compress`, `get_cached_file` e `cache_file`.
+
 ## [1.6.1] - 2026-04-27
 
 ### Adicionado

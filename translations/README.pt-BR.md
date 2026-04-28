@@ -1,4 +1,4 @@
-# KGet v1.6.1
+# KGet v1.6.2
 
 Um gerenciador de downloads moderno e rápido escrito em Rust. O KGet suporta HTTP/HTTPS, FTP/SFTP e magnet links com cliente torrent nativo.
 
@@ -8,7 +8,8 @@ Um gerenciador de downloads moderno e rápido escrito em Rust. O KGet suporta HT
 
 - **Multi-protocolo:** HTTP, HTTPS, FTP, SFTP e magnet links.
 - **Cliente torrent nativo:** downloads por magnet sem depender de apps externos quando compilado com `torrent-native`.
-- **Modo turbo:** downloads HTTP/HTTPS paralelos com byte ranges.
+- **Modo turbo:** downloads HTTP/HTTPS paralelos com byte ranges, retomável.
+- **Modo interativo REPL:** `kget --interactive` com histórico, todos os protocolos e edição de config ao vivo.
 - **GUI e CLI:** interface gráfica e uso por terminal.
 - **Multiplataforma:** macOS, Linux e Windows.
 - **Verificação SHA256:** valida ISOs e qualquer arquivo com hash esperado.
@@ -48,7 +49,7 @@ Baixe versões para macOS, Linux e Windows em [Releases](https://github.com/davi
 # Download simples
 kget https://example.com/arquivo.zip
 
-# Modo turbo
+# Modo turbo (paralelo, retomável)
 kget -a https://example.com/grande.iso
 
 # Salvar em local específico
@@ -57,26 +58,53 @@ kget -O ~/Downloads/arquivo.zip https://example.com/arquivo.zip
 # Verificar SHA256 esperado
 kget --sha256 <hash> https://example.com/imagem.iso
 
-# Magnet link
+# Magnet link (detectado automaticamente)
 kget "magnet:?xt=urn:btih:HASH..."
 
-# FTP/SFTP
-kget ftp://usuario:senha@servidor/arquivo.zip
-kget sftp://usuario@servidor/arquivo.dat
+# FTP anônimo
+kget --ftp ftp://ftp.gnu.org/gnu/emacs/emacs-28.2.tar.gz
+
+# FTP autenticado
+kget --ftp ftp://usuario:senha@servidor/arquivo.zip
+
+# SFTP com senha na URL
+kget --sftp sftp://usuario:senha@servidor/caminho/arquivo.dat
+
+# SFTP com chave SSH (usa SSH agent ou ~/.ssh/id_*)
+kget --sftp sftp://usuario@servidor/caminho/arquivo.dat
+```
+
+## Modo Interativo
+
+```bash
+kget --interactive
+```
+
+Abre um REPL com banner ASCII, histórico de comandos e suporte a todos os protocolos:
+
+```
+kget> download -a -o ~/Downloads/ubuntu.iso https://releases.ubuntu.com/...
+kget> download --sftp sftp://user@servidor/backups/db.sql.gz
+kget> download magnet:?xt=urn:btih:...
+kget> config set connections 8
+kget> config set speed-limit 1048576
+kget> help
 ```
 
 ## Opções principais
 
 | Flag | Descrição |
 |------|-----------|
-| `-a, --advanced` | Modo turbo com conexões paralelas |
+| `-a, --advanced` | Modo turbo com conexões paralelas (retomável) |
 | `-O <path>` | Arquivo ou pasta de saída |
 | `-q, --quiet` | Saída mínima |
 | `-p <proxy>` | Proxy HTTP/SOCKS5 |
 | `-l <bytes>` | Limite de velocidade em bytes/s |
 | `--sha256 <hash>` | Verifica o arquivo final contra um hash SHA256 esperado |
+| `--ftp` | Usar protocolo FTP |
+| `--sftp` | Usar protocolo SFTP (senha ou autenticação por chave) |
 | `--gui` | Abre a interface gráfica |
-| `--interactive` | Abre o modo REPL interativo |
+| `-i, --interactive` | Abre o modo REPL interativo |
 
 ## Biblioteca Rust
 
