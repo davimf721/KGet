@@ -10,14 +10,14 @@ proxy y verificación SHA256.
 
 ```toml
 [dependencies]
-Kget = "1.6.1"
+Kget = "1.6.2"
 ```
 
 Features opcionales:
 
 ```toml
-Kget = { version = "1.6.1", features = ["torrent-native"] }
-Kget = { version = "1.6.1", features = ["gui"] }
+Kget = { version = "1.6.2", features = ["torrent-native"] }
+Kget = { version = "1.6.2", features = ["gui"] }
 ```
 
 ## API Principal

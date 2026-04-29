@@ -1,6 +1,6 @@
 [package]
 name = "Kget"
-version = "1.6.1"
+version = "1.6.2"
 edition = "2024"
 description = "A powerful and versatile download manager and library"
 authors = ["Davi Moreira Fuzatto <davimoreiraf@gmail.com>"]

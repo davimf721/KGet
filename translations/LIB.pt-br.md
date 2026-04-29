@@ -10,7 +10,7 @@ downloads, proxy e verificação SHA256.
 
 ```toml
 [dependencies]
-Kget = "1.6.1"
+Kget = "1.6.2"
 ```
 
 Features opcionais:
