@@ -7,6 +7,17 @@ Todos los cambios notables en este proyecto serán documentados en este archivo.
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 y este proyecto se adhiere al [Versionado Semántico](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.2] - 2026-04-29
+
+### Corregido
+- Las descargas SFTP ahora funcionan completamente: el análisis de URL extrae correctamente host, puerto, usuario y ruta remota; la autenticación prueba contraseña de URL, agente SSH y luego archivos de clave predeterminados (`~/.ssh/id_ed25519`, `id_rsa`, `id_ecdsa`); el archivo se transmite en bloques de 32 KB con barra de progreso sin cargar todo en memoria.
+- Inicio de sesión FTP anónimo: cuando `url.username()` devuelve cadena vacía, ahora hace fallback correcto a `"anonymous"`.
+
+### Cambiado
+- El modo interactivo (`kget --interactive`) ahora está completamente implementado con REPL basado en historial `rustyline`, banner ASCII art, comando `download [flags] <url>` con detección automática de HTTP/FTP/SFTP/torrent, `config show`/`config set <clave> <valor>`, y alias `get`/`dl`/`?`/`help`/`clear`/`version`/`exit`.
+- Los panics en locks Mutex ahora tienen mensajes descriptivos via `.expect()` en lugar de `.unwrap()` silenciosos en `advanced_download.rs` y `optimization.rs`.
+- Eliminado `#[allow(dead_code)]` innecesario de los métodos públicos del `Optimizer`.
+
 ## [1.6.1] - 2026-04-27
 
 ### Añadido

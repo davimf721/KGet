@@ -19,7 +19,7 @@ set -e
 
 # Configuration
 APP_NAME="KGet"
-VERSION="1.6.1"
+VERSION="1.6.2"
 BUNDLE_ID="com.davimf721.kget"
 DMG_NAME="KGet-${VERSION}-macOS-Native"
 SWIFT_PROJECT_DIR="macos-app/KGet"
