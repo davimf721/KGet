@@ -1,6 +1,6 @@
 <img width="1000" height="500" alt="KGet Banner" src="https://github.com/user-attachments/assets/d0888e3f-90a2-42d6-a9aa-b216dc36f1f4" />
 
-# KGet v1.6.1
+# KGet v1.6.2
 
 A fast, modern download manager written in Rust. Supports HTTP/HTTPS, FTP/SFTP, and **magnet links** with a built-in torrent client.
 
@@ -11,6 +11,7 @@ A fast, modern download manager written in Rust. Supports HTTP/HTTPS, FTP/SFTP, 
 - **Multi-protocol:** HTTP, HTTPS, FTP, SFTP, and Magnet links
 - **Native Torrent Client:** Downloads torrents directly — no external apps needed
 - **Turbo Mode:** Parallel connections for faster downloads
+- **Interactive REPL:** Full `kget --interactive` mode with history, all protocols, and live config editing
 - **GUI & CLI:** Use whichever you prefer
 - **Cross-platform:** macOS, Linux, Windows
 - **ISO Verification:** Optional SHA256 checksum for disk images
@@ -63,32 +64,59 @@ kget --gui
 # Basic download
 kget https://example.com/file.zip
 
-# Turbo mode (parallel connections)
+# Turbo mode (parallel connections, resumable)
 kget -a https://example.com/large.iso
 
 # Save to specific location
 kget -O ~/Downloads/myfile.zip https://example.com/file.zip
 
-# Torrent download
+# Torrent download (auto-detected)
 kget "magnet:?xt=urn:btih:HASH..."
 
-# FTP/SFTP
-kget ftp://user:pass@server/file.zip
-kget sftp://user@server/file.dat
+# FTP – anonymous (no credentials needed)
+kget --ftp ftp://ftp.gnu.org/gnu/emacs/emacs-28.2.tar.gz
+
+# FTP – authenticated
+kget --ftp ftp://user:pass@server/file.zip
+
+# SFTP – password in URL
+kget --sftp sftp://user:pass@server/path/to/file.dat
+
+# SFTP – key-based (SSH agent or ~/.ssh/id_*)
+kget --sftp sftp://user@server/path/to/file.dat
+```
+
+### Interactive Mode
+
+```bash
+kget --interactive
+```
+
+Launches a REPL with an ASCII art banner, command history, and full protocol support:
+
+```
+kget> download -a -o ~/Downloads/ubuntu.iso https://releases.ubuntu.com/...
+kget> download --sftp sftp://user@server/backups/db.sql.gz
+kget> download magnet:?xt=urn:btih:...
+kget> config set connections 8
+kget> config set speed-limit 1048576
+kget> help
 ```
 
 ### Options
 
 | Flag | Description |
 |------|-------------|
-| `-a, --advanced` | Turbo mode with parallel connections |
+| `-a, --advanced` | Turbo mode with parallel connections (resumable) |
 | `-O <path>` | Output file or directory |
 | `-q, --quiet` | Minimal output |
 | `-p <proxy>` | Use HTTP/SOCKS5 proxy |
 | `-l <bytes>` | Speed limit in bytes/sec |
 | `--sha256 <hash>` | Verify the completed file against an expected SHA256 hash |
+| `--ftp` | Use FTP protocol |
+| `--sftp` | Use SFTP protocol (password or key-based auth) |
 | `--gui` | Launch graphical interface |
-| `--interactive` | Interactive REPL mode |
+| `-i, --interactive` | Interactive REPL mode |
 
 ## Library Usage
 

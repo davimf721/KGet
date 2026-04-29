@@ -11,7 +11,7 @@ resume support, proxy support, and SHA256 verification.
 
 ```toml
 [dependencies]
-Kget = "1.6.1"
+Kget = "1.6.2"
 ```
 
 Optional features:
@@ -142,5 +142,56 @@ falls back to the platform's default external magnet handler.
 - Files are streamed to disk instead of loaded fully into memory.
 - Output filenames are validated against path separators.
 - SHA256 helpers return errors on expected-hash mismatches.
+
+## FTP Download
+
+```rust,no_run
+use kget::ftp::FtpDownloader;
+use kget::{Optimizer, ProxyConfig};
+
+// Anonymous FTP (no credentials required)
+let dl = FtpDownloader::new(
+    "ftp://ftp.gnu.org/gnu/emacs/emacs-28.2.tar.gz".to_string(),
+    "emacs-28.2.tar.gz".to_string(),
+    false,
+    ProxyConfig::default(),
+    Optimizer::new(),
+);
+dl.download()?;
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+```
+
+## SFTP Download
+
+```rust,no_run
+use kget::sftp::SftpDownloader;
+use kget::{Optimizer, ProxyConfig};
+
+// Password embedded in the URL
+let dl = SftpDownloader::new(
+    "sftp://user:pass@server.example.com/path/to/file.tar.gz".to_string(),
+    "file.tar.gz".to_string(),
+    false,
+    ProxyConfig::default(),
+    Optimizer::new(),
+);
+dl.download()?;
+
+// Key-based authentication — uses SSH agent or ~/.ssh/id_ed25519, id_rsa, id_ecdsa automatically
+let dl = SftpDownloader::new(
+    "sftp://user@server.example.com/path/to/file.tar.gz".to_string(),
+    "file.tar.gz".to_string(),
+    false,
+    ProxyConfig::default(),
+    Optimizer::new(),
+);
+dl.download()?;
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+```
+
+Authentication priority:
+1. Password from URL (`sftp://user:pass@host/path`)
+2. Running SSH agent
+3. Default key files (`~/.ssh/id_ed25519`, `~/.ssh/id_rsa`, `~/.ssh/id_ecdsa`)
 
 See [examples/lib_usage.rs](examples/lib_usage.rs) for a larger cookbook.

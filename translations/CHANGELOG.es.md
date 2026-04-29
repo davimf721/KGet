@@ -7,16 +7,34 @@ Todos los cambios notables en este proyecto serán documentados en este archivo.
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 y este proyecto se adhiere al [Versionado Semántico](https://semver.org/spec/v2.0.0.html).
 
-## [1.6.2] - 2026-04-29
+## [1.6.2] - 2026-04-28
 
 ### Corregido
-- Las descargas SFTP ahora funcionan completamente: el análisis de URL extrae correctamente host, puerto, usuario y ruta remota; la autenticación prueba contraseña de URL, agente SSH y luego archivos de clave predeterminados (`~/.ssh/id_ed25519`, `id_rsa`, `id_ecdsa`); el archivo se transmite en bloques de 32 KB con barra de progreso sin cargar todo en memoria.
-- Inicio de sesión FTP anónimo: cuando `url.username()` devuelve cadena vacía, ahora hace fallback correcto a `"anonymous"`.
+- **Las descargas SFTP eran completamente no funcionales.** La implementación anterior pasaba la cadena completa `sftp://…` directamente a `TcpStream::connect` y la usaba como ruta remota, provocando un fallo inmediato en cada llamada SFTP. El módulo fue reescrito por completo:
+  - La URL se parsea correctamente para extraer `host`, `puerto`, `usuario` y `ruta remota`.
+  - Autenticación en orden de prioridad: contraseña en la URL → agente SSH activo → archivos de clave predeterminados (`~/.ssh/id_ed25519`, `~/.ssh/id_rsa`, `~/.ssh/id_ecdsa`).
+  - Archivo transmitido en chunks de 32 KB con barra de progreso en tiempo real.
+  - Mensajes de error claros y accionables en cada punto de fallo.
+- **El login anónimo FTP fallaba cuando la URL no contenía usuario.** `url.username()` de la crate `url` devuelve una cadena vacía `""` (no `None`) cuando la URL no tiene segmento de usuario. Pasar `""` a `ftp.login()` hacía que los servidores FTP anónimos rechazaran la conexión. El downloader ahora usa `"anonymous"` como fallback.
+
+### Añadido
+- **Modo interactivo completamente implementado.** Anteriormente `kget --interactive` abría un REPL que solo imprimía `"Would download: …"` sin realizar ninguna descarga. El modo ahora está completo:
+  - Banner de entrada con arte ASCII en fuente de bloques Unicode.
+  - Editor de línea `rustyline` con historial de comandos persistente.
+  - `download [flags] <url>` — activa el downloader correcto según los flags:
+    - Por defecto: HTTP/HTTPS simple con retry y barra de progreso.
+    - `-a` / `--advanced` / `--turbo`: `AdvancedDownloader` (paralelo con byte range, reanudable).
+    - `--ftp`: downloader FTP con fallback anónimo.
+    - `--sftp`: downloader SFTP con autenticación SSH multi-método.
+    - `--torrent` o prefijo `magnet:?` detectado automáticamente: motor de torrent nativo.
+    - Flags `-o <ruta>`, `-q` (silencioso), `--sha256 <hash>` soportados.
+  - `config [show | set <clave> <valor>]`: lee y persiste configuraciones (`connections`, `speed-limit`, `compression`, `cache`).
+  - Comandos `clear`, `version`, `help` / `?`; `get` y `dl` como alias de `download`.
+  - Los errores se imprimen y el REPL continúa — un error de descarga nunca cierra la sesión.
 
 ### Cambiado
-- El modo interactivo (`kget --interactive`) ahora está completamente implementado con REPL basado en historial `rustyline`, banner ASCII art, comando `download [flags] <url>` con detección automática de HTTP/FTP/SFTP/torrent, `config show`/`config set <clave> <valor>`, y alias `get`/`dl`/`?`/`help`/`clear`/`version`/`exit`.
-- Los panics en locks Mutex ahora tienen mensajes descriptivos via `.expect()` en lugar de `.unwrap()` silenciosos en `advanced_download.rs` y `optimization.rs`.
-- Eliminado `#[allow(dead_code)]` innecesario de los métodos públicos del `Optimizer`.
+- **Manejo de errores en locks Mutex en `AdvancedDownloader`:** todas las llamadas `.unwrap()` en `Mutex::lock()` reemplazadas por `.expect("…")` con mensajes descriptivos.
+- **Limpieza de la API pública de `Optimizer`:** eliminados atributos `#[allow(dead_code)]` de los métodos públicos `compress`, `get_cached_file` y `cache_file`.
 
 ## [1.6.1] - 2026-04-27
 
