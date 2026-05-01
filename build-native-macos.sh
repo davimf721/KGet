@@ -19,7 +19,7 @@ set -e
 
 # Configuration
 APP_NAME="KGet"
-VERSION="1.6.2"
+VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 BUNDLE_ID="com.davimf721.kget"
 DMG_NAME="KGet-${VERSION}-macOS-Native"
 SWIFT_PROJECT_DIR="macos-app/KGet"
