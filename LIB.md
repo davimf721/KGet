@@ -11,15 +11,15 @@ resume support, proxy support, and SHA256 verification.
 
 ```toml
 [dependencies]
-Kget = "1.6.2"
+Kget = "1.6.3"
 ```
 
 Optional features:
 
 ```toml
 [dependencies]
-Kget = { version = "1.6.1", features = ["torrent-native"] }
-Kget = { version = "1.6.1", features = ["gui"] }
+Kget = { version = "1.6.3", features = ["torrent-native"] }
+Kget = { version = "1.6.3", features = ["gui"] }
 ```
 
 Inside this repository, examples can use:

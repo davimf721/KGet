@@ -25,6 +25,7 @@ pub enum DownloadCommand {
         output_path: String,
         is_advanced: bool,
         verify_iso: bool,
+        expected_sha256: Option<String>,
     },
     Cancel,
 }
@@ -76,6 +77,7 @@ fn download_worker(
                     output_path,
                     is_advanced,
                     verify_iso,
+                    expected_sha256,
                 } => {
                     cancel_token.store(false, Ordering::SeqCst);
                     let _ = status_tx.send(WorkerToGuiMessage::StatusUpdate(format!(
@@ -116,6 +118,9 @@ fn download_worker(
                             );
 
                             downloader.set_cancel_token(cancel_token_clone.clone());
+                            if let Some(expected_sha256) = expected_sha256.clone() {
+                                downloader.set_expected_sha256(expected_sha256);
+                            }
 
                             let status_tx_cb = status_tx_clone.clone();
                             downloader.set_progress_callback(move |p| {
@@ -135,7 +140,7 @@ fn download_worker(
                                 quiet_mode: true,
                                 output_path: Some(output_path.clone()),
                                 verify_iso,
-                                expected_sha256: None,
+                                expected_sha256: expected_sha256.clone(),
                             };
 
                             let status_tx_cb = status_tx_clone.clone();

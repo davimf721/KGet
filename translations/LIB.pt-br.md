@@ -10,14 +10,14 @@ downloads, proxy e verificação SHA256.
 
 ```toml
 [dependencies]
-Kget = "1.6.2"
+Kget = "1.6.3"
 ```
 
 Features opcionais:
 
 ```toml
-Kget = { version = "1.6.1", features = ["torrent-native"] }
-Kget = { version = "1.6.1", features = ["gui"] }
+Kget = { version = "1.6.3", features = ["torrent-native"] }
+Kget = { version = "1.6.3", features = ["gui"] }
 ```
 
 ## API Principal

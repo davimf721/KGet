@@ -8,6 +8,10 @@ description: Use when adding or planning KGet support for iPhone, iPad, macOS, W
 Use the Rust engine as the common behavior layer. Add platform clients around it
 without duplicating download logic.
 
+Use `obsidian-project-memory` for this work: read the Segundo Cerebro Obsidian
+context before implementing and update the relevant vault notes after important
+platform, packaging, architecture, or roadmap changes.
+
 ## Platform Strategy
 
 - Apple platforms: use SwiftUI and share code across macOS, iOS, and iPadOS.
@@ -17,11 +21,13 @@ without duplicating download logic.
 
 ## Workflow
 
-1. Read `docs/ARCHITECTURE.md` and `docs/ROADMAP.md`.
-2. Identify whether the feature belongs in Rust engine, app service, or platform UI.
-3. Add structured Rust events before adding frontend parsing.
-4. Keep platform-specific permissions, notifications, file pickers, and share flows in the platform client.
-5. Add build/package notes when introducing a new platform target.
+1. Read the Obsidian context via `obsidian-project-memory`.
+2. Read `docs/ARCHITECTURE.md` and `docs/ROADMAP.md`.
+3. Identify whether the feature belongs in Rust engine, app service, or platform UI.
+4. Add structured Rust events before adding frontend parsing.
+5. Keep platform-specific permissions, notifications, file pickers, and share flows in the platform client.
+6. Add build/package notes when introducing a new platform target.
+7. Update the vault when platform support, build steps, roadmap, or app boundaries change.
 
 ## Preferred Milestones
 
@@ -31,4 +37,3 @@ without duplicating download logic.
 4. iPad layout.
 5. iPhone layout.
 6. Windows/Linux shell and packaging.
-

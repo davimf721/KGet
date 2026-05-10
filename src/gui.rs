@@ -45,6 +45,25 @@ pub enum DownloadStatus {
     Cancelled,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DownloadFilter {
+    All,
+    Active,
+    Completed,
+    Failed,
+}
+
+impl DownloadFilter {
+    fn label(self) -> &'static str {
+        match self {
+            DownloadFilter::All => "All",
+            DownloadFilter::Active => "Active",
+            DownloadFilter::Completed => "Completed",
+            DownloadFilter::Failed => "Failed",
+        }
+    }
+}
+
 impl DownloadStatus {
     fn color(&self) -> egui::Color32 {
         match self {
@@ -101,12 +120,20 @@ pub struct DownloadItem {
     pub verify_integrity: bool,
     pub error: Option<String>,
     pub sha256: Option<String>,
+    pub expected_sha256: Option<String>,
     pub connections: u8,
     pub start_time: Option<Instant>,
 }
 
 impl DownloadItem {
-    fn new(id: u64, url: String, output_path: String, is_advanced: bool, verify_iso: bool) -> Self {
+    fn new(
+        id: u64,
+        url: String,
+        output_path: String,
+        is_advanced: bool,
+        verify_iso: bool,
+        expected_sha256: Option<String>,
+    ) -> Self {
         let is_torrent = url.starts_with("magnet:");
 
         let filename = if is_torrent {
@@ -143,6 +170,7 @@ impl DownloadItem {
             verify_integrity: verify_iso || is_iso,
             error: None,
             sha256: None,
+            expected_sha256,
             connections: if is_advanced { 4 } else { 1 },
             start_time: None,
         }
@@ -171,6 +199,8 @@ pub struct KGetGui {
     output_path: String,
     is_advanced: bool,
     verify_iso: bool,
+    expected_sha256: String,
+    filter: DownloadFilter,
 
     // Downloads
     downloads: Vec<DownloadItem>,
@@ -239,6 +269,8 @@ impl KGetGui {
             output_path: default_download_dir,
             is_advanced: true,
             verify_iso: true,
+            expected_sha256: String::new(),
+            filter: DownloadFilter::All,
             downloads: Vec::new(),
             active_download_id: None,
             next_download_id: 1,
@@ -457,12 +489,44 @@ impl KGetGui {
         }
     }
 
+    fn open_download_file(&self, path: &str) {
+        #[cfg(target_os = "macos")]
+        {
+            let _ = std::process::Command::new("open").arg(path).spawn();
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let _ = std::process::Command::new("xdg-open").arg(path).spawn();
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let _ = std::process::Command::new("cmd")
+                .args(["/C", "start", "", path])
+                .spawn();
+        }
+    }
+
+    fn copy_to_clipboard(text: &str) {
+        if let Ok(mut cb) = arboard::Clipboard::new() {
+            let _ = cb.set_text(text.to_string());
+        }
+    }
+
     fn start_download(&mut self) {
         match self.validate_input() {
             Ok(()) => {
                 self.validation_error = None;
 
                 let is_magnet = self.url.to_lowercase().starts_with("magnet:?");
+                let expected_sha256 = self
+                    .expected_sha256
+                    .trim()
+                    .to_string();
+                let expected_sha256 = if expected_sha256.is_empty() {
+                    None
+                } else {
+                    Some(expected_sha256)
+                };
                 let final_output_path = if is_magnet {
                     self.output_path.clone()
                 } else {
@@ -478,7 +542,8 @@ impl KGetGui {
                     self.url.clone(),
                     final_output_path.clone(),
                     self.is_advanced,
-                    self.verify_iso,
+                    self.verify_iso || expected_sha256.is_some(),
+                    expected_sha256.clone(),
                 );
 
                 let id = download.id;
@@ -493,12 +558,14 @@ impl KGetGui {
                         url: self.url.clone(),
                         output_path: final_output_path,
                         is_advanced: self.is_advanced,
-                        verify_iso: self.verify_iso,
+                        verify_iso: self.verify_iso || expected_sha256.is_some(),
+                        expected_sha256,
                     })
                     .ok();
 
                 self.status_text = "Starting download...".into();
                 self.url.clear();
+                self.expected_sha256.clear();
             }
             Err(e) => {
                 self.validation_error = Some(e);
@@ -537,6 +604,7 @@ impl KGetGui {
                 download.output_path.clone(),
                 download.is_advanced,
                 download.verify_integrity,
+                download.expected_sha256.clone(),
             );
 
             let new_id = new_download.id;
@@ -547,15 +615,37 @@ impl KGetGui {
             self.next_download_id += 1;
             self.remove_download(id);
 
-            self.download_tx
+                self.download_tx
                 .send(DownloadCommand::Start {
                     url: download.url,
                     output_path: download.output_path,
                     is_advanced: download.is_advanced,
                     verify_iso: download.verify_integrity,
+                    expected_sha256: download.expected_sha256,
                 })
                 .ok();
         }
+    }
+
+    fn filtered_downloads(&self) -> Vec<DownloadItem> {
+        self.downloads
+            .iter()
+            .filter(|download| match self.filter {
+                DownloadFilter::All => true,
+                DownloadFilter::Active => matches!(
+                    download.status,
+                    DownloadStatus::Pending
+                        | DownloadStatus::Downloading
+                        | DownloadStatus::Verifying
+                ),
+                DownloadFilter::Completed => download.status == DownloadStatus::Completed,
+                DownloadFilter::Failed => matches!(
+                    download.status,
+                    DownloadStatus::Failed | DownloadStatus::Cancelled
+                ),
+            })
+            .cloned()
+            .collect()
     }
 
     // ========================================================================
@@ -720,6 +810,23 @@ impl KGetGui {
                     ))
                     .on_hover_text("Verify SHA256 for ISO files");
                 });
+
+                ui.add_space(10.0);
+
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("#")
+                            .size(14.0)
+                            .color(colors::TEXT_SECONDARY),
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.expected_sha256)
+                            .hint_text("Expected SHA256 (optional)")
+                            .desired_width(ui.available_width())
+                            .font(egui::TextStyle::Monospace),
+                    )
+                    .on_hover_text("Used by CLI downloads; GUI worker support is planned for structured events");
+                });
             });
 
         // Validation error
@@ -826,6 +933,13 @@ impl KGetGui {
                             }
                             DownloadStatus::Completed => {
                                 if ui
+                                    .add(egui::Button::new("📄").min_size(egui::vec2(24.0, 24.0)))
+                                    .on_hover_text("Open file")
+                                    .clicked()
+                                {
+                                    action = Some((download.id, "open_file"));
+                                }
+                                if ui
                                     .add(egui::Button::new("📂").min_size(egui::vec2(24.0, 24.0)))
                                     .on_hover_text("Open folder")
                                     .clicked()
@@ -857,6 +971,14 @@ impl KGetGui {
                                 }
                             }
                             DownloadStatus::Pending => {}
+                        }
+
+                        if ui
+                            .add(egui::Button::new("🔗").min_size(egui::vec2(24.0, 24.0)))
+                            .on_hover_text("Copy URL")
+                            .clicked()
+                        {
+                            action = Some((download.id, "copy_url"));
                         }
 
                         // Status label
@@ -984,6 +1106,9 @@ impl KGetGui {
                                     .size(10.0)
                                     .color(colors::ACCENT_GREEN),
                             );
+                            if ui.small_button("Copy SHA256").clicked() {
+                                action = Some((download.id, "copy_sha"));
+                            }
                         }
                     });
                 }
@@ -1117,6 +1242,24 @@ impl KGetGui {
             });
         });
     }
+
+    fn render_filter_bar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("Filter")
+                    .size(11.0)
+                    .color(colors::TEXT_MUTED),
+            );
+            for filter in [
+                DownloadFilter::All,
+                DownloadFilter::Active,
+                DownloadFilter::Completed,
+                DownloadFilter::Failed,
+            ] {
+                ui.selectable_value(&mut self.filter, filter, filter.label());
+            }
+        });
+    }
 }
 
 // ============================================================================
@@ -1192,12 +1335,28 @@ impl eframe::App for KGetGui {
                 if self.downloads.is_empty() {
                     self.render_empty_state(ui);
                 } else {
+                    self.render_filter_bar(ui);
+                    ui.add_space(10.0);
+
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
-                            let downloads_snapshot: Vec<_> =
-                                self.downloads.iter().cloned().collect();
+                            let downloads_snapshot = self.filtered_downloads();
                             let mut actions: Vec<(u64, &str)> = Vec::new();
+
+                            if downloads_snapshot.is_empty() {
+                                ui.vertical_centered(|ui| {
+                                    ui.add_space(40.0);
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "No {} downloads",
+                                            self.filter.label().to_lowercase()
+                                        ))
+                                        .size(14.0)
+                                        .color(colors::TEXT_MUTED),
+                                    );
+                                });
+                            }
 
                             for download in &downloads_snapshot {
                                 if let Some(action) = self.render_download_item(ui, download) {
@@ -1215,6 +1374,26 @@ impl eframe::App for KGetGui {
                                         if let Some(d) = self.downloads.iter().find(|d| d.id == id)
                                         {
                                             self.open_download_folder(&d.output_path);
+                                        }
+                                    }
+                                    "open_file" => {
+                                        if let Some(d) = self.downloads.iter().find(|d| d.id == id)
+                                        {
+                                            self.open_download_file(&d.output_path);
+                                        }
+                                    }
+                                    "copy_url" => {
+                                        if let Some(d) = self.downloads.iter().find(|d| d.id == id)
+                                        {
+                                            Self::copy_to_clipboard(&d.url);
+                                        }
+                                    }
+                                    "copy_sha" => {
+                                        if let Some(d) = self.downloads.iter().find(|d| d.id == id)
+                                        {
+                                            if let Some(sha) = &d.sha256 {
+                                                Self::copy_to_clipboard(sha);
+                                            }
                                         }
                                     }
                                     "retry" => self.retry_download(id),

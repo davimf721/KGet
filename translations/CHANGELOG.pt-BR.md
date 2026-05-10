@@ -7,6 +7,24 @@ Todas as mudanças notáveis neste projeto serão documentadas neste arquivo.
 O formato é baseado em [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 e este projeto adere ao [Versionamento Semântico](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.3] - 2026-05-10
+
+### Adicionado
+- **Eventos JSONL experimentais na CLI:** `--jsonl` emite eventos `started`, `progress`, `status`, `completed` e `error` para agentes, scripts e frontends futuros.
+- **Filtros na GUI:** o app macOS e a GUI Rust agora filtram downloads por todos, ativos, concluídos e falhos/cancelados.
+- **Mais ações de download:** macOS e GUI Rust expõem Copiar URL, Abrir Arquivo, Abrir Pasta e Copiar SHA256 quando houver checksum.
+- **SHA256 esperado na GUI Rust:** a GUI Linux/Windows pode enviar um hash SHA256 esperado ao worker de download.
+
+### Alterado
+- **Configurações do macOS agora afetam comportamento real:** modo avançado por padrão, notificações e limite de velocidade são persistidos e aplicados a novos downloads.
+- **Versão do macOS corrigida:** metadados do app/extensão usam 1.6.3 e labels visíveis leem a versão do bundle em vez de strings hardcoded.
+- **Limites de velocidade agora regulam downloads HTTP:** downloads HTTP simples e avançados respeitam o limite em bytes/s configurado.
+
+### Corrigido
+- **Fallback de metadados no download avançado:** quando `HEAD` falha ou não retorna `Content-Length`, o KGet tenta `Range: bytes=0-0` antes de desistir.
+- **Progresso correto ao retomar:** downloads avançados inicializam o progresso com o tamanho parcial existente em vez de recomeçar visualmente do zero.
+- **Modo JSONL não mistura mais linhas humanas de progresso avançado na saída de máquina.**
+
 ## [1.6.2] - 2026-04-28
 
 ### Corrigido

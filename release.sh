@@ -1,31 +1,32 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
-# KGet Automated Release Script
-# ==============================
-# Builds all platform binaries, creates a GitHub release, and publishes to crates.io.
+# KGet release orchestrator
+# =========================
+# Builds release artifacts, publishes crates.io, pushes git state, and creates
+# a GitHub release with assets. Designed to fail early before irreversible work.
 #
 # Usage:
-#   ./release.sh                  # full release (build + GitHub + crates.io)
-#   ./release.sh --build-only     # only build binaries
-#   ./release.sh --github-only    # only create GitHub release (binaries must exist)
-#   ./release.sh --crates-only    # only publish to crates.io
-#   ./release.sh --skip-crates    # build + GitHub release, skip crates.io
-#   ./release.sh --dry-run        # show what would happen, don't publish
+#   ./release.sh                 # full release, asks for confirmation
+#   ./release.sh --yes           # full release without prompt
+#   ./release.sh --dry-run       # validate and show planned actions; no build, commit, push, publish, or GitHub write
+#   ./release.sh --build-only    # build artifacts only
+#   ./release.sh --github-only   # create/upload GitHub release from existing artifacts
+#   ./release.sh --crates-only   # publish crates.io only
+#   ./release.sh --skip-tests    # skip verification tests/checks
+#   ./release.sh --skip-cross    # skip Linux/Windows cross builds
+#   ./release.sh --reuse-assets  # do not rebuild assets that already exist
+#   ./release.sh --force-tag     # move existing tag to HEAD
 #
-# Prerequisites:
-#   - cargo, rustup
-#   - gh (GitHub CLI) logged in
-#   - cross (cargo install cross --git https://github.com/cross-rs/cross) + Docker
-#     OR cargo-zigbuild (cargo install cargo-zigbuild) + zig (brew install zig)
-#   - swift + xcode (for macOS DMG)
-#   - create-dmg (brew install create-dmg, optional)
+# Required for full release:
+#   cargo, rustup, git, gh authenticated, crates.io token/login
+#   macOS app: swift, xcrun, codesign, hdiutil
+#   cross-platform binaries: cross+Docker or cargo-zigbuild+zig
 #
+# Optional environment:
+#   KGET_RELEASE_INCLUDE_UNTRACKED=true  # include untracked files in the release commit
+#   KGET_STALE_VERSION_REGEX='...'       # extra visible stale-version guard
 
 set -euo pipefail
-
-# ============================================================================
-# Colors & helpers
-# ============================================================================
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -39,402 +40,537 @@ success() { echo -e "${GREEN}✓${NC} $*"; }
 warn()    { echo -e "${YELLOW}⚠${NC}  $*"; }
 error()   { echo -e "${RED}✗${NC} $*" >&2; }
 die()     { error "$*"; exit 1; }
-sep()     { echo -e "${BLUE}$(printf '─%.0s' {1..56})${NC}"; }
+sep()     { echo -e "${BLUE}$(printf '─%.0s' {1..64})${NC}"; }
 
-# ============================================================================
-# Argument parsing
-# ============================================================================
+run() {
+    if $DRY_RUN; then
+        echo "DRY RUN: $*"
+    else
+        "$@"
+    fi
+}
 
 DO_BUILD=true
 DO_GITHUB=true
 DO_CRATES=true
+DO_CROSS=true
+DO_TESTS=true
 DRY_RUN=false
+YES=false
+FORCE_TAG=false
+REUSE_ASSETS=false
+REMOTE="${KGET_RELEASE_REMOTE:-origin}"
+BRANCH="${KGET_RELEASE_BRANCH:-main}"
+RELEASE_DIR="release"
+INCLUDE_UNTRACKED="${KGET_RELEASE_INCLUDE_UNTRACKED:-false}"
 
 for arg in "$@"; do
     case "$arg" in
-        --build-only)   DO_GITHUB=false; DO_CRATES=false ;;
-        --github-only)  DO_BUILD=false;  DO_CRATES=false ;;
-        --crates-only)  DO_BUILD=false;  DO_GITHUB=false ;;
-        --skip-crates)  DO_CRATES=false ;;
+        --yes|-y)       YES=true ;;
         --dry-run)      DRY_RUN=true ;;
+        --build-only)   DO_GITHUB=false; DO_CRATES=false ;;
+        --github-only)  DO_BUILD=false; DO_CRATES=false; DO_TESTS=false ;;
+        --crates-only)  DO_BUILD=false; DO_GITHUB=false; DO_CROSS=false ;;
+        --skip-tests)   DO_TESTS=false ;;
+        --skip-cross)   DO_CROSS=false ;;
+        --reuse-assets) REUSE_ASSETS=true ;;
+        --force-tag)    FORCE_TAG=true ;;
         --help|-h)
-            sed -n '/^# Usage:/,/^$/p' "$0" | grep -v '^#$' | sed 's/^# \?//'
+            sed -n '/^# Usage:/,/^# Required/p' "$0" | sed 's/^# \{0,1\}//'
             exit 0 ;;
-        *) die "Unknown argument: $arg. Use --help for usage." ;;
+        *) die "Unknown argument: $arg. Use --help." ;;
     esac
 done
 
-# ============================================================================
-# Read version from Cargo.toml
-# ============================================================================
-
-VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-RELEASE_DIR="release"
+VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+[ -n "$VERSION" ] || die "Could not read version from Cargo.toml"
 TAG="v${VERSION}"
-
-echo ""
-echo -e "${BOLD}KGet Release Script${NC}"
-sep
-echo -e "  Version  : ${BOLD}${VERSION}${NC}"
-echo -e "  Tag      : ${BOLD}${TAG}${NC}"
-echo -e "  Build    : $( $DO_BUILD  && echo "${GREEN}yes${NC}" || echo "no")"
-echo -e "  GitHub   : $( $DO_GITHUB && echo "${GREEN}yes${NC}" || echo "no")"
-echo -e "  crates.io: $( $DO_CRATES && echo "${GREEN}yes${NC}" || echo "no")"
-$DRY_RUN && echo -e "  ${YELLOW}DRY RUN — nothing will be published${NC}"
-sep
-echo ""
-
-# ============================================================================
-# Sanity checks
-# ============================================================================
-
-info "Checking prerequisites..."
-
-command -v cargo &>/dev/null || die "cargo not found"
-command -v rustup &>/dev/null || die "rustup not found"
-
-if $DO_GITHUB; then
-    command -v gh &>/dev/null || die "gh CLI not found. Install: brew install gh && gh auth login"
-    gh auth status &>/dev/null    || die "gh CLI not authenticated. Run: gh auth login"
-fi
-
-if $DO_BUILD; then
-    # Detect cross-compilation tool
-    USE_CROSS=false
-    USE_ZIGBUILD=false
-
-    if command -v cross &>/dev/null && docker info &>/dev/null 2>&1; then
-        USE_CROSS=true
-        success "Cross-compilation: cross + Docker"
-    elif command -v cargo-zigbuild &>/dev/null && command -v zig &>/dev/null; then
-        USE_ZIGBUILD=true
-        success "Cross-compilation: cargo-zigbuild + zig"
-    else
-        warn "Neither cross+Docker nor cargo-zigbuild+zig found."
-        warn "Linux and Windows binaries will be SKIPPED."
-        warn "Install one:"
-        warn "  cargo install cross --git https://github.com/cross-rs/cross  (+ Docker)"
-        warn "  cargo install cargo-zigbuild && brew install zig"
-    fi
-fi
-
-success "Prerequisites OK"
-echo ""
-
-# ============================================================================
-# Commit & tag
-# ============================================================================
-
-if $DO_GITHUB && ! $DRY_RUN; then
-    info "Checking git state..."
-
-    if ! git diff --quiet || ! git diff --cached --quiet; then
-        warn "Uncommitted changes detected. Staging and committing version bump..."
-        git add Cargo.toml Cargo.lock CHANGELOG.md \
-                translations/CHANGELOG.pt-BR.md translations/CHANGELOG.es.md \
-                build-native-macos.sh 2>/dev/null || true
-        git commit -m "chore: bump version to ${VERSION}
-
-Co-Authored-By: release.sh <noreply@kget.local>" || warn "Nothing new to commit"
-    fi
-
-    if git rev-parse "$TAG" &>/dev/null; then
-        warn "Tag $TAG already exists — skipping tag creation"
-    else
-        git tag -a "$TAG" -m "KGet ${VERSION}"
-        success "Created tag $TAG"
-    fi
-
-    git push origin main --tags
-    success "Pushed commits and tag to origin"
-    echo ""
-fi
-
-# ============================================================================
-# Build helpers
-# ============================================================================
-
-mkdir -p "$RELEASE_DIR"
-
-_build_cross() {
-    local target="$1" features="$2" label="$3"
-    echo -n "  Building $label... "
-    local cmd="cross build --release --target $target"
-    [ -n "$features" ] && cmd="$cmd --features $features"
-    if $cmd >/tmp/kget_build.log 2>&1; then
-        echo -e "${GREEN}OK${NC}"; return 0
-    else
-        echo -e "${RED}FAILED${NC}"
-        grep -E "^error|cannot find|undefined reference" /tmp/kget_build.log | head -5 | sed 's/^/    /'
-        return 1
-    fi
-}
-
-_build_zig() {
-    local target="$1" features="$2" label="$3"
-    echo -n "  Building $label... "
-    local cmd="cargo zigbuild --release --target $target"
-    [ -n "$features" ] && cmd="$cmd --features $features"
-    if $cmd >/tmp/kget_build.log 2>&1; then
-        echo -e "${GREEN}OK${NC}"; return 0
-    else
-        echo -e "${RED}FAILED${NC}"
-        tail -5 /tmp/kget_build.log | sed 's/^/    /'
-        return 1
-    fi
-}
-
-_copy() {
-    local target="$1" dest_name="$2"
-    local ext=""; [[ "$target" == *windows* ]] && ext=".exe"
-    local src="target/$target/release/kget${ext}"
-    local dst="$RELEASE_DIR/${dest_name}${ext}"
-    [ -f "$src" ] && cp "$src" "$dst" && chmod +x "$dst" 2>/dev/null || true
-    [ -f "$dst" ] && success "  → $dst" || warn "  binary not found: $src"
-}
-
-# ============================================================================
-# BUILD PHASE
-# ============================================================================
-
-if $DO_BUILD; then
-    sep
-    info "Building macOS (native app + DMG)..."
-    sep
-
-    if command -v swift &>/dev/null; then
-        if $DRY_RUN; then
-            warn "DRY RUN: would run build-native-macos.sh"
-        else
-            bash build-native-macos.sh
-            success "macOS DMG created"
-        fi
-    else
-        warn "swift not found — skipping macOS DMG build"
-    fi
-    echo ""
-
-    if $USE_CROSS || $USE_ZIGBUILD; then
-        sep
-        info "Adding Rust cross-compilation targets..."
-        sep
-        for t in x86_64-unknown-linux-gnu x86_64-unknown-linux-musl \
-                  x86_64-pc-windows-gnu aarch64-unknown-linux-gnu; do
-            rustup target add "$t" 2>/dev/null || true
-        done
-        success "Targets ready"
-        echo ""
-
-        # ---- Linux x86_64 (glibc, CLI) ----
-        sep
-        info "Building Linux x86_64 (glibc, CLI)..."
-        sep
-        if $USE_CROSS; then
-            _build_cross "x86_64-unknown-linux-gnu" "" "Linux x64 CLI" \
-                && _copy "x86_64-unknown-linux-gnu" "kget-${VERSION}-linux-x64"
-
-            echo -n "  Attempting Linux x64 GUI build... "
-            if cross build --release --target x86_64-unknown-linux-gnu \
-                           --features gui >/tmp/kget_gui.log 2>&1; then
-                echo -e "${GREEN}OK${NC}"
-                _copy "x86_64-unknown-linux-gnu" "kget-${VERSION}-linux-x64-gui"
-            else
-                echo -e "${YELLOW}SKIPPED${NC} (X11/Wayland libs not available in cross image)"
-            fi
-        else
-            _build_zig "x86_64-unknown-linux-gnu" "" "Linux x64 CLI" \
-                && _copy "x86_64-unknown-linux-gnu" "kget-${VERSION}-linux-x64"
-        fi
-        echo ""
-
-        # ---- Linux x86_64 musl (static) ----
-        sep
-        info "Building Linux x86_64 musl (static)..."
-        sep
-        if $USE_CROSS; then
-            _build_cross "x86_64-unknown-linux-musl" "" "Linux x64 static" \
-                && _copy "x86_64-unknown-linux-musl" "kget-${VERSION}-linux-x64-static"
-        else
-            _build_zig "x86_64-unknown-linux-musl" "" "Linux x64 static" \
-                && _copy "x86_64-unknown-linux-musl" "kget-${VERSION}-linux-x64-static"
-        fi
-        echo ""
-
-        # ---- Linux ARM64 ----
-        sep
-        info "Building Linux ARM64..."
-        sep
-        if $USE_CROSS; then
-            _build_cross "aarch64-unknown-linux-gnu" "" "Linux ARM64" \
-                && _copy "aarch64-unknown-linux-gnu" "kget-${VERSION}-linux-arm64"
-        else
-            _build_zig "aarch64-unknown-linux-gnu.2.17" "" "Linux ARM64" \
-                && _copy "aarch64-unknown-linux-gnu" "kget-${VERSION}-linux-arm64"
-        fi
-        echo ""
-
-        # ---- Windows x86_64 ----
-        sep
-        info "Building Windows x86_64..."
-        sep
-        if $USE_CROSS; then
-            _build_cross "x86_64-pc-windows-gnu" "" "Windows x64" \
-                && _copy "x86_64-pc-windows-gnu" "kget-${VERSION}-windows-x64"
-        else
-            _build_zig "x86_64-pc-windows-gnu" "" "Windows x64" \
-                && _copy "x86_64-pc-windows-gnu" "kget-${VERSION}-windows-x64"
-        fi
-        echo ""
-    fi
-
-    # ---- macOS native binary (Rust CLI, no Swift) ----
-    sep
-    info "Building macOS CLI binary (Rust)..."
-    sep
-    if $DRY_RUN; then
-        warn "DRY RUN: would run cargo build --release"
-    else
-        cargo build --release
-        cp "target/release/kget" "$RELEASE_DIR/kget-${VERSION}-macos-arm64" 2>/dev/null || true
-        chmod +x "$RELEASE_DIR/kget-${VERSION}-macos-arm64" 2>/dev/null || true
-        success "  → $RELEASE_DIR/kget-${VERSION}-macos-arm64"
-    fi
-    echo ""
-
-    # ---- SHA256 checksums ----
-    sep
-    info "Generating SHA256 checksums..."
-    sep
-    SUMS_FILE="$RELEASE_DIR/SHA256SUMS-${VERSION}.txt"
-
-    if $DRY_RUN; then
-        warn "DRY RUN: would write $SUMS_FILE"
-    else
-        rm -f "$SUMS_FILE"
-        for f in "$RELEASE_DIR"/kget-"${VERSION}"-* \
-                 "$RELEASE_DIR"/KGet-"${VERSION}"-*; do
-            [ -f "$f" ] && shasum -a 256 "$f" | tee -a "$SUMS_FILE" || true
-        done
-        success "Checksums → $SUMS_FILE"
-    fi
-    echo ""
-fi
-
-# ============================================================================
-# RELEASE NOTES
-# ============================================================================
-
 NOTES_FILE="$RELEASE_DIR/RELEASE_NOTES-${VERSION}.md"
+SUMS_FILE="$RELEASE_DIR/SHA256SUMS-${VERSION}.txt"
 
-if ! $DRY_RUN; then
-    # Extract the section for this version from CHANGELOG.md
-    awk "/^## \[${VERSION}\]/,/^## \[/" CHANGELOG.md \
-        | head -n -1 \
-        | sed "1s/.*/# KGet ${VERSION}/" > "$NOTES_FILE"
+MAC_DMG="$RELEASE_DIR/KGet-${VERSION}-macOS-Native.dmg"
+MAC_CLI="$RELEASE_DIR/kget-${VERSION}-macos-arm64"
+LINUX_X64="$RELEASE_DIR/kget-${VERSION}-linux-x64"
+LINUX_STATIC="$RELEASE_DIR/kget-${VERSION}-linux-x64-static"
+LINUX_ARM64="$RELEASE_DIR/kget-${VERSION}-linux-arm64"
+WINDOWS_X64="$RELEASE_DIR/kget-${VERSION}-windows-x64.exe"
 
-    # Append downloads and crates.io section
-    cat >> "$NOTES_FILE" <<EOF
-
-## Downloads
-
-$(for f in "$RELEASE_DIR"/kget-"${VERSION}"-* "$RELEASE_DIR"/KGet-"${VERSION}"-*; do
-    [ -f "$f" ] && echo "- \`$(basename "$f")\`" || true
-done)
-- \`SHA256SUMS-${VERSION}.txt\`: checksums for all release assets.
-
-## Rust Library
-
-Install from crates.io:
-
-\`\`\`bash
-cargo add Kget@${VERSION}
-\`\`\`
-
-Or install the CLI:
-
-\`\`\`bash
-cargo install Kget
-\`\`\`
-
-Use \`--features gui\` for the Rust GUI build and \`--features torrent-native\` for native torrent support.
-
-## Checksums
-
-See \`SHA256SUMS-${VERSION}.txt\` attached to this release.
-EOF
-    success "Release notes → $NOTES_FILE"
+USE_CROSS=false
+USE_ZIGBUILD=false
+STALE_VERSION_REGEX="${KGET_STALE_VERSION_REGEX:-}"
+if [ -z "$STALE_VERSION_REGEX" ] && [ "$VERSION" = "1.6.3" ]; then
+    STALE_VERSION_REGEX="v1\\.6\\.2|Version 1\\.6\\.2|KGet v1\\.6\\.2|1\\.6\\.1"
 fi
 
-# ============================================================================
-# GITHUB RELEASE
-# ============================================================================
-
-if $DO_GITHUB; then
+print_plan() {
+    echo ""
+    echo -e "${BOLD}KGet Release ${VERSION}${NC}"
     sep
-    info "Creating GitHub release ${TAG}..."
+    echo "  Tag         : $TAG"
+    echo "  Branch      : $BRANCH"
+    echo "  Remote      : $REMOTE"
+    echo "  Build       : $DO_BUILD"
+    echo "  Cross       : $DO_CROSS"
+    echo "  Tests       : $DO_TESTS"
+    echo "  crates.io   : $DO_CRATES"
+    echo "  GitHub      : $DO_GITHUB"
+    echo "  Reuse assets: $REUSE_ASSETS"
+    echo "  Untracked   : $INCLUDE_UNTRACKED"
+    echo "  Dry run     : $DRY_RUN"
     sep
+    echo ""
+}
 
-    # Collect assets
-    ASSETS=()
+require_cmd() {
+    command -v "$1" >/dev/null 2>&1 || die "$1 not found"
+}
+
+detect_cross_tool() {
+    if ! $DO_BUILD || ! $DO_CROSS; then
+        return
+    fi
+
+    if command -v cross >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+        USE_CROSS=true
+        success "Cross tool: cross + Docker"
+    elif command -v cargo-zigbuild >/dev/null 2>&1 && command -v zig >/dev/null 2>&1; then
+        USE_ZIGBUILD=true
+        success "Cross tool: cargo-zigbuild + zig"
+    else
+        die "Need cross+Docker or cargo-zigbuild+zig for Linux/Windows artifacts. Use --skip-cross only for non-full releases."
+    fi
+}
+
+preflight() {
+    info "Running preflight checks..."
+    require_cmd git
+    require_cmd cargo
+    require_cmd rustup
+
+    [ -f Cargo.toml ] || die "Run this script from the repository root"
+    git rev-parse --is-inside-work-tree >/dev/null || die "Not inside a git repository"
+
+    CURRENT_BRANCH=$(git branch --show-current)
+    [ "$CURRENT_BRANCH" = "$BRANCH" ] || die "Current branch is '$CURRENT_BRANCH', expected '$BRANCH'"
+
+    if $DO_GITHUB; then
+        require_cmd gh
+        if ! $DRY_RUN; then
+            gh auth status >/dev/null || die "gh is not authenticated"
+        fi
+    fi
+
+    if $DO_CRATES && ! $DRY_RUN; then
+        cargo login --help >/dev/null || die "cargo login unavailable"
+    fi
+
+    if $DO_BUILD; then
+        require_cmd shasum
+        require_cmd tar
+        require_cmd zip
+        if [[ "$(uname -s)" == "Darwin" ]]; then
+            require_cmd swift
+            require_cmd xcrun
+            require_cmd codesign
+            require_cmd hdiutil
+        else
+            die "macOS app build requires running the full release on macOS"
+        fi
+    fi
+
+    detect_cross_tool
+
+    if ! grep -q "^## \\[${VERSION}\\]" CHANGELOG.md; then
+        die "CHANGELOG.md has no section for ${VERSION}"
+    fi
+
+    if [ -n "$STALE_VERSION_REGEX" ] && rg -n "$STALE_VERSION_REGEX" \
+        README.md LIB.md Cargo.toml macos-app/KGet macos-app/ShareExtension \
+        translations/README.pt-BR.md translations/README.es.md \
+        translations/LIB.pt-br.md translations/LIB.es.md >/tmp/kget_stale_versions.log 2>&1; then
+        cat /tmp/kget_stale_versions.log
+        die "Found stale visible version references"
+    fi
+
+    if $DO_GITHUB && ! $DRY_RUN; then
+        git fetch "$REMOTE" "$BRANCH" --tags
+        git push --dry-run "$REMOTE" "$BRANCH" >/dev/null || die "Dry-run push failed"
+    fi
+
+    success "Preflight OK"
+}
+
+confirm_release() {
+    if $DRY_RUN || $YES || { ! $DO_CRATES && ! $DO_GITHUB; }; then
+        return
+    fi
+
+    echo -n "Proceed with publishing KGet ${VERSION}? Type '${VERSION}' to continue: "
+    read -r answer
+    [ "$answer" = "$VERSION" ] || die "Aborted"
+}
+
+commit_release_state() {
+    if ! $DO_GITHUB; then
+        warn "Skipping release commit"
+        return
+    fi
+
+    info "Committing release state..."
+    local untracked
+    untracked=$(git ls-files --others --exclude-standard)
+
+    if $DRY_RUN; then
+        git status --short
+        if [ -n "$untracked" ] && [ "$INCLUDE_UNTRACKED" != "true" ]; then
+            warn "DRY RUN: untracked files would block release commit unless ignored or KGET_RELEASE_INCLUDE_UNTRACKED=true is set"
+        fi
+        warn "DRY RUN: would stage tracked changes and commit if needed"
+        return
+    fi
+
+    if [ -n "$untracked" ] && [ "$INCLUDE_UNTRACKED" != "true" ]; then
+        echo "$untracked"
+        die "Untracked files present. Ignore them, commit them separately, or set KGET_RELEASE_INCLUDE_UNTRACKED=true."
+    fi
+
+    if [ "$INCLUDE_UNTRACKED" = "true" ]; then
+        git add -A
+    else
+        git add -u
+    fi
+    if git diff --cached --quiet; then
+        success "No changes to commit"
+    else
+        git commit -m "chore: release ${VERSION}"
+        success "Committed release ${VERSION}"
+    fi
+}
+
+prepare_tag() {
+    if ! $DO_GITHUB; then
+        warn "Skipping git tag"
+        return
+    fi
+
+    info "Preparing tag ${TAG}..."
+    local head_commit
+    head_commit=$(git rev-parse HEAD)
+
+    if git rev-parse "$TAG" >/dev/null 2>&1; then
+        local tag_commit
+        tag_commit=$(git rev-list -n 1 "$TAG")
+        if [ "$tag_commit" = "$head_commit" ]; then
+            warn "Tag ${TAG} already exists at HEAD"
+        elif $FORCE_TAG; then
+            run git tag -fa "$TAG" -m "KGet ${VERSION}"
+        else
+            die "Tag ${TAG} exists at ${tag_commit}, not HEAD ${head_commit}. Use --force-tag."
+        fi
+    else
+        run git tag -a "$TAG" -m "KGet ${VERSION}"
+    fi
+}
+
+verify() {
+    if ! $DO_TESTS; then
+        warn "Skipping tests/checks"
+        return
+    fi
+
+    info "Running focused verification..."
+    export CARGO_INCREMENTAL=0
+    cargo check --locked
+    cargo check --locked --features gui
+    cargo test --locked --test unit_tests --test cli_tests --test torrent_tests
+    cargo test --locked --test mock_server_tests
+    cargo publish --dry-run
+    success "Verification OK"
+}
+
+need_asset() {
+    local path="$1"
+    ! $REUSE_ASSETS || [ ! -s "$path" ]
+}
+
+build_macos() {
+    info "Building macOS release artifacts..."
+    mkdir -p "$RELEASE_DIR"
+
+    if $DRY_RUN; then
+        warn "DRY RUN: would build $MAC_CLI and $MAC_DMG"
+        return
+    fi
+
+    if need_asset "$MAC_DMG" || need_asset "$MAC_CLI"; then
+        cargo build --release --features torrent-native
+        cp target/release/kget "$MAC_CLI"
+        chmod +x "$MAC_CLI"
+        KGET_SKIP_RUST_BUILD=true bash build-native-macos.sh
+    else
+        warn "Reusing existing macOS artifacts"
+    fi
+
+    [ -s "$MAC_DMG" ] || die "Missing macOS DMG: $MAC_DMG"
+    [ -s "$MAC_CLI" ] || die "Missing macOS CLI: $MAC_CLI"
+    success "macOS artifacts ready"
+}
+
+build_target() {
+    local target="$1"
+    local output="$2"
+    local label="$3"
+    local ext=""
+    [[ "$target" == *windows* ]] && ext=".exe"
+
+    if $REUSE_ASSETS && [ -s "$output" ]; then
+        warn "Reusing $output"
+        return
+    fi
+
+    if $DRY_RUN; then
+        warn "DRY RUN: would build ${label} into $output"
+        return
+    fi
+
+    info "Building ${label}..."
+    if $USE_CROSS; then
+        CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}" cross build --release --target "$target"
+    else
+        CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}" cargo zigbuild --release --target "$target"
+    fi
+
+    local src="target/${target}/release/kget${ext}"
+    [ -s "$src" ] || die "Build finished but binary missing: $src"
+    cp "$src" "$output"
+    chmod +x "$output" 2>/dev/null || true
+    success "$output"
+}
+
+build_cross_artifacts() {
+    if ! $DO_CROSS; then
+        warn "Skipping Linux/Windows builds"
+        return
+    fi
+
+    info "Installing Rust targets..."
+    if $DRY_RUN; then
+        warn "DRY RUN: would install Rust cross targets and build Linux/Windows binaries"
+        return
+    fi
+
+    rustup target add x86_64-unknown-linux-gnu x86_64-unknown-linux-musl \
+        aarch64-unknown-linux-gnu x86_64-pc-windows-gnu >/dev/null
+
+    build_target "x86_64-unknown-linux-gnu" "$LINUX_X64" "Linux x64"
+    build_target "x86_64-unknown-linux-musl" "$LINUX_STATIC" "Linux x64 static"
+    build_target "aarch64-unknown-linux-gnu" "$LINUX_ARM64" "Linux ARM64"
+    build_target "x86_64-pc-windows-gnu" "$WINDOWS_X64" "Windows x64"
+}
+
+package_assets() {
+    info "Packaging assets..."
+
+    if $DRY_RUN; then
+        warn "DRY RUN: would package archives and write $SUMS_FILE"
+        return
+    fi
+
+    local mac_cli_archive="$RELEASE_DIR/kget-${VERSION}-macos-arm64.tar.gz"
+    local linux_x64_archive="$RELEASE_DIR/kget-${VERSION}-linux-x64.tar.gz"
+    local linux_static_archive="$RELEASE_DIR/kget-${VERSION}-linux-x64-static.tar.gz"
+    local linux_arm64_archive="$RELEASE_DIR/kget-${VERSION}-linux-arm64.tar.gz"
+    local windows_archive="$RELEASE_DIR/kget-${VERSION}-windows-x64.zip"
+
+    tar -czf "$mac_cli_archive" -C "$RELEASE_DIR" "$(basename "$MAC_CLI")"
+    if $DO_CROSS; then
+        tar -czf "$linux_x64_archive" -C "$RELEASE_DIR" "$(basename "$LINUX_X64")"
+        tar -czf "$linux_static_archive" -C "$RELEASE_DIR" "$(basename "$LINUX_STATIC")"
+        tar -czf "$linux_arm64_archive" -C "$RELEASE_DIR" "$(basename "$LINUX_ARM64")"
+        (cd "$RELEASE_DIR" && zip -q "$(basename "$windows_archive")" "$(basename "$WINDOWS_X64")")
+    fi
+
+    rm -f "$SUMS_FILE"
     for f in "$RELEASE_DIR"/kget-"${VERSION}"-* \
-              "$RELEASE_DIR"/KGet-"${VERSION}"-* \
-              "$RELEASE_DIR"/SHA256SUMS-"${VERSION}".txt; do
-        [ -f "$f" ] && ASSETS+=("$f") || true
+             "$RELEASE_DIR"/KGet-"${VERSION}"-*; do
+        [ -f "$f" ] && shasum -a 256 "$f" >> "$SUMS_FILE"
     done
 
-    if [ ${#ASSETS[@]} -eq 0 ]; then
-        warn "No release assets found in $RELEASE_DIR — only creating the release note"
+    [ -s "$SUMS_FILE" ] || die "No checksums generated"
+    success "Checksums: $SUMS_FILE"
+}
+
+build_assets() {
+    if ! $DO_BUILD; then
+        warn "Skipping build phase"
+        return
     fi
 
+    mkdir -p "$RELEASE_DIR"
+    build_macos
+    build_cross_artifacts
+    package_assets
+}
+
+make_release_notes() {
+    info "Generating release notes..."
+    mkdir -p "$RELEASE_DIR"
+
     if $DRY_RUN; then
-        warn "DRY RUN: would create GitHub release $TAG with ${#ASSETS[@]} asset(s):"
-        for a in "${ASSETS[@]}"; do echo "    $a"; done
-    else
-        # Delete existing release if present (re-release)
-        gh release delete "$TAG" --yes 2>/dev/null || true
-
-        gh release create "$TAG" \
-            --title "KGet ${VERSION}" \
-            --notes-file "$NOTES_FILE" \
-            "${ASSETS[@]}"
-
-        success "GitHub release created: https://github.com/davimf721/KGet/releases/tag/${TAG}"
+        warn "DRY RUN: would generate $NOTES_FILE"
+        return
     fi
-    echo ""
-fi
 
-# ============================================================================
-# CRATES.IO PUBLISH
-# ============================================================================
+    awk -v version="$VERSION" '
+        /^## \[/ {
+            if ($0 ~ "^## \\[" version "\\]") {
+                in_section = 1
+            } else if (in_section) {
+                exit
+            }
+        }
+        in_section { print }
+    ' CHANGELOG.md | sed "1s/.*/# KGet ${VERSION}/" > "$NOTES_FILE"
 
-if $DO_CRATES; then
-    sep
-    info "Publishing to crates.io..."
-    sep
+    [ -s "$NOTES_FILE" ] || die "Could not extract notes for ${VERSION}"
 
+    {
+        echo ""
+        echo "## Downloads"
+        for f in "$RELEASE_DIR"/KGet-"${VERSION}"-* "$RELEASE_DIR"/kget-"${VERSION}"-*; do
+            [ -f "$f" ] && echo "- \`$(basename "$f")\`"
+        done
+        echo "- \`SHA256SUMS-${VERSION}.txt\`: checksums for all release assets."
+        echo ""
+        echo "## Rust"
+        echo ""
+        echo '```bash'
+        echo "cargo install Kget --version ${VERSION}"
+        echo '```'
+    } >> "$NOTES_FILE"
+
+    success "$NOTES_FILE"
+}
+
+publish_crates() {
+    if ! $DO_CRATES; then
+        warn "Skipping crates.io publish"
+        return
+    fi
+
+    info "Publishing Kget ${VERSION} to crates.io..."
     if $DRY_RUN; then
-        warn "DRY RUN: would run cargo publish"
-        cargo publish --dry-run 2>&1 | tail -5
+        cargo publish --dry-run
     else
         cargo publish
-        success "Published Kget ${VERSION} to crates.io"
+    fi
+    success "crates.io publish complete"
+}
+
+push_git() {
+    if ! $DO_GITHUB; then
+        warn "Skipping git push"
+        return
+    fi
+
+    info "Pushing commit and tag..."
+    run git push "$REMOTE" "$BRANCH"
+    if $FORCE_TAG; then
+        run git push "$REMOTE" "refs/tags/${TAG}" --force
+    else
+        run git push "$REMOTE" "refs/tags/${TAG}"
+    fi
+    success "Git push complete"
+}
+
+create_github_release() {
+    if ! $DO_GITHUB; then
+        warn "Skipping GitHub release"
+        return
+    fi
+
+    info "Creating GitHub release ${TAG}..."
+
+    if $DRY_RUN; then
+        warn "DRY RUN: would create release $TAG and upload release assets"
+        return
+    fi
+
+    local assets=()
+    for f in "$RELEASE_DIR"/KGet-"${VERSION}"-* \
+             "$RELEASE_DIR"/kget-"${VERSION}"-* \
+             "$SUMS_FILE"; do
+        [ -f "$f" ] && assets+=("$f")
+    done
+
+    [ ${#assets[@]} -gt 0 ] || die "No release assets found"
+
+    if gh release view "$TAG" >/dev/null 2>&1; then
+        if $FORCE_TAG; then
+            warn "GitHub release exists; deleting and recreating ${TAG}"
+            gh release delete "$TAG" --yes
+        else
+            die "GitHub release ${TAG} already exists. Use --force-tag to replace it."
+        fi
+    fi
+
+    gh release create "$TAG" \
+        --title "KGet ${VERSION}" \
+        --notes-file "$NOTES_FILE" \
+        "${assets[@]}"
+
+    success "GitHub release: https://github.com/davimf721/KGet/releases/tag/${TAG}"
+}
+
+final_push_verify() {
+    if ! $DO_GITHUB || $DRY_RUN; then
+        return
+    fi
+
+    info "Final remote verification..."
+    git fetch "$REMOTE" "$BRANCH" --tags >/dev/null
+    local local_head remote_head
+    local_head=$(git rev-parse HEAD)
+    remote_head=$(git rev-parse "${REMOTE}/${BRANCH}")
+    [ "$local_head" = "$remote_head" ] || die "Remote ${REMOTE}/${BRANCH} is not at local HEAD"
+    git ls-remote --tags "$REMOTE" "$TAG" | grep -q "$TAG" || die "Remote tag ${TAG} missing"
+    success "Remote branch and tag verified"
+}
+
+print_summary() {
+    sep
+    echo -e "${GREEN}${BOLD}KGet ${VERSION} release flow complete${NC}"
+    sep
+    echo "Artifacts:"
+    if [ -d "$RELEASE_DIR" ]; then
+        local found=false
+        while IFS= read -r -d '' artifact; do
+            found=true
+            ls -lh "$artifact" | awk '{print "  " $9 " (" $5 ")"}'
+        done < <(find "$RELEASE_DIR" -maxdepth 1 -type f -name "*${VERSION}*" -print0)
+        $found || echo "  none yet"
+    else
+        echo "  none yet"
     fi
     echo ""
-fi
+    if $DO_GITHUB && ! $DRY_RUN; then
+        echo "GitHub : https://github.com/davimf721/KGet/releases/tag/${TAG}"
+    fi
+    if $DO_CRATES && ! $DRY_RUN; then
+        echo "crates : https://crates.io/crates/Kget/${VERSION}"
+    fi
+}
 
-# ============================================================================
-# Summary
-# ============================================================================
-
-sep
-echo -e "${GREEN}${BOLD}Release ${VERSION} complete!${NC}"
-sep
-echo ""
-echo "Artifacts in '$RELEASE_DIR/':"
-ls "$RELEASE_DIR"/ 2>/dev/null | grep "${VERSION}" | sed 's/^/  /'
-echo ""
-$DO_GITHUB && ! $DRY_RUN && \
-    echo -e "GitHub : ${BOLD}https://github.com/davimf721/KGet/releases/tag/${TAG}${NC}"
-$DO_CRATES && ! $DRY_RUN && \
-    echo -e "crates : ${BOLD}https://crates.io/crates/Kget/${VERSION}${NC}"
-echo ""
+print_plan
+preflight
+confirm_release
+commit_release_state
+prepare_tag
+verify
+build_assets
+make_release_notes
+push_git
+publish_crates
+create_github_release
+final_push_verify
+print_summary

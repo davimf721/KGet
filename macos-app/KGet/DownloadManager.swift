@@ -317,6 +317,9 @@ class DownloadManager: ObservableObject {
     @Published var verifyISOIntegrity = true
     @Published var selectedDownloadId: UUID?
     @Published var lastStartError: String?
+    @Published var showNotifications = true
+    @Published var useAdvancedByDefault = false
+    @Published var speedLimitKBPerSecond = ""
     
     private var processes: [UUID: Process] = [:]
     private var progressTimers: [UUID: Timer] = [:]
@@ -330,7 +333,7 @@ class DownloadManager: ObservableObject {
     // MARK: - Public API
     
     @discardableResult
-    func startDownload(url: String, outputPath: String? = nil, advanced: Bool = false, verifyISO: Bool = false, expectedSHA256: String? = nil) -> Bool {
+    func startDownload(url: String, outputPath: String? = nil, advanced: Bool? = nil, verifyISO: Bool = false, expectedSHA256: String? = nil) -> Bool {
         let normalizedURL = DownloadValidator.normalize(url)
         if let validationError = DownloadValidator.validate(normalizedURL) {
             lastStartError = validationError
@@ -354,7 +357,7 @@ class DownloadManager: ObservableObject {
         let config = DownloadConfiguration(
             url: normalizedURL,
             outputPath: outputPath ?? defaultDownloadPath.path,
-            advanced: advanced,
+            advanced: advanced ?? useAdvancedByDefault,
             verifyISO: verifyISO,
             verifyISOIntegrity: verifyISOIntegrity,
             expectedSHA256: expectedSHA256?.isEmpty == false ? expectedSHA256 : nil
@@ -418,6 +421,12 @@ class DownloadManager: ObservableObject {
         NSPasteboard.general.setString(download.url, forType: .string)
     }
 
+    func copySHA256(_ download: Download) {
+        guard let checksum = download.sha256Checksum else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(checksum, forType: .string)
+    }
+
     func openFile(_ download: Download) {
         guard FileManager.default.fileExists(atPath: download.fullFilePath) else {
             openFolder(download)
@@ -439,6 +448,9 @@ class DownloadManager: ObservableObject {
         UserDefaults.standard.set(defaultDownloadPath.path, forKey: "defaultDownloadPath")
         UserDefaults.standard.set(isMenuBarOnly, forKey: "isMenuBarOnly")
         UserDefaults.standard.set(verifyISOIntegrity, forKey: "verifyISOIntegrity")
+        UserDefaults.standard.set(showNotifications, forKey: "showNotifications")
+        UserDefaults.standard.set(useAdvancedByDefault, forKey: "useAdvancedByDefault")
+        UserDefaults.standard.set(speedLimitKBPerSecond, forKey: "speedLimitKBPerSecond")
     }
     
     // MARK: - Private Helpers
@@ -491,7 +503,14 @@ class DownloadManager: ObservableObject {
             defaultDownloadPath = URL(fileURLWithPath: path)
         }
         isMenuBarOnly = UserDefaults.standard.bool(forKey: "isMenuBarOnly")
-        verifyISOIntegrity = UserDefaults.standard.bool(forKey: "verifyISOIntegrity")
+        if UserDefaults.standard.object(forKey: "verifyISOIntegrity") != nil {
+            verifyISOIntegrity = UserDefaults.standard.bool(forKey: "verifyISOIntegrity")
+        }
+        if UserDefaults.standard.object(forKey: "showNotifications") != nil {
+            showNotifications = UserDefaults.standard.bool(forKey: "showNotifications")
+        }
+        useAdvancedByDefault = UserDefaults.standard.bool(forKey: "useAdvancedByDefault")
+        speedLimitKBPerSecond = UserDefaults.standard.string(forKey: "speedLimitKBPerSecond") ?? ""
     }
     
     func verifyISOChecksum(_ download: Download) {
@@ -558,10 +577,19 @@ class DownloadManager: ObservableObject {
     private func buildArguments(for download: Download, advanced: Bool) -> [String] {
         var args = [download.url, "-O", download.fullFilePath]
         if advanced { args.append("-a") }
+        if let speedLimit = speedLimitBytesPerSecond() {
+            args.append(contentsOf: ["-l", "\(speedLimit)"])
+        }
         if let expectedSHA256 = download.expectedSHA256 {
             args.append(contentsOf: ["--sha256", expectedSHA256])
         }
         return args
+    }
+
+    private func speedLimitBytesPerSecond() -> Int? {
+        let trimmed = speedLimitKBPerSecond.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let kb = Int(trimmed), kb > 0 else { return nil }
+        return kb * 1024
     }
     
     private func buildEnvironment() -> [String: String] {
@@ -799,6 +827,7 @@ class DownloadManager: ObservableObject {
     // MARK: - Notifications
     
     private func sendNotification(title: String, body: String) {
+        guard showNotifications else { return }
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body

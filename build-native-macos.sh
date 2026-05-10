@@ -15,7 +15,7 @@
 #   - Native notifications
 #
 
-set -e
+set -euo pipefail
 
 # Configuration
 APP_NAME="KGet"
@@ -25,6 +25,8 @@ DMG_NAME="KGet-${VERSION}-macOS-Native"
 SWIFT_PROJECT_DIR="macos-app/KGet"
 BUILD_DIR="build"
 OUTPUT_DIR="release"
+SKIP_RUST_BUILD="${KGET_SKIP_RUST_BUILD:-false}"
+SWIFT_MODULE_CACHE="${KGET_SWIFT_MODULE_CACHE:-/private/tmp/kget-swift-module-cache}"
 
 # Colors
 RED='\033[0;31m'
@@ -83,7 +85,11 @@ print_success "All instances closed!"
 # ============================================================================
 print_step "Building Rust backend (release mode)..."
 
-cargo build --release --features torrent-native
+if [ "$SKIP_RUST_BUILD" = "true" ]; then
+    print_warning "Skipping Rust backend build because KGET_SKIP_RUST_BUILD=true"
+else
+    cargo build --release --features torrent-native
+fi
 
 if [ ! -f "target/release/kget" ]; then
     print_error "Rust build failed!"
@@ -101,6 +107,7 @@ mkdir -p "$BUILD_DIR"
 
 # Compile Swift files
 swiftc \
+    -module-cache-path "$SWIFT_MODULE_CACHE" \
     -O \
     -target arm64-apple-macos13.0 \
     -sdk $(xcrun --show-sdk-path) \

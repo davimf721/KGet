@@ -18,3 +18,13 @@ Kget.app/
 AppIcon.iconset/
 
 dmg_assets/*.svg
+.codex/*
+!.codex/kget-architecture/
+!.codex/kget-architecture/SKILL.md
+!.codex/kget-cross-platform/
+!.codex/kget-cross-platform/SKILL.md
+!.codex/kget-quality/
+!.codex/kget-quality/SKILL.md
+!.codex/obsidian-project-memory/
+!.codex/obsidian-project-memory/SKILL.md
+.github

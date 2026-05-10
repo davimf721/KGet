@@ -7,10 +7,20 @@
 
 import SwiftUI
 
+private enum DownloadFilter: String, CaseIterable, Identifiable {
+    case all = "All"
+    case active = "Active"
+    case completed = "Completed"
+    case failed = "Failed"
+
+    var id: String { rawValue }
+}
+
 struct ContentView: View {
     @EnvironmentObject var downloadManager: DownloadManager
     @State private var urlInput = ""
     @State private var useAdvancedMode = false
+    @State private var selectedFilter: DownloadFilter = .all
     @State private var showDeleteAlert = false
     @State private var downloadToDelete: Download?
     @State private var deleteFileAlso = false
@@ -23,19 +33,30 @@ struct ContentView: View {
                 urlInput: $urlInput,
                 useAdvancedMode: $useAdvancedMode,
                 urlFieldFocused: $urlFieldFocused,
+                validationError: downloadManager.lastStartError,
                 startDownload: startDownload,
                 pasteAndDownload: pasteAndDownload
             )
             
             Divider()
+
+            if !downloadManager.downloads.isEmpty {
+                filterBar
+                    .padding(.horizontal)
+                    .padding(.vertical, 8)
+
+                Divider()
+            }
             
             // Downloads list
             if downloadManager.downloads.isEmpty {
                 EmptyStateView()
+            } else if filteredDownloads.isEmpty {
+                EmptyFilteredStateView(filter: selectedFilter.rawValue)
             } else {
                 ScrollView {
                     LazyVStack(spacing: 8) {
-                        ForEach(downloadManager.downloads) { download in
+                        ForEach(filteredDownloads) { download in
                             DownloadRowView(
                                 download: download,
                                 isSelected: downloadManager.selectedDownloadId == download.id,
@@ -65,6 +86,9 @@ struct ContentView: View {
         .sheet(isPresented: $downloadManager.showNewDownloadSheet) {
             NewDownloadSheet()
         }
+        .onAppear {
+            useAdvancedMode = downloadManager.useAdvancedByDefault
+        }
         .alert("Delete Download", isPresented: $showDeleteAlert, presenting: downloadToDelete) { download in
             Button("Delete from List Only", role: .cancel) {
                 downloadManager.deleteDownload(download, deleteFile: false)
@@ -91,6 +115,33 @@ struct ContentView: View {
         startDownload()
     }
 
+    private var filteredDownloads: [Download] {
+        switch selectedFilter {
+        case .all:
+            return downloadManager.downloads
+        case .active:
+            return downloadManager.downloads.filter { $0.status == .downloading || $0.status == .verifying || $0.status == .pending }
+        case .completed:
+            return downloadManager.downloads.filter { $0.status == .completed }
+        case .failed:
+            return downloadManager.downloads.filter { $0.status == .failed || $0.status == .cancelled }
+        }
+    }
+
+    private var filterBar: some View {
+        HStack {
+            Picker("Filter", selection: $selectedFilter) {
+                ForEach(DownloadFilter.allCases) { filter in
+                    Text(filter.rawValue).tag(filter)
+                }
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 360)
+
+            Spacer()
+        }
+    }
+
     @ViewBuilder
     private var shortcutButtons: some View {
         Group {
@@ -114,6 +165,7 @@ struct HeaderView: View {
     @Binding var urlInput: String
     @Binding var useAdvancedMode: Bool
     var urlFieldFocused: FocusState<Bool>.Binding
+    let validationError: String?
     let startDownload: () -> Void
     let pasteAndDownload: () -> Void
     
@@ -137,7 +189,7 @@ struct HeaderView: View {
                 
                 Spacer()
                 
-                Text("v1.6.1")
+                Text("v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.6.3")")
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .padding(.horizontal, 8)
@@ -180,11 +232,39 @@ struct HeaderView: View {
             .padding(10)
             .background(Color(NSColor.textBackgroundColor))
             .cornerRadius(8)
+
+            if let validationError {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                    Text(validationError)
+                }
+                .font(.caption)
+                .foregroundColor(.red)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
         .padding()
         .background(Color(NSColor.controlBackgroundColor))
     }
     
+}
+
+struct EmptyFilteredStateView: View {
+    let filter: String
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Spacer()
+            Image(systemName: "line.3.horizontal.decrease.circle")
+                .font(.system(size: 42))
+                .foregroundColor(.secondary)
+            Text("No \(filter.lowercased()) downloads")
+                .font(.headline)
+                .foregroundColor(.secondary)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
 }
 
 // MARK: - Logo View
@@ -581,6 +661,9 @@ struct DownloadRowView: View {
                 Button("Open File") { downloadManager.openFile(download) }
                 Button("Open Folder") { downloadManager.openFolder(download) }
             }
+            if download.sha256Checksum != nil {
+                Button("Copy SHA256") { downloadManager.copySHA256(download) }
+            }
             if download.status == .failed || download.status == .cancelled || download.status == .completed {
                 Button("Restart") { downloadManager.retryDownload(download) }
             }
@@ -639,6 +722,13 @@ struct DownloadRowView: View {
     @ViewBuilder
     private var actionButtons: some View {
         HStack(spacing: 6) {
+            Button(action: { downloadManager.copyURL(download) }) {
+                Image(systemName: "link")
+                    .foregroundColor(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Copy URL")
+
             // Cancel button (during download)
             if download.status == .downloading {
                 Button(action: { downloadManager.cancelDownload(download) }) {
@@ -667,6 +757,15 @@ struct DownloadRowView: View {
                 }
                 .buttonStyle(.plain)
                 .help("Verify SHA256 checksum")
+            }
+
+            if download.sha256Checksum != nil {
+                Button(action: { downloadManager.copySHA256(download) }) {
+                    Image(systemName: "number")
+                        .foregroundColor(.green)
+                }
+                .buttonStyle(.plain)
+                .help("Copy SHA256")
             }
             
             // Reveal in Finder (completed)

@@ -8,6 +8,10 @@ description: Use when improving KGet tests, reliability, download correctness, r
 KGet handles user files and network transfers, so reliability beats flashy
 changes. Focus on observable correctness and recoverability.
 
+Use `obsidian-project-memory` for this work: read the Segundo Cerebro Obsidian
+context before implementing and update the relevant vault notes after important
+quality, release, testing, invariant, or edge-case discoveries.
+
 ## Checklist
 
 - Cover range downloads, fallback without ranges, retry behavior, and cancellation.
@@ -16,6 +20,7 @@ changes. Focus on observable correctness and recoverability.
 - Avoid logging credentials, proxy passwords, cookies, or bearer tokens.
 - Prefer structured errors that frontends can display safely.
 - Keep tests network-isolated unless explicitly marked as live/integration.
+- Update the vault when tests, release checks, reliability invariants, or important failure modes change.
 
 ## Commands
 
@@ -31,4 +36,3 @@ For release confidence:
 cargo test
 cargo check --features gui
 ```
-

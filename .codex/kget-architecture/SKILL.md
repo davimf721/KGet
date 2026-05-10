@@ -9,13 +9,19 @@ KGet is a Rust download manager/library with CLI, egui GUI, and a native SwiftUI
 macOS shell. Treat the Rust crate as the download engine and platform UIs as
 thin clients.
 
+Use `obsidian-project-memory` for this work: read the Segundo Cerebro Obsidian
+context before implementing and update the relevant vault notes after important
+architecture, feature, or convention changes.
+
 ## Workflow
 
-1. Read `docs/ARCHITECTURE.md` first.
-2. Inspect `src/lib.rs`, `src/app.rs`, and `src/main.rs` before refactoring.
-3. Keep core modules independent from GUI crates.
-4. Prefer command/event contracts over frontend-specific callbacks.
-5. Keep refactors incremental and compile-check after each meaningful boundary move.
+1. Read the Obsidian context via `obsidian-project-memory`.
+2. Read `docs/ARCHITECTURE.md`.
+3. Inspect `src/lib.rs`, `src/app.rs`, and `src/main.rs` before refactoring.
+4. Keep core modules independent from GUI crates.
+5. Prefer command/event contracts over frontend-specific callbacks.
+6. Keep refactors incremental and compile-check after each meaningful boundary move.
+7. Update the vault when the implementation changes architecture, contracts, roadmap, or durable conventions.
 
 ## Rules
 
@@ -39,4 +45,3 @@ If GUI behavior changes, also check:
 ```bash
 cargo check --features gui
 ```
-

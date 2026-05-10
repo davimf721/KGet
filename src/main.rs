@@ -3,6 +3,7 @@
 #[cfg(not(feature = "gui"))]
 use clap::CommandFactory;
 use clap::Parser;
+use serde_json::json;
 use std::error::Error;
 
 #[cfg(feature = "gui")]
@@ -116,6 +117,36 @@ struct Args {
     /// Use interactive mode
     #[arg(short = 'i', long = "interactive")]
     interactive: bool,
+
+    /// Emit experimental JSON Lines events for machine consumers
+    #[arg(long = "jsonl")]
+    jsonl: bool,
+}
+
+fn emit_jsonl(value: serde_json::Value) {
+    println!("{}", value);
+}
+
+fn emit_jsonl_status(message: String) {
+    if let Some(percent) = parse_progress_percent(&message) {
+        emit_jsonl(json!({
+            "event": "progress",
+            "progress": percent / 100.0,
+            "percent": percent,
+            "message": message,
+        }));
+    } else {
+        emit_jsonl(json!({
+            "event": "status",
+            "message": message,
+        }));
+    }
+}
+
+fn parse_progress_percent(message: &str) -> Option<f64> {
+    let (_, after_prefix) = message.split_once("PROGRESS:")?;
+    let percent_text = after_prefix.split('%').next()?.trim();
+    percent_text.parse::<f64>().ok()
 }
 
 fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -245,58 +276,97 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     // ==========================================================
 
     let optimizer = Optimizer::from_config(config.optimization.clone());
+    let quiet_mode = args.quiet || args.jsonl;
 
-    if args.ftp {
+    if args.jsonl {
+        emit_jsonl(json!({
+            "event": "started",
+            "url": args.url.clone(),
+            "advanced": args.advanced,
+            "torrent": args.torrent || args.url.starts_with("magnet:?"),
+            "ftp": args.ftp,
+            "sftp": args.sftp,
+        }));
+    }
+
+    let result: Result<(), Box<dyn Error + Send + Sync>> = if args.ftp {
         let url = args.url.clone();
         let output = utils::resolve_output_path(args.output, &url, "ftp_output");
         let downloader =
-            FtpDownloader::new(url.to_owned(), output, args.quiet, config.proxy, optimizer);
-        return downloader.download();
-    }
-
-    if args.sftp {
+            FtpDownloader::new(url.to_owned(), output, quiet_mode, config.proxy, optimizer);
+        downloader.download()
+    } else if args.sftp {
         let url = args.url.clone();
         let output = utils::resolve_output_path(args.output, &url, "sftp_output");
         let downloader =
-            SftpDownloader::new(url.to_owned(), output, args.quiet, config.proxy, optimizer);
-        return downloader.download();
-    }
-
-    if args.torrent || args.url.starts_with("magnet:?") {
+            SftpDownloader::new(url.to_owned(), output, quiet_mode, config.proxy, optimizer);
+        downloader.download()
+    } else if args.torrent || args.url.starts_with("magnet:?") {
         let output_dir = args.output.unwrap_or_else(|| "torrent_output".to_string());
+        let callbacks = if args.jsonl {
+            kget::torrent::TorrentCallbacks {
+                status: Some(std::sync::Arc::new(emit_jsonl_status)),
+                progress: Some(std::sync::Arc::new(|p| {
+                    emit_jsonl(json!({
+                        "event": "progress",
+                        "progress": p,
+                        "percent": p * 100.0,
+                    }));
+                })),
+            }
+        } else {
+            kget::torrent::TorrentCallbacks::default()
+        };
 
         kget::torrent::download_magnet(
             &args.url,
             &output_dir,
-            args.quiet,
+            quiet_mode,
             config.proxy,
             optimizer,
-            kget::torrent::TorrentCallbacks::default(),
-        )?;
+            callbacks,
+        )
     } else if args.advanced {
         let output = utils::resolve_output_path(args.output, &args.url, "advanced_output");
         let mut downloader = AdvancedDownloader::new(
             args.url.clone(),
             output,
-            args.quiet,
+            quiet_mode,
             config.proxy,
             optimizer,
         );
         if let Some(expected_sha256) = args.sha256.clone() {
             downloader.set_expected_sha256(expected_sha256);
         }
-        downloader.download()?;
+        if args.jsonl {
+            downloader.set_progress_callback(|p| {
+                emit_jsonl(json!({
+                    "event": "progress",
+                    "progress": p,
+                    "percent": p * 100.0,
+                }));
+            });
+            downloader.set_status_callback(emit_jsonl_status);
+        }
+        downloader.download()
     } else {
         let options = DownloadOptions {
-            quiet_mode: args.quiet,
+            quiet_mode,
             output_path: args.output.clone(),
             verify_iso: args.sha256.is_some(),
             expected_sha256: args.sha256.clone(),
         };
 
-        cli_download(&args.url, config.proxy, optimizer, options, None)?;
+        let download_result = if args.jsonl {
+            let status_cb = |message: String| emit_jsonl_status(message);
+            cli_download(&args.url, config.proxy, optimizer, options, Some(&status_cb))
+        } else {
+            cli_download(&args.url, config.proxy, optimizer, options, None)
+        };
 
-        if !args.quiet && args.url.to_lowercase().ends_with(".iso") {
+        if let Err(e) = download_result {
+            Err(e)
+        } else if !quiet_mode && args.url.to_lowercase().ends_with(".iso") {
             println!("\nThis is an ISO file. Would you like to verify its integrity? (y/N)");
             let mut input = String::new();
             if std::io::stdin().read_line(&mut input).is_ok() && input.trim().to_lowercase() == "y"
@@ -305,8 +375,29 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                 let path = std::path::Path::new(&filename);
                 verify_iso_integrity(path, None)?;
             }
+            Ok(())
+        } else {
+            Ok(())
         }
-    }
+    };
+
+    match result {
+        Ok(()) => {
+            if args.jsonl {
+                emit_jsonl(json!({ "event": "completed" }));
+            }
+            Ok(())
+        }
+        Err(e) => {
+            if args.jsonl {
+                emit_jsonl(json!({
+                    "event": "error",
+                    "message": e.to_string(),
+                }));
+            }
+            Err(e)
+        }
+    }?;
 
     Ok(())
 }

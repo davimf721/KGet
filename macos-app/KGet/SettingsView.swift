@@ -10,9 +10,7 @@ import SwiftUI
 struct SettingsView: View {
     @EnvironmentObject var downloadManager: DownloadManager
     @State private var downloadPath: String = ""
-    @State private var simultaneousDownloads: Int = 3
     @State private var showNotifications: Bool = true
-    @State private var startMinimized: Bool = false
     @State private var speedLimit: String = ""
     @State private var useAdvancedByDefault: Bool = false
     @State private var verifyISOIntegrity: Bool = true
@@ -31,7 +29,6 @@ struct SettingsView: View {
                         }
                     }
                     
-                    Toggle("Start minimized to menu bar", isOn: $startMinimized)
                     Toggle("Show notifications on completion", isOn: $showNotifications)
                 }
             }
@@ -43,9 +40,6 @@ struct SettingsView: View {
             // Downloads Settings  
             Form {
                 Section("Download Options") {
-                    Stepper("Simultaneous downloads: \(simultaneousDownloads)", 
-                            value: $simultaneousDownloads, in: 1...10)
-                    
                     Toggle("Use advanced mode by default", isOn: $useAdvancedByDefault)
                         .help("Downloads files in parallel chunks for faster speed")
                     
@@ -80,7 +74,7 @@ struct SettingsView: View {
                     .font(.largeTitle)
                     .fontWeight(.bold)
                 
-                Text("Version 1.6.1")
+                Text("Version \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.6.3")")
                     .foregroundColor(.secondary)
                 
                 Text("A modern, lightweight download manager\nbuilt with Rust and SwiftUI")
@@ -120,9 +114,24 @@ struct SettingsView: View {
         .onAppear {
             downloadPath = downloadManager.defaultDownloadPath.path
             verifyISOIntegrity = downloadManager.verifyISOIntegrity
+            showNotifications = downloadManager.showNotifications
+            useAdvancedByDefault = downloadManager.useAdvancedByDefault
+            speedLimit = downloadManager.speedLimitKBPerSecond
         }
         .onChange(of: verifyISOIntegrity) { newValue in
             downloadManager.verifyISOIntegrity = newValue
+            downloadManager.saveSettings()
+        }
+        .onChange(of: showNotifications) { newValue in
+            downloadManager.showNotifications = newValue
+            downloadManager.saveSettings()
+        }
+        .onChange(of: useAdvancedByDefault) { newValue in
+            downloadManager.useAdvancedByDefault = newValue
+            downloadManager.saveSettings()
+        }
+        .onChange(of: speedLimit) { newValue in
+            downloadManager.speedLimitKBPerSecond = newValue
             downloadManager.saveSettings()
         }
     }
@@ -240,6 +249,7 @@ struct NewDownloadSheet: View {
         .onAppear {
             outputPath = downloadManager.defaultDownloadPath.path
             verifyChecksum = downloadManager.verifyISOIntegrity
+            useAdvancedMode = downloadManager.useAdvancedByDefault
             
             // Auto-paste from clipboard if it's a URL
             if let clipboardString = NSPasteboard.general.string(forType: .string),

@@ -351,6 +351,9 @@ impl AdvancedDownloader {
         // Create a progress bar if not quiet or if we have a callback
         let progress = if !self.quiet_mode || self.progress_callback.is_some() {
             let bar = ProgressBar::new(total_size);
+            if let Some(size) = existing_size {
+                bar.set_position(size);
+            }
             if self.quiet_mode {
                 bar.set_draw_target(indicatif::ProgressDrawTarget::hidden());
             } else {
@@ -410,7 +413,13 @@ impl AdvancedDownloader {
         if !self.quiet_mode {
             println!("Starting parallel chunk downloads...");
         }
-        self.download_chunks_parallel(chunks, &file, progress.clone())?;
+        self.download_chunks_parallel(
+            chunks,
+            &file,
+            progress.clone(),
+            total_size,
+            existing_size.unwrap_or(0),
+        )?;
 
         if let Some(ref bar) = progress {
             bar.lock()
@@ -455,13 +464,20 @@ impl AdvancedDownloader {
     }
 
     fn get_file_size_and_range(&self) -> Result<(u64, bool), Box<dyn Error + Send + Sync>> {
-        let response = self.client.head(&self.url).send()?;
+        let head_response = self.client.head(&self.url).send();
+        let Ok(response) = head_response else {
+            return self.get_file_size_with_range_probe();
+        };
+
+        if !response.status().is_success() {
+            return self.get_file_size_with_range_probe();
+        }
+
         let content_length = response
             .headers()
             .get(reqwest::header::CONTENT_LENGTH)
             .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.parse::<u64>().ok())
-            .ok_or("Could not determine file size")?;
+            .and_then(|s| s.parse::<u64>().ok());
 
         let accepts_range = response
             .headers()
@@ -470,7 +486,43 @@ impl AdvancedDownloader {
             .map(|s| s.eq_ignore_ascii_case("bytes"))
             .unwrap_or(false);
 
-        Ok((content_length, accepts_range))
+        if let Some(content_length) = content_length {
+            Ok((content_length, accepts_range))
+        } else {
+            self.get_file_size_with_range_probe()
+        }
+    }
+
+    fn get_file_size_with_range_probe(&self) -> Result<(u64, bool), Box<dyn Error + Send + Sync>> {
+        let response = self
+            .client
+            .get(&self.url)
+            .header(reqwest::header::RANGE, "bytes=0-0")
+            .send()?;
+
+        if response.status() == reqwest::StatusCode::PARTIAL_CONTENT {
+            if let Some(total) = response
+                .headers()
+                .get(reqwest::header::CONTENT_RANGE)
+                .and_then(|v| v.to_str().ok())
+                .and_then(parse_content_range_total)
+            {
+                return Ok((total, true));
+            }
+        }
+
+        if response.status().is_success() {
+            if let Some(total) = response
+                .headers()
+                .get(reqwest::header::CONTENT_LENGTH)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok())
+            {
+                return Ok((total, false));
+            }
+        }
+
+        Err("Could not determine file size".into())
     }
 
     fn calculate_chunks(
@@ -555,6 +607,8 @@ impl AdvancedDownloader {
         chunks: Vec<(u64, u64)>,
         file: &File,
         progress: Option<Arc<Mutex<ProgressBar>>>,
+        total_size: u64,
+        initial_downloaded: u64,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let file = Arc::new(file);
         let client = Arc::new(self.client.clone());
@@ -564,9 +618,11 @@ impl AdvancedDownloader {
         let cancel_token = self.cancel_token.clone();
 
         // Shared progress counter for pipe-friendly output
-        let total_bytes: u64 = chunks.iter().map(|(s, e)| e - s).sum();
-        let downloaded_bytes = Arc::new(AtomicU64::new(0));
+        let downloaded_bytes = Arc::new(AtomicU64::new(initial_downloaded));
         let last_print_time = Arc::new(Mutex::new(Instant::now()));
+        let started_at = Arc::new(Instant::now());
+        let speed_limit = self.optimizer.speed_limit;
+        let quiet_mode = self.quiet_mode;
 
         chunks.par_iter().try_for_each(|&(start, end)| {
             // Check for cancellation before starting chunk
@@ -625,18 +681,24 @@ impl AdvancedDownloader {
                                 // Print progress periodically (every 200ms) for pipe-friendly output
                                 {
                                     let mut last_time = last_print_time.lock().expect("Timer mutex was poisoned");
-                                    if last_time.elapsed() >= Duration::from_millis(200) {
-                                        let percent = (new_downloaded as f64 / total_bytes as f64
+                                    if !quiet_mode && last_time.elapsed() >= Duration::from_millis(200) {
+                                let percent = (new_downloaded as f64 / total_size.max(1) as f64
                                             * 100.0)
                                             .min(100.0);
                                         // PROGRESS: format that Swift can parse
                                         println!(
                                             "PROGRESS: {:.1}% ({}/{})",
-                                            percent, new_downloaded, total_bytes
+                                            percent, new_downloaded, total_size
                                         );
                                         *last_time = Instant::now();
                                     }
                                 }
+
+                                throttle_parallel_download(
+                                    new_downloaded.saturating_sub(initial_downloaded),
+                                    *started_at,
+                                    speed_limit,
+                                );
 
                                 if let Some(ref bar) = progress {
                                     let guard = bar.lock().expect("Progress bar mutex was poisoned");
@@ -731,5 +793,26 @@ impl AdvancedDownloader {
         self.send_status("Integrity check passed - file is not corrupted");
 
         Ok(())
+    }
+}
+
+fn parse_content_range_total(value: &str) -> Option<u64> {
+    let (_, total) = value.rsplit_once('/')?;
+    if total == "*" {
+        return None;
+    }
+    total.parse::<u64>().ok()
+}
+
+fn throttle_parallel_download(downloaded_this_run: u64, started_at: Instant, speed_limit: Option<u64>) {
+    let Some(limit) = speed_limit else { return };
+    if limit == 0 {
+        return;
+    }
+
+    let expected_elapsed = Duration::from_secs_f64(downloaded_this_run as f64 / limit as f64);
+    let actual_elapsed = started_at.elapsed();
+    if expected_elapsed > actual_elapsed {
+        std::thread::sleep(expected_elapsed - actual_elapsed);
     }
 }

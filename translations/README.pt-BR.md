@@ -1,4 +1,4 @@
-# KGet v1.6.2
+# KGet v1.6.3
 
 Um gerenciador de downloads moderno e rápido escrito em Rust. O KGet suporta HTTP/HTTPS, FTP/SFTP e magnet links com cliente torrent nativo.
 
@@ -13,6 +13,7 @@ Um gerenciador de downloads moderno e rápido escrito em Rust. O KGet suporta HT
 - **GUI e CLI:** interface gráfica e uso por terminal.
 - **Multiplataforma:** macOS, Linux e Windows.
 - **Verificação SHA256:** valida ISOs e qualquer arquivo com hash esperado.
+- **Eventos JSONL:** progresso experimental em formato legível por scripts e agentes.
 - **App macOS nativo:** menu de contexto, atalhos, ações Abrir Arquivo/Abrir Pasta e detecção de duplicatas.
 - **Notificações nativas:** conclusão e falhas na GUI Rust em Linux/Windows.
 
@@ -101,6 +102,7 @@ kget> help
 | `-p <proxy>` | Proxy HTTP/SOCKS5 |
 | `-l <bytes>` | Limite de velocidade em bytes/s |
 | `--sha256 <hash>` | Verifica o arquivo final contra um hash SHA256 esperado |
+| `--jsonl` | Emite eventos JSON Lines experimentais para scripts e agentes |
 | `--ftp` | Usar protocolo FTP |
 | `--sftp` | Usar protocolo SFTP (senha ou autenticação por chave) |
 | `--gui` | Abre a interface gráfica |

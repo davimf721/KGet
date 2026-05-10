@@ -153,6 +153,15 @@ fn test_cli_interactive_flag() {
         .stdout(predicate::str::contains("--interactive"));
 }
 
+#[test]
+fn test_cli_jsonl_flag() {
+    kget()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--jsonl"));
+}
+
 // ============================================================================
 // Error Handling Tests
 // ============================================================================

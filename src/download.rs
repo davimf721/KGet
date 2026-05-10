@@ -41,7 +41,7 @@ use std::error::Error;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const MAX_RETRIES: u32 = 3;
 const RETRY_DELAY: Duration = Duration::from_secs(2);
@@ -133,7 +133,7 @@ pub fn validate_filename(filename: &str) -> Result<(), Box<dyn Error + Send + Sy
 pub fn download(
     target: &str,
     proxy: ProxyConfig,
-    _optimizer: Optimizer,
+    optimizer: Optimizer,
     options: DownloadOptions,
     status_callback: Option<&(dyn Fn(String) + Send + Sync)>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -326,12 +326,24 @@ pub fn download(
 
     // Stream data instead of reading all into memory
     let mut buffer = [0u8; 8192];
+    let mut downloaded: u64 = 0;
+    let started_at = Instant::now();
     loop {
         let n = buffered_reader.read(&mut buffer)?;
         if n == 0 {
             break;
         }
         dest.write_all(&buffer[..n])?;
+        downloaded += n as u64;
+
+        if let Some(total) = response_content_length {
+            if let Some(cb) = status_callback {
+                let percent = downloaded as f64 / total.max(1) as f64 * 100.0;
+                cb(format!("PROGRESS: {:.1}% ({}/{})", percent, downloaded, total));
+            }
+        }
+
+        throttle_download(downloaded, started_at, optimizer.speed_limit);
     }
 
     progress.finish_with_message("Download completed\n");
@@ -347,6 +359,19 @@ pub fn download(
     }
 
     Ok(())
+}
+
+fn throttle_download(downloaded: u64, started_at: Instant, speed_limit: Option<u64>) {
+    let Some(limit) = speed_limit else { return };
+    if limit == 0 {
+        return;
+    }
+
+    let expected_elapsed = Duration::from_secs_f64(downloaded as f64 / limit as f64);
+    let actual_elapsed = started_at.elapsed();
+    if expected_elapsed > actual_elapsed {
+        std::thread::sleep(expected_elapsed - actual_elapsed);
+    }
 }
 
 /// Verify the integrity of an ISO file by calculating its SHA-256 hash.
