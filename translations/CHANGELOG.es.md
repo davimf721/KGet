@@ -7,6 +7,12 @@ Todos los cambios notables en este proyecto serán documentados en este archivo.
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 y este proyecto se adhiere al [Versionado Semántico](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.3] - 2026-05-21
+
+### Añadido
+- **Soporte Metalink (`.meta4` / `.metalink`):** `kget --metalink archivo.meta4` analiza el manifiesto RFC 5854, prueba mirrors en orden de prioridad y verifica SHA-256 tras la descarga. Funciona en la CLI (`--metalink`) y en el modo interactivo (`download --metalink`). Auto-detectado por la extensión del archivo.
+- **Historial persistente de descargas:** cada descarga en CLI y modo interactivo queda registrada en `history.json` en el directorio de configuración del SO. Consulte con `kget --history`; limpie con `kget --history-clear` (o `--history-clear completed`). El modo interactivo gana los comandos `history`, `history clear` e `history clear completed`.
+
 ## [1.6.3] - 2026-05-10
 
 ### Añadido

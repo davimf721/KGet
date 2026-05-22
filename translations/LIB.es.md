@@ -28,6 +28,8 @@ Kget = { version = "1.6.3", features = ["gui"] }
 - `DownloadOptions`: modo silencioso, ruta de salida, verificación ISO y SHA256 esperado.
 - `Config`, `ProxyConfig`, `Optimizer`: configuración reutilizable.
 - `verify_file_sha256` y `verify_iso_integrity`: utilidades de checksum.
+- `metalink::download_metalink`: analiza manifesto `.meta4`/`.metalink` y descarga todos los archivos, probando mirrors por prioridad con verificación automática de hash.
+- `queue::{DownloadHistory, HistoryEntry, EntryStatus}`: historial persistente de descargas en `history.json` en el directorio de configuración del SO.
 
 ## Descarga Simple
 
@@ -131,5 +133,49 @@ Use `download_magnet` con la feature `torrent-native` para el cliente torrent in
 - Los archivos se escriben en streaming en disco.
 - Los nombres de salida se validan contra separadores de ruta.
 - Los helpers SHA256 devuelven error cuando el hash esperado no coincide.
+
+## Descargas Metalink
+
+```rust,no_run
+use kget::metalink::download_metalink;
+use kget::{Optimizer, ProxyConfig};
+
+download_metalink(
+    "ubuntu-24.04.meta4",
+    "~/Downloads",
+    false,
+    ProxyConfig::default(),
+    Optimizer::new(),
+)?;
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+```
+
+Analiza el manifiesto RFC 5854, ordena mirrors por prioridad (número menor = primero), prueba cada uno y verifica SHA-256 tras la descarga. Un mirror corrupto se elimina y se prueba el siguiente automáticamente.
+
+## Historial de Descargas
+
+```rust,no_run
+use kget::queue::{DownloadHistory, EntryStatus, HistoryEntry};
+
+let mut history = DownloadHistory::load();
+
+let entry = HistoryEntry::new(
+    "https://example.com/archivo.iso",
+    "/home/user/Downloads",
+    Some("hash_sha256_esperado"),
+);
+history.record(entry, EntryStatus::Completed, None);
+history.save()?;
+
+for e in history.recent(10) {
+    println!("{} {} {}", e.created_at_display(), e.status, e.filename);
+}
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+```
+
+Ubicación del archivo de historial:
+- macOS: `~/Library/Application Support/kget/history.json`
+- Linux: `~/.config/kget/history.json`
+- Windows: `%APPDATA%\kget\history.json`
 
 Vea [examples/lib_usage.rs](../examples/lib_usage.rs) para ejemplos mayores.

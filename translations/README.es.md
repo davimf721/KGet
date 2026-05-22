@@ -6,9 +6,11 @@ Un gestor de descargas moderno y rápido escrito en Rust. KGet soporta HTTP/HTTP
 
 ## Funciones
 
-- **Multiprotocolo:** HTTP, HTTPS, FTP, SFTP y enlaces magnet.
+- **Multiprotocolo:** HTTP, HTTPS, FTP, SFTP, enlaces magnet y **Metalink** (`.meta4`/`.metalink`).
 - **Cliente torrent nativo:** descargas magnet sin depender de apps externas cuando se compila con `torrent-native`.
 - **Modo turbo:** descargas HTTP/HTTPS paralelas con byte ranges, reanudable.
+- **Metalink:** descarga con múltiples mirrors, fallback automático y verificación SHA-256 (RFC 5854).
+- **Historial de descargas:** cada descarga queda registrada; consulte con `--history`, limpie con `--history-clear`.
 - **Modo REPL interactivo:** `kget --interactive` con historial, todos los protocolos y edición de config en vivo.
 - **GUI y CLI:** interfaz gráfica y uso por terminal.
 - **Multiplataforma:** macOS, Linux y Windows.
@@ -92,6 +94,21 @@ kget> config set speed-limit 1048576
 kget> help
 ```
 
+### Metalink
+
+```bash
+kget --metalink ubuntu-24.04.meta4
+kget https://releases.ubuntu.com/ubuntu.meta4
+```
+
+### Historial
+
+```bash
+kget --history                    # últimas 50 descargas
+kget --history-clear              # limpia todo
+kget --history-clear completed    # limpia solo completadas/canceladas
+```
+
 ## Opciones principales
 
 | Flag | Descripción |
@@ -102,6 +119,9 @@ kget> help
 | `-p <proxy>` | Proxy HTTP/SOCKS5 |
 | `-l <bytes>` | Límite de velocidad en bytes/s |
 | `--sha256 <hash>` | Verifica el archivo final contra un hash SHA256 esperado |
+| `--metalink` | Descarga desde un manifiesto Metalink (`.meta4` / `.metalink`) |
+| `--history` | Muestra historial de descargas (últimas 50 entradas) |
+| `--history-clear [completed]` | Limpia historial (todo, o solo completadas/canceladas) |
 | `--jsonl` | Emite eventos JSON Lines experimentales para scripts y agentes |
 | `--ftp` | Usar protocolo FTP |
 | `--sftp` | Usar protocolo SFTP (contraseña o autenticación por clave) |

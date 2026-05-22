@@ -74,7 +74,7 @@ struct SettingsView: View {
                     .font(.largeTitle)
                     .fontWeight(.bold)
                 
-                Text("Version \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.6.3")")
+                Text("Version \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown")")
                     .foregroundColor(.secondary)
                 
                 Text("A modern, lightweight download manager\nbuilt with Rust and SwiftUI")

@@ -2,7 +2,9 @@ use kget::advanced_download::AdvancedDownloader;
 use kget::config::Config;
 use kget::download::download as http_download;
 use kget::ftp::FtpDownloader;
+use kget::metalink;
 use kget::optimization::Optimizer;
+use kget::queue::{DownloadHistory, EntryStatus, HistoryEntry};
 use kget::sftp::SftpDownloader;
 use kget::utils;
 use kget::DownloadOptions;
@@ -35,6 +37,7 @@ struct DownloadArgs {
     ftp: bool,
     sftp: bool,
     torrent: bool,
+    metalink: bool,
     sha256: Option<String>,
 }
 
@@ -49,6 +52,7 @@ struct DownloadArgs {
 /// --ftp                         force FTP protocol
 /// --sftp                        force SFTP protocol
 /// --torrent                     force torrent/magnet handling
+/// --metalink                    treat source as a Metalink manifest
 /// ```
 fn parse_download_args(parts: &[&str]) -> Result<DownloadArgs, String> {
     let mut args = DownloadArgs {
@@ -59,6 +63,7 @@ fn parse_download_args(parts: &[&str]) -> Result<DownloadArgs, String> {
         ftp: false,
         sftp: false,
         torrent: false,
+        metalink: false,
         sha256: None,
     };
 
@@ -70,6 +75,7 @@ fn parse_download_args(parts: &[&str]) -> Result<DownloadArgs, String> {
             "--ftp" => args.ftp = true,
             "--sftp" => args.sftp = true,
             "--torrent" => args.torrent = true,
+            "--metalink" => args.metalink = true,
             "-o" | "--output" => {
                 i += 1;
                 if i >= parts.len() {
@@ -112,68 +118,89 @@ fn parse_download_args(parts: &[&str]) -> Result<DownloadArgs, String> {
 fn run_download(args: DownloadArgs, config: &Config) -> Result<(), Box<dyn Error + Send + Sync>> {
     let optimizer = Optimizer::from_config(config.optimization.clone());
 
-    // Auto-detect magnet links as torrent downloads
-    if args.torrent || args.url.starts_with("magnet:?") {
-        let output_dir = args
-            .output
-            .unwrap_or_else(|| "torrent_output".to_string());
-        return kget::torrent::download_magnet(
+    let is_metalink = args.metalink || metalink::is_metalink(&args.url);
+
+    if is_metalink {
+        let output_dir = args.output.as_deref().unwrap_or(".");
+        let result = metalink::download_metalink(
             &args.url,
-            &output_dir,
-            args.quiet,
-            config.proxy.clone(),
-            optimizer,
-            kget::torrent::TorrentCallbacks::default(),
-        );
-    }
-
-    if args.ftp {
-        let output = utils::resolve_output_path(args.output, &args.url, "ftp_output");
-        let dl = FtpDownloader::new(
-            args.url,
-            output,
+            output_dir,
             args.quiet,
             config.proxy.clone(),
             optimizer,
         );
-        return dl.download();
+        // Record to history
+        let mut history = DownloadHistory::load();
+        let entry = HistoryEntry::new(&args.url, output_dir, None);
+        let (status, err) = match &result {
+            Ok(()) => (EntryStatus::Completed, None),
+            Err(e) => (EntryStatus::Failed, Some(e.to_string())),
+        };
+        history.record(entry, status, err);
+        let _ = history.save();
+        return result;
     }
 
-    if args.sftp {
-        let output = utils::resolve_output_path(args.output, &args.url, "sftp_output");
-        let dl = SftpDownloader::new(
-            args.url,
-            output,
-            args.quiet,
-            config.proxy.clone(),
-            optimizer,
-        );
-        return dl.download();
-    }
+    // Capture url/output_dir before consuming args, for history recording
+    let url_for_history = args.url.clone();
+    let output_dir_for_history = args.output.as_deref().unwrap_or(".").to_string();
+    let sha256_for_history = args.sha256.clone();
 
-    if args.advanced {
-        let output = utils::resolve_output_path(args.output, &args.url, "download");
-        let mut dl = AdvancedDownloader::new(
-            args.url,
-            output,
-            args.quiet,
-            config.proxy.clone(),
-            optimizer,
-        );
-        if let Some(hash) = args.sha256 {
-            dl.set_expected_sha256(hash);
-        }
-        return dl.download();
-    }
+    let result: Result<(), Box<dyn Error + Send + Sync>> =
+        // Auto-detect magnet links as torrent downloads
+        if args.torrent || args.url.starts_with("magnet:?") {
+            let output_dir = args.output.unwrap_or_else(|| "torrent_output".to_string());
+            kget::torrent::download_magnet(
+                &args.url,
+                &output_dir,
+                args.quiet,
+                config.proxy.clone(),
+                optimizer,
+                kget::torrent::TorrentCallbacks::default(),
+            )
+        } else if args.ftp {
+            let output = utils::resolve_output_path(args.output, &args.url, "ftp_output");
+            FtpDownloader::new(args.url, output, args.quiet, config.proxy.clone(), optimizer)
+                .download()
+        } else if args.sftp {
+            let output = utils::resolve_output_path(args.output, &args.url, "sftp_output");
+            SftpDownloader::new(args.url, output, args.quiet, config.proxy.clone(), optimizer)
+                .download()
+        } else if args.advanced {
+            let output = utils::resolve_output_path(args.output, &args.url, "download");
+            let mut dl = AdvancedDownloader::new(
+                args.url,
+                output,
+                args.quiet,
+                config.proxy.clone(),
+                optimizer,
+            );
+            if let Some(hash) = args.sha256 {
+                dl.set_expected_sha256(hash);
+            }
+            dl.download()
+        } else {
+            // Default: simple HTTP/HTTPS
+            let options = DownloadOptions {
+                quiet_mode: args.quiet,
+                output_path: args.output,
+                verify_iso: args.sha256.is_some(),
+                expected_sha256: args.sha256,
+            };
+            http_download(&args.url, config.proxy.clone(), optimizer, options, None)
+        };
 
-    // Default: simple HTTP/HTTPS
-    let options = DownloadOptions {
-        quiet_mode: args.quiet,
-        output_path: args.output,
-        verify_iso: args.sha256.is_some(),
-        expected_sha256: args.sha256,
+    // Record to history (best-effort)
+    let mut history = DownloadHistory::load();
+    let entry = HistoryEntry::new(&url_for_history, &output_dir_for_history, sha256_for_history.as_deref());
+    let (status, err) = match &result {
+        Ok(()) => (EntryStatus::Completed, None),
+        Err(e) => (EntryStatus::Failed, Some(e.to_string())),
     };
-    http_download(&args.url, config.proxy.clone(), optimizer, options, None)
+    history.record(entry, status, err);
+    let _ = history.save();
+
+    result
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -291,6 +318,11 @@ Commands
           --ftp              Use FTP protocol  (ftp://[user:pass@]host/path)
           --sftp             Use SFTP protocol (sftp://[user[:pass]@]host/path)
           --torrent          Force torrent/magnet handling
+          --metalink         Treat source as a Metalink manifest (.meta4/.metalink)
+
+  history                    Show recent download history (last 50)
+  history clear              Remove all history entries
+  history clear completed    Remove only completed/cancelled entries
 
   config                     Show current configuration
   config show                Show current configuration
@@ -314,6 +346,10 @@ Examples
   download --ftp ftp://ftp.gnu.org/gnu/emacs/emacs-28.2.tar.gz
   download --sftp sftp://user@server.com/backups/db.sql.gz
   download magnet:?xt=urn:btih:...
+  download --metalink ubuntu.meta4
+  download --metalink https://releases.ubuntu.com/ubuntu.meta4
+  history
+  history clear completed
   config set connections 8
   config set speed-limit 1048576
   config set speed-limit 0
@@ -371,6 +407,43 @@ pub fn interactive_mode() {
                             use std::io::Write;
                             std::io::stdout().flush()
                         };
+                    }
+                    "history" => {
+                        let sub = parts.get(1).copied().unwrap_or("");
+                        match sub {
+                            "clear" => {
+                                let scope = parts.get(2).copied().unwrap_or("all");
+                                let mut history = DownloadHistory::load();
+                                let n = match scope {
+                                    "completed" | "done" => history.clear_completed(),
+                                    _ => history.clear_all(),
+                                };
+                                if let Err(e) = history.save() {
+                                    eprintln!("Failed to save history: {}", e);
+                                } else {
+                                    println!("Removed {} history entries.", n);
+                                }
+                            }
+                            _ => {
+                                let history = DownloadHistory::load();
+                                let entries = history.recent(50);
+                                if entries.is_empty() {
+                                    println!("No download history.");
+                                } else {
+                                    println!("{:<10} {:<22} {:<12} {}", "ID", "Date (UTC)", "Status", "File");
+                                    println!("{}", "-".repeat(80));
+                                    for e in entries {
+                                        println!(
+                                            "{:<10} {:<22} {:<12} {}",
+                                            e.id,
+                                            e.created_at_display(),
+                                            e.status,
+                                            e.filename
+                                        );
+                                    }
+                                }
+                            }
+                        }
                     }
                     "config" => {
                         let sub = &parts[1..];

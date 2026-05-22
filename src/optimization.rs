@@ -211,11 +211,8 @@ impl Optimizer {
     }
 
     /// Get the peer connection limit for torrent downloads.
-    ///
-    /// Uses the speed limit as a proxy for connection capacity.
-    /// Returns 50 if no speed limit is set.
     pub fn get_peer_limit(&self) -> usize {
-        self.speed_limit.unwrap_or(50) as usize
+        50
     }
 
     /// Maximum parallel HTTP connections to use for advanced downloads.

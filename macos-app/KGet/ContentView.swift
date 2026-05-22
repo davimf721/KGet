@@ -189,7 +189,7 @@ struct HeaderView: View {
                 
                 Spacer()
                 
-                Text("v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.6.3")")
+                Text("v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown")")
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .padding(.horizontal, 8)

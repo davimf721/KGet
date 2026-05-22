@@ -191,6 +191,45 @@ mod config_tests {
 // Download Module Tests
 // ============================================================================
 
+mod content_disposition_tests {
+    use kget::download::parse_content_disposition_filename;
+
+    #[test]
+    fn test_plain_filename() {
+        assert_eq!(
+            parse_content_disposition_filename(r#"attachment; filename="report.pdf""#),
+            Some("report.pdf".to_string())
+        );
+    }
+
+    #[test]
+    fn test_filename_without_quotes() {
+        assert_eq!(
+            parse_content_disposition_filename("attachment; filename=archive.tar.gz"),
+            Some("archive.tar.gz".to_string())
+        );
+    }
+
+    #[test]
+    fn test_rfc5987_filename_star_takes_priority() {
+        let header = r#"attachment; filename="fallback.zip"; filename*=UTF-8''my%20file.zip"#;
+        assert_eq!(
+            parse_content_disposition_filename(header),
+            Some("my file.zip".to_string())
+        );
+    }
+
+    #[test]
+    fn test_no_filename() {
+        assert_eq!(parse_content_disposition_filename("inline"), None);
+    }
+
+    #[test]
+    fn test_empty_filename_falls_through() {
+        assert_eq!(parse_content_disposition_filename(r#"attachment; filename="""#), None);
+    }
+}
+
 mod download_tests {
     use kget::download::{check_disk_space, validate_filename};
     use tempfile::TempDir;

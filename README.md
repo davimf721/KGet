@@ -8,9 +8,11 @@ A fast, modern download manager written in Rust. Supports HTTP/HTTPS, FTP/SFTP, 
 
 ## Features
 
-- **Multi-protocol:** HTTP, HTTPS, FTP, SFTP, and Magnet links
+- **Multi-protocol:** HTTP, HTTPS, FTP, SFTP, Magnet links, and **Metalink** (`.meta4`/`.metalink`)
 - **Native Torrent Client:** Downloads torrents directly — no external apps needed
 - **Turbo Mode:** Parallel connections for faster downloads
+- **Metalink:** Multi-mirror downloads with automatic mirror fallback and SHA-256 verification (RFC 5854)
+- **Download History:** Every download is recorded; browse with `--history`, clear with `--history-clear`
 - **Interactive REPL:** Full `kget --interactive` mode with history, all protocols, and live config editing
 - **GUI & CLI:** Use whichever you prefer
 - **Cross-platform:** macOS, Linux, Windows
@@ -104,6 +106,33 @@ kget> config set speed-limit 1048576
 kget> help
 ```
 
+### Metalink downloads
+
+```bash
+# From a local manifest
+kget --metalink ubuntu-24.04.meta4
+
+# From a remote manifest (auto-detected by extension)
+kget https://releases.ubuntu.com/ubuntu.meta4
+
+# Tries each mirror in priority order; verifies SHA-256 automatically
+```
+
+### Download History
+
+```bash
+kget --history                    # list last 50 downloads
+kget --history-clear              # remove all entries
+kget --history-clear completed    # remove only completed/cancelled
+```
+
+Interactive mode:
+
+```
+kget> history
+kget> history clear completed
+```
+
 ### Options
 
 | Flag | Description |
@@ -114,6 +143,9 @@ kget> help
 | `-p <proxy>` | Use HTTP/SOCKS5 proxy |
 | `-l <bytes>` | Speed limit in bytes/sec |
 | `--sha256 <hash>` | Verify the completed file against an expected SHA256 hash |
+| `--metalink` | Download from a Metalink manifest (`.meta4` / `.metalink`) |
+| `--history` | Show download history (last 50 entries) |
+| `--history-clear [completed]` | Clear history (all, or only completed/cancelled) |
 | `--jsonl` | Emit experimental JSON Lines events for scripts and agents |
 | `--ftp` | Use FTP protocol |
 | `--sftp` | Use SFTP protocol (password or key-based auth) |

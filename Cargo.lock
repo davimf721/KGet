@@ -32,6 +32,7 @@ dependencies = [
  "rayon",
  "reqwest 0.13.2",
  "rfd",
+ "roxmltree",
  "rustyline",
  "serde",
  "serde_json",

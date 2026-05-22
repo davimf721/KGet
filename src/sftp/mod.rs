@@ -136,6 +136,9 @@ impl SftpDownloader {
         sess.handshake()
             .map_err(|e| format!("SSH handshake with {}:{} failed: {}", host, port, e))?;
 
+        // Verify host key against ~/.ssh/known_hosts
+        self.check_host_key(&sess, host, port)?;
+
         // Authenticate: password from URL → SSH agent → default key files
         if let Some(password) = parsed.password() {
             sess.userauth_password(&username, password)
@@ -204,6 +207,85 @@ impl SftpDownloader {
 
         if !self.quiet {
             println!("Saved to '{}'", self.output);
+        }
+
+        Ok(())
+    }
+
+    /// Verify the server's host key against ~/.ssh/known_hosts.
+    ///
+    /// Behaviour mirrors OpenSSH's `StrictHostKeyChecking=accept-new`:
+    /// - **Match** in known_hosts → proceed silently.
+    /// - **Not found** in known_hosts → warn and continue (first connection).
+    /// - **Mismatch** → hard error (possible MITM attack).
+    fn check_host_key(
+        &self,
+        sess: &ssh2::Session,
+        host: &str,
+        port: u16,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let (key_bytes, _key_type) = sess
+            .host_key()
+            .ok_or("Server did not provide a host key — connection refused")?;
+
+        let home = match dirs::home_dir() {
+            Some(h) => h,
+            None => {
+                if !self.quiet {
+                    eprintln!("Warning: Could not find home directory; skipping known_hosts check");
+                }
+                return Ok(());
+            }
+        };
+
+        let known_hosts_path = home.join(".ssh/known_hosts");
+
+        let mut known_hosts = sess
+            .known_hosts()
+            .map_err(|e| format!("Failed to open known_hosts: {}", e))?;
+
+        if known_hosts_path.exists() {
+            known_hosts
+                .read_file(&known_hosts_path, ssh2::KnownHostFileKind::OpenSSH)
+                .map_err(|e| format!("Failed to read known_hosts: {}", e))?;
+        }
+
+        let check_host = if port == 22 {
+            host.to_string()
+        } else {
+            format!("[{}]:{}", host, port)
+        };
+
+        match known_hosts.check(&check_host, key_bytes) {
+            ssh2::CheckResult::Match => {}
+            ssh2::CheckResult::NotFound => {
+                eprintln!(
+                    "Warning: The host '{}' is not in your known_hosts file ({}).\n\
+                     Connecting anyway. To suppress this warning, add the host key:\n\
+                     ssh-keyscan -p {} {} >> {}",
+                    host,
+                    known_hosts_path.display(),
+                    port,
+                    host,
+                    known_hosts_path.display()
+                );
+            }
+            ssh2::CheckResult::Mismatch => {
+                return Err(format!(
+                    "WARNING: Host key verification FAILED for '{}'!\n\
+                     The host key has changed. This could indicate a MITM attack.\n\
+                     If you trust the new key, remove the old entry:\n\
+                     ssh-keygen -R '{}'",
+                    host, check_host
+                )
+                .into());
+            }
+            ssh2::CheckResult::Failure => {
+                eprintln!(
+                    "Warning: Could not check host key for '{}'; proceeding without verification",
+                    host
+                );
+            }
         }
 
         Ok(())

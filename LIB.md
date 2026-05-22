@@ -37,6 +37,8 @@ Kget = { path = "." }
 - `DownloadOptions`: quiet mode, output path, ISO verification, and expected SHA256 hash.
 - `Config`, `ProxyConfig`, `Optimizer`: reusable configuration objects.
 - `verify_file_sha256` and `verify_iso_integrity`: standalone checksum helpers.
+- `metalink::download_metalink`: parse a `.meta4`/`.metalink` manifest and download all files, trying mirrors in priority order with automatic hash verification.
+- `queue::{DownloadHistory, HistoryEntry, EntryStatus}`: persistent download history backed by `history.json` in the OS config dir.
 
 ## Basic Download
 
@@ -193,5 +195,76 @@ Authentication priority:
 1. Password from URL (`sftp://user:pass@host/path`)
 2. Running SSH agent
 3. Default key files (`~/.ssh/id_ed25519`, `~/.ssh/id_rsa`, `~/.ssh/id_ecdsa`)
+
+## Metalink Downloads
+
+```rust,no_run
+use kget::metalink::download_metalink;
+use kget::{Optimizer, ProxyConfig};
+
+download_metalink(
+    "ubuntu-24.04.meta4",   // local file or https:// URL
+    "~/Downloads",
+    false,
+    ProxyConfig::default(),
+    Optimizer::new(),
+)?;
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+```
+
+`download_metalink` parses the RFC 5854 manifest, sorts mirrors by `priority`
+attribute (lowest first), tries each in order, and verifies SHA-256 after a
+successful download.  A corrupted mirror (hash mismatch) is deleted and the
+next mirror is tried automatically.
+
+You can also parse the manifest yourself:
+
+```rust,no_run
+use kget::metalink::{parse, is_metalink};
+
+if is_metalink("release.meta4") {
+    let doc = parse(&std::fs::read_to_string("release.meta4")?)?;
+    for file in &doc.files {
+        println!("{}: {} mirror(s)", file.name, file.urls.len());
+        if let Some((kind, hash)) = file.best_hash() {
+            println!("  hash ({kind}): {hash}");
+        }
+    }
+}
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+```
+
+## Download History
+
+```rust,no_run
+use kget::queue::{DownloadHistory, EntryStatus, HistoryEntry};
+
+// Load existing history (returns empty if file absent)
+let mut history = DownloadHistory::load();
+
+// Record a download
+let entry = HistoryEntry::new(
+    "https://example.com/file.iso",
+    "/home/user/Downloads",
+    Some("expected_sha256_hex"),
+);
+history.record(entry, EntryStatus::Completed, None);
+history.save()?;
+
+// Inspect
+for e in history.recent(10) {
+    println!("{} {} {}", e.created_at_display(), e.status, e.filename);
+}
+
+// Housekeeping
+history.clear_completed();   // remove Completed + Cancelled entries
+history.save()?;
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+```
+
+History is stored at:
+- macOS: `~/Library/Application Support/kget/history.json`
+- Linux: `~/.config/kget/history.json`
+- Windows: `%APPDATA%\kget\history.json`
 
 See [examples/lib_usage.rs](examples/lib_usage.rs) for a larger cookbook.

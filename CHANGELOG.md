@@ -7,6 +7,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0.html),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.3] - 2026-05-21
+
+### Added
+- **Metalink support (`.meta4` / `.metalink`):** `kget --metalink file.meta4` (or any URL/path ending in `.meta4`/`.metalink`) parses the RFC 5854 manifest, tries mirrors in priority order, and verifies SHA-256 after download. Works in both CLI (`--metalink`) and interactive mode (`download --metalink`). Auto-detected by file extension — no flag needed for local files.
+- **Persistent download history:** every CLI and interactive download is now recorded to `history.json` in the OS config dir. View with `kget --history`; clear with `kget --history-clear` (or `--history-clear completed`). Interactive mode gains `history`, `history clear`, and `history clear completed` commands.
+
+### Security
+- **SFTP: SSH host key verification against `~/.ssh/known_hosts`** — connections now check the server key and hard-error on mismatches (possible MITM), emitting a `ssh-keygen -R` hint. Unknown hosts emit a warning but continue (analogous to OpenSSH `StrictHostKeyChecking=accept-new`).
+
+### Fixed
+- **macOS native app now shows the correct version after every build.** `build-native-macos.sh` now updates the source `Info.plist` from `Cargo.toml` before compiling, so `Bundle.main` always reads the right version at runtime. Fallback strings in `ContentView` and `SettingsView` changed from hardcoded `"1.6.3"` to `"unknown"` so they never silently show a stale version.
+- **`Optimizer::get_peer_limit()` returned bytes/second as peer count.** When a speed limit (e.g. 1 MB/s = 1048576) was set, the method returned that number as the torrent peer limit. Fixed to always return 50.
+- **User-Agent was hardcoded as `KGet/1.0`.** Both the simple and advanced HTTP downloaders now send `KGet/1.6.3` (via `env!("CARGO_PKG_VERSION")`), matching the actual release version.
+
+### Added
+- **`Content-Disposition` filename support.** When a server provides a `Content-Disposition: attachment; filename=…` header (plain or RFC 5987 `filename*=` form), KGet uses that name for the saved file instead of the URL path segment. Useful for redirected URLs or APIs that serve files under generic paths.
+
 ## [1.6.3] - 2026-05-10
 
 ### Added

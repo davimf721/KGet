@@ -43,6 +43,12 @@ print_success() { echo -e "${GREEN}✅ $1${NC}"; }
 # ============================================================================
 # Check Requirements
 # ============================================================================
+# Keep source Info.plist in sync so Bundle.main always reads the correct version
+print_step "Syncing Info.plist version to ${VERSION}..."
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION}" "${SWIFT_PROJECT_DIR}/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${VERSION}" "${SWIFT_PROJECT_DIR}/Info.plist"
+print_success "Source Info.plist updated to ${VERSION}!"
+
 print_step "Checking requirements..."
 
 if ! command -v swift &> /dev/null; then
@@ -162,6 +168,15 @@ cp "$SWIFT_PROJECT_DIR/Info.plist" "${TEMP_APP}/Contents/Info.plist"
 
 # Replace placeholders in Info.plist
 sed -i '' "s/\$(EXECUTABLE_NAME)/KGet/g" "${TEMP_APP}/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION}" "${TEMP_APP}/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${VERSION}" "${TEMP_APP}/Contents/Info.plist"
+
+BUNDLE_SHORT_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "${TEMP_APP}/Contents/Info.plist")
+BUNDLE_BUILD_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "${TEMP_APP}/Contents/Info.plist")
+if [ "$BUNDLE_SHORT_VERSION" != "$VERSION" ] || [ "$BUNDLE_BUILD_VERSION" != "$VERSION" ]; then
+    print_error "App bundle version mismatch: short=${BUNDLE_SHORT_VERSION}, build=${BUNDLE_BUILD_VERSION}, expected=${VERSION}"
+    exit 1
+fi
 
 print_success "App bundle created!"
 

@@ -74,8 +74,10 @@ pub mod advanced_download;
 pub mod app;
 pub mod config;
 pub mod download;
+pub mod metalink;
 pub mod optimization;
 pub mod progress;
+pub mod queue;
 pub mod utils;
 
 // Protocol modules

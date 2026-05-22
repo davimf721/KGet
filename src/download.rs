@@ -35,7 +35,7 @@ use crate::utils::{self, print};
 use humansize::{DECIMAL, format_size};
 use mime::Mime;
 use reqwest::blocking::Client;
-use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE};
+use reqwest::header::{CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_TYPE};
 use sha2::Digest;
 use std::error::Error;
 use std::fs::File;
@@ -141,6 +141,7 @@ pub fn download(
 
     let mut client_builder = Client::builder()
         .timeout(Duration::from_secs(30))
+        .user_agent(concat!("KGet/", env!("CARGO_PKG_VERSION")))
         .no_gzip()
         .no_deflate();
 
@@ -205,6 +206,12 @@ pub fn download(
         .and_then(|ct| ct.to_str().ok())
         .and_then(|s| s.parse::<Mime>().ok());
 
+    let server_filename = response
+        .headers()
+        .get(CONTENT_DISPOSITION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(parse_content_disposition_filename);
+
     if let Some(len) = content_length {
         print(
             &format!("Length: {} ({})", len, format_size(len, DECIMAL)),
@@ -267,7 +274,11 @@ pub fn download(
             tentative_path = user_path;
         }
     } else {
-        let base_filename = utils::get_filename_from_url_or_default(target, "downloaded_file");
+        let base_filename = if let Some(ref name) = server_filename {
+            name.clone()
+        } else {
+            utils::get_filename_from_url_or_default(target, "downloaded_file")
+        };
         validate_filename(&base_filename)?;
         tentative_path = PathBuf::from(base_filename);
     }
@@ -359,6 +370,47 @@ pub fn download(
     }
 
     Ok(())
+}
+
+/// Parse the `filename` or `filename*` from a `Content-Disposition` header value.
+///
+/// Prefers the RFC 5987 `filename*` form (percent-encoded, with charset) over
+/// the plain `filename` form.  Returns `None` if neither is present or valid.
+pub fn parse_content_disposition_filename(header_value: &str) -> Option<String> {
+    let mut plain: Option<String> = None;
+
+    for part in header_value.split(';') {
+        let part = part.trim();
+
+        // filename*= (RFC 5987) takes priority
+        if let Some(val) = part.strip_prefix("filename*=") {
+            let val = val.trim().trim_matches('"');
+            // Format: charset'language'encoded-value
+            let mut parts = val.splitn(3, '\'');
+            let _charset = parts.next();
+            let _language = parts.next();
+            if let Some(encoded) = parts.next() {
+                if let Ok(decoded) = urlencoding::decode(encoded) {
+                    let name = decoded.into_owned();
+                    if !name.is_empty() {
+                        return Some(name);
+                    }
+                }
+            }
+        }
+
+        // Plain filename= (fallback)
+        if plain.is_none() {
+            if let Some(val) = part.strip_prefix("filename=") {
+                let name = val.trim().trim_matches('"').to_string();
+                if !name.is_empty() {
+                    plain = Some(name);
+                }
+            }
+        }
+    }
+
+    plain
 }
 
 fn throttle_download(downloaded: u64, started_at: Instant, speed_limit: Option<u64>) {

@@ -167,7 +167,7 @@ impl AdvancedDownloader {
         let mut client_builder = Client::builder()
             .timeout(std::time::Duration::from_secs(300))
             .connect_timeout(std::time::Duration::from_secs(20))
-            .user_agent("KGet/1.0")
+            .user_agent(concat!("KGet/", env!("CARGO_PKG_VERSION")))
             .no_gzip()
             .no_deflate();
 

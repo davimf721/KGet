@@ -2,12 +2,13 @@
 
 ## Product Ideas
 
+- ✅ **Persistent download history** — records every download in `history.json`; `--history` / `history` REPL command. _(v1.6.3)_
+- ✅ **Metalink / mirror fallback** — `.meta4` / `.metalink` support with priority-ordered mirrors and SHA-256 verification. _(v1.6.3)_
 - Persistent download queue with pause, resume, retry, and scheduled downloads.
 - Browser integration and share extensions for one-click capture.
 - Download categories, tags, smart folders, and duplicate detection.
 - Per-download speed limits, global bandwidth profiles, and metered-network mode.
 - Checksum verification beyond ISO files: SHA-256, SHA-512, MD5, and checksum URL discovery.
-- Mirror fallback and segmented downloads across multiple mirrors.
 - Authenticated downloads: cookies, headers, bearer tokens, and basic auth profiles.
 - Better torrent UX: file selection, priority, peer/seeder stats, tracker status, and ratio controls.
 - Notification center with completed, failed, retrying, and verification events.

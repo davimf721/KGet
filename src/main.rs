@@ -25,7 +25,9 @@ use kget::app::{DownloadCommand, WorkerToGuiMessage, spawn_download_worker};
 use kget::config::{Config, ProxyType};
 use kget::download::download as cli_download;
 use kget::ftp::FtpDownloader;
+use kget::metalink;
 use kget::optimization::Optimizer;
+use kget::queue::{DownloadHistory, EntryStatus, HistoryEntry};
 use kget::sftp::SftpDownloader;
 use kget::utils;
 use kget::{DownloadOptions, verify_iso_integrity};
@@ -121,6 +123,18 @@ struct Args {
     /// Emit experimental JSON Lines events for machine consumers
     #[arg(long = "jsonl")]
     jsonl: bool,
+
+    /// Download from a Metalink manifest (.meta4 or .metalink file/URL)
+    #[arg(long = "metalink")]
+    metalink: bool,
+
+    /// Show download history
+    #[arg(long = "history")]
+    history: bool,
+
+    /// Clear download history (all, or --history-clear completed)
+    #[arg(long = "history-clear")]
+    history_clear: Option<String>,
 }
 
 fn emit_jsonl(value: serde_json::Value) {
@@ -163,8 +177,41 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         return Ok(());
     }
 
+    // History commands (don't require a URL)
+    if args.history {
+        let history = DownloadHistory::load();
+        let entries = history.recent(50);
+        if entries.is_empty() {
+            println!("No download history.");
+        } else {
+            println!("{:<10} {:<22} {:<12} {}", "ID", "Date (UTC)", "Status", "File");
+            println!("{}", "-".repeat(80));
+            for e in entries {
+                println!(
+                    "{:<10} {:<22} {:<12} {}",
+                    e.id,
+                    e.created_at_display(),
+                    e.status,
+                    e.filename
+                );
+            }
+        }
+        return Ok(());
+    }
+
+    if let Some(ref scope) = args.history_clear {
+        let mut history = DownloadHistory::load();
+        let n = match scope.as_str() {
+            "completed" | "done" => history.clear_completed(),
+            _ => history.clear_all(),
+        };
+        history.save()?;
+        println!("Removed {} history entries.", n);
+        return Ok(());
+    }
+
     let should_start_gui =
-        args.gui || (args.url.is_empty() && !args.ftp && !args.sftp && !args.torrent);
+        args.gui || (args.url.is_empty() && !args.ftp && !args.sftp && !args.torrent && !args.metalink);
 
     if !should_start_gui {
         if let Some(proxy_url) = args.proxy.clone() {
@@ -289,7 +336,23 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         }));
     }
 
-    let result: Result<(), Box<dyn Error + Send + Sync>> = if args.ftp {
+    let is_metalink_source = args.metalink || metalink::is_metalink(&args.url);
+
+    // Save before args fields are moved into dispatch branches
+    let history_url = args.url.clone();
+    let history_output_dir = args.output.as_deref().unwrap_or(".").to_string();
+    let history_sha256 = args.sha256.clone();
+
+    let result: Result<(), Box<dyn Error + Send + Sync>> = if is_metalink_source {
+        let output_dir = args.output.as_deref().unwrap_or(".");
+        metalink::download_metalink(
+            &args.url,
+            output_dir,
+            quiet_mode,
+            config.proxy.clone(),
+            optimizer.clone(),
+        )
+    } else if args.ftp {
         let url = args.url.clone();
         let output = utils::resolve_output_path(args.output, &url, "ftp_output");
         let downloader =
@@ -380,6 +443,18 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             Ok(())
         }
     };
+
+    // Record to history (best-effort; never fail the download over a history error)
+    if !is_metalink_source {
+        let mut history = DownloadHistory::load();
+        let entry = HistoryEntry::new(&history_url, &history_output_dir, history_sha256.as_deref());
+        let (status, error_msg) = match &result {
+            Ok(()) => (EntryStatus::Completed, None),
+            Err(e) => (EntryStatus::Failed, Some(e.to_string())),
+        };
+        history.record(entry, status, error_msg);
+        let _ = history.save();
+    }
 
     match result {
         Ok(()) => {
