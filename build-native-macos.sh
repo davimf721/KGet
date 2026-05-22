@@ -218,8 +218,6 @@ print_step "Code signing..."
 
 # Clean ALL extended attributes in temp location (no iCloud interference)
 xattr -cr "${TEMP_APP}" 2>/dev/null || true
-find "${TEMP_APP}" -type f -exec xattr -c {} \; 2>/dev/null || true
-find "${TEMP_APP}" -type d -exec xattr -c {} \; 2>/dev/null || true
 
 # Check for Developer ID certificate
 CERT_NAME=$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | awk -F'"' '{print $2}')
