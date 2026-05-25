@@ -72,8 +72,12 @@
 // Core modules
 pub mod advanced_download;
 pub mod app;
+pub mod builder;
+pub mod checksum;
 pub mod config;
 pub mod download;
+pub mod error;
+pub mod events;
 pub mod metalink;
 pub mod optimization;
 pub mod progress;
@@ -84,12 +88,14 @@ pub mod utils;
 pub mod ftp;
 pub mod sftp;
 pub mod torrent;
+pub mod webdav;
+pub mod ytdlp;
 
 // Re-exports: Configuration
 pub use config::{Config, ProxyConfig, ProxyType};
 
 // Re-exports: Core download functionality
-pub use advanced_download::AdvancedDownloader;
+pub use advanced_download::{AdvancedDownloader, ResumePolicy};
 pub use download::{download, verify_file_sha256, verify_iso_integrity};
 pub use optimization::Optimizer;
 pub use progress::create_progress_bar;
@@ -98,7 +104,52 @@ pub use progress::create_progress_bar;
 pub use torrent::{TorrentCallbacks, download_magnet};
 
 // Re-exports: Utilities
-pub use utils::{get_filename_from_url_or_default, print, resolve_output_path};
+pub use utils::{auto_extract, get_filename_from_url_or_default, is_extractable, print, resolve_output_path};
+
+// Re-exports: Protocol helpers
+pub use webdav::is_webdav_url;
+pub use ytdlp::{is_video_url, ytdlp_available, ytdlp_binary};
+
+// Re-exports: High-level builder API (v1.7.0+)
+pub use builder::{
+    Backoff, BatchBuilder, BatchResult, ComputedChecksums, DownloadBuilder,
+    DownloadResult, RetryConfig,
+};
+pub use checksum::ChecksumAlgorithm;
+pub use error::KgetError;
+pub use events::DownloadEvent;
+
+/// Create a [`DownloadBuilder`] for a single URL — the recommended API entry point.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use kget::KgetError;
+///
+/// let result = kget::builder("https://example.com/file.zip")
+///     .output("./downloads/")
+///     .connections(4)
+///     .sha256("abc123...")
+///     .download()?;
+/// # Ok::<(), KgetError>(())
+/// ```
+pub fn builder(url: impl Into<String>) -> DownloadBuilder {
+    DownloadBuilder::new(url)
+}
+
+/// Create a [`BatchBuilder`] for downloading multiple URLs concurrently.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// let results = kget::batch(["https://a.com/f1.zip", "https://b.com/f2.iso"])
+///     .concurrency(4)
+///     .output_dir("./downloads/")
+///     .download_all();
+/// ```
+pub fn batch(urls: impl IntoIterator<Item = impl Into<String>>) -> BatchBuilder {
+    BatchBuilder::new(urls)
+}
 
 /// Options for configuring a download operation.
 ///
@@ -124,6 +175,8 @@ pub struct DownloadOptions {
     pub verify_iso: bool,
     /// Expected SHA-256 hash for automatic integrity comparison
     pub expected_sha256: Option<String>,
+    /// Extra HTTP headers sent with every request (e.g. `("Referer", "https://…")`)
+    pub extra_headers: Vec<(String, String)>,
 }
 
 impl Default for DownloadOptions {
@@ -133,6 +186,7 @@ impl Default for DownloadOptions {
             output_path: None,
             verify_iso: false,
             expected_sha256: None,
+            extra_headers: Vec::new(),
         }
     }
 }

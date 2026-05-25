@@ -7,6 +7,59 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0.html),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] - 2026-05-24
+
+### Added
+- **Batch download (`--batch urls.txt`):** download multiple files in parallel from a plain-text file — one URL per line, lines starting with `#` are skipped as comments. All URLs run concurrently via OS threads. `--output` is treated as the destination directory. Per-URL `[OK]`/`[FAIL]` status printed; summary at the end.
+- **History tab in macOS app:** new "History" sidebar item reads the persistent `history.json` produced by the Rust CLI. Shows all-time downloads with date, file size, and status badge. Hover a row to reveal a re-download button that re-queues the URL and switches to the "All Downloads" view.
+- **Drag-and-drop URL into the macOS window:** drag any HTTP/HTTPS/FTP/magnet link from Safari, Chrome, or any other app and drop it onto the KGet window. A translucent blue overlay appears while hovering; on drop the URL lands in the input bar ready to start.
+- **Clipboard monitor in macOS app:** the app silently watches the clipboard every 1.5 s. When a new HTTP, HTTPS, FTP, SFTP, or magnet URL is detected, a dismissable banner slides in below the URL bar with a one-click "Download" button. The banner is suppressed if the URL is already in the current download list.
+- **Custom HTTP headers (`-H "Name: Value"`):** pass one or more `-H` flags to inject arbitrary request headers into both simple and turbo (advanced) downloads. Multiple headers can be stacked. Works in single-URL, batch, and interactive modes.
+- **Speed sparkline in macOS app:** each active download row now shows a 44×16 pt miniature real-time speed graph that accumulates the last 30 speed readings. Built with SwiftUI `Path` + gradient fill via the new `SparklineView` component.
+- **Auto-extract archives:** `kget --extract` automatically runs `unzip`, `tar`, or `7z` on the downloaded file when the extension is `.zip`, `.tar.gz`, `.tgz`, `.tar.bz2`, `.tar.xz`, or `.7z`. Controllable via the new "Auto-extract archives" toggle in the macOS Settings → Downloads tab.
+- **Download scheduling (`--at "HH:MM"`):** defer a CLI download to a specific local wall-clock time. The process sleeps until the target minute is reached, then starts the download. Works with single-URL, advanced, and batch modes.
+- **yt-dlp integration (`--ytdlp`, auto-detected):** if `yt-dlp` (or `youtube-dl`) is installed, URLs from YouTube, Vimeo, Twitch, TikTok, Instagram, Bilibili, and 10+ other platforms are automatically routed through it. Quality preset selectable via `--quality best|1080p|720p|480p|360p|audio`. macOS app detects video URLs and adds a global default quality picker in Settings → Downloads.
+- **WebDAV support (`webdav://`, `webdavs://`):** new `WebDavDownloader` adapter in `src/webdav/mod.rs` converts `webdav://` → `http://` and `webdavs://` → `https://`, extracts embedded credentials (`webdav://user:pass@host/path`), and injects an HTTP Basic `Authorization` header. Detected automatically from URL scheme; explicit `--webdav` flag also available. Compatible with Synology, Nextcloud, Nextcloud, Apache WebDAV, and any RFC 4918 server.
+- **Share Extension (`Share > KGet`):** the macOS Share Extension (`macos-app/ShareExtension/`) is now complete and functional. `ShareViewController` encodes the shared URL as `kget://download?url=<encoded>` and opens the main app via `NSWorkspace`. `KGetApp.swift` parses the new format and starts the download. The extension is compiled and embedded into `KGet.app/Contents/PlugIns/KGetShareExtension.appex` by `build-native-macos.sh`.
+- **Public library API overhaul (`src/builder.rs`, `src/error.rs`, `src/events.rs`, `src/checksum.rs`):**
+  - **Builder pattern** — `kget::builder(url)` and `kget::batch([...])` entry points replace positional args. Fluent methods: `.output()`, `.connections()`, `.speed_limit()`, `.proxy()`, `.proxy_auth()`, `.sha256/sha512/sha1/md5/blake3()`, `.verify_from()`, `.header()`, `.retry()`, `.range()`, `.quiet()`.
+  - **Typed errors** — `KgetError` enum (`Network`, `Io`, `ChecksumMismatch`, `Protocol`, `Cancelled`, `NotFound`, `SidecarError`, `Other`) with `From` impls for `reqwest::Error`, `std::io::Error`, and `Box<dyn Error>`.
+  - **Event channel** — `.spawn()` returns `(JoinHandle, Receiver<DownloadEvent>)` with `Progress { percent, speed_bps, eta_secs }`, `Status`, `Completed`, `Error` variants.
+  - **Download metrics** — `DownloadResult` struct returned by `.download()` with `path`, `bytes_downloaded`, `avg_speed_bps`, `duration`, `connections_used`, `checksums`.
+  - **In-memory download** — `.download_to_bytes() -> Vec<u8>` and `.download_to_reader() -> impl Read` (no filesystem writes).
+  - **HTTP range** — `.range(start, end)` sends `Range: bytes=start-end`; works with in-memory and on-disk paths.
+  - **Sidecar checksum verification** — `.verify_from(url)` downloads and parses GNU (`<hash>  <file>`) and BSD (`SHA256 (file) = hash`) sidecar files, auto-selects algorithm by hash length.
+  - **Multi-algorithm checksums** — SHA-256, SHA-512, SHA-1 (via `sha1` crate), MD5 (via `md-5` crate), BLAKE3 (via `blake3` crate). `ChecksumAlgorithm` enum + `compute_checksum()` in `src/checksum.rs`.
+  - **Configurable retry** — `RetryConfig { max_attempts, backoff: Backoff::Exponential { base_ms, max_ms }, retry_on_status }`. Permanent errors (`Cancelled`, `NotFound`, `ChecksumMismatch`) never retry.
+  - **Batch with concurrency control** — `BatchBuilder::concurrency(n)` uses a Rayon thread pool; returns `Vec<BatchResult>` (one per URL).
+  - **Async API** — `DownloadBuilder::download_async()` and `BatchBuilder::download_all_async()` behind `--features async`. Both use `tokio::task::spawn_blocking` so they never block the executor.
+
+### Fixed
+- **`AdvancedDownloader::new()` panicked on HTTP client build failure** — changed return type from `Self` to `Result<Self, …>` so the error propagates instead of crashing.
+- **Parallel throttle was per-thread** — with N connections and a 1 MB/s limit, actual throughput was N×1 MB/s. Replaced per-thread busy-wait with a global `Arc<Mutex<TokenBucket>>` shared across all rayon workers; aggregate rate is now bounded correctly.
+- **`file.set_len(total_size)` happened before confirming range support** — if the server returned 200 instead of 206, the file was preallocated and then overwritten by a full-stream download producing a corrupted result. Preallocation now only occurs when `supports_range` is confirmed.
+- **ISO integrity prompt read from stdin in library/automation context** — `AdvancedDownloader` now has a `ResumePolicy` field (`Ask` / `AlwaysResume` / `AlwaysRestart`). Library callers set `AlwaysResume` to avoid blocking. `Ask` (default) preserves the existing interactive behavior.
+- **Wrong ISO MIME type** — `"application/x-iso9001"` (ISO 9001 quality standard) corrected to `"application/x-iso9660-image"`.
+- **`verify_file_sha256` printed to stdout unconditionally** — all `println!` calls removed; messages are now sent only via the optional callback.
+- **Simple downloader retried on 404/403/410** — permanent 4xx errors now fail immediately; only transient 5xx responses and connection errors are retried.
+- **`validate_filename` was insufficient** — now also rejects: null bytes (`\0`), path traversal sequences (`..`), filenames longer than 255 bytes, and Windows reserved device names (CON, PRN, AUX, NUL, COM1–COM9, LPT1–LPT9) — case-insensitive, with or without extension.
+- **`sftp/mod.rs`: `CheckResult::Failure` silently continued** — the libssh2 internal error case now returns a hard error and aborts the connection instead of bypassing host-key verification.
+
+### Added (continued)
+- **Homebrew tap (`brew install kget`):** `Formula/kget.rb` added to the repository. Install with `brew tap davimf721/kget && brew install kget`. Optional features selectable at install time: `--with-gui` (egui graphical interface) and `--with-torrent` (native BitTorrent client). `release.sh` automatically patches the formula SHA256 after each tag push.
+- **egui GUI — missing features parity with macOS app:**
+  - **Speed sparkline** per active download (44×16pt, last 30 speed readings, gradient fill).
+  - **Clipboard monitor** — polls every 1.5 s; shows dismissable banner with one-click download when a new downloadable URL is detected.
+  - **Drag-and-drop URL** — detects `hovered_files` for visual overlay; reads URL from dropped bytes (browser link drags) or from `.url`/`.webloc` shortcut files.
+  - **History tab** in sidebar — loads `history.json` from disk; shows all-time entries with date, size, status, error, re-download and Copy URL buttons.
+  - **WebDAV URL validation** — `webdav://` and `webdavs://` now accepted by `validate_input()`.
+  - **Updated protocol chips** in empty state — HTTP, FTP, WebDAV, Torrent, yt-dlp.
+
+### Changed
+- **macOS SwiftUI app — complete redesign:** `NavigationSplitView` layout with collapsible sidebar for filter navigation (All / Active / Completed / Failed with live count badges); clean URL input bar with inline Turbo toggle; simplified 3px thin progress bar with shimmer animation replacing the busy multi-segment bar; download rows with status dot, type badges (Turbo / ISO / Torrent), and compact action icons; `CleanProgressBar` component used throughout; `TypeBadge` component for download type labels; empty state with protocol chips; material-backed window background.
+- **egui GUI (Linux/Windows) — complete redesign:** Apple-inspired system-adaptive color palette (light: `#F2F2F7` background, white cards / dark: pure black, `#1C1C1E` cards); left sidebar (180px) with Library navigation and per-category count badges; light/dark toggle button in sidebar; URL input card with Apple-style `↓` icon, inline Turbo/Verify toggles; 3px thin progress bar with shimmer; download cards with status dot, type badges, clean action buttons; proper card shadows; status bar with live stats.
+- **egui theme is now system-adaptive:** reads OS dark/light preference at startup; manual override button in sidebar.
+
 ## [1.6.3] - 2026-05-21
 
 ### Added

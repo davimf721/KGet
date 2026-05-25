@@ -64,6 +64,61 @@ const MIN_CHUNK_SIZE: u64 = 4 * 1024 * 1024;
 /// Maximum retry attempts per chunk
 const MAX_RETRIES: usize = 3;
 
+/// Controls how [`AdvancedDownloader`] behaves when user interaction would otherwise be required.
+///
+/// Non-interactive callers (library, `--jsonl`, automation) must use
+/// [`AlwaysResume`](ResumePolicy::AlwaysResume) or [`AlwaysRestart`](ResumePolicy::AlwaysRestart)
+/// to avoid blocking on stdin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ResumePolicy {
+    /// Block on stdin for user confirmation (interactive CLI only).
+    #[default]
+    Ask,
+    /// Proceed automatically without prompting; verifies integrity when a hash is set.
+    AlwaysResume,
+    /// Always restart from scratch, discarding any existing partial file.
+    AlwaysRestart,
+}
+
+/// Token bucket for global download rate limiting across parallel threads.
+///
+/// Unlike per-thread throttling, this bounds aggregate throughput regardless of
+/// how many threads are active.
+struct TokenBucket {
+    limit_bps: u64,
+    tokens: f64,
+    last_refill: Instant,
+}
+
+impl TokenBucket {
+    fn new(limit_bps: u64) -> Self {
+        Self {
+            limit_bps,
+            tokens: limit_bps as f64,
+            last_refill: Instant::now(),
+        }
+    }
+
+    /// Consume `n` bytes from the bucket and return how long to sleep before writing.
+    ///
+    /// The caller must release the lock before sleeping.
+    fn consume(&mut self, n: u64) -> Option<Duration> {
+        let elapsed = self.last_refill.elapsed();
+        let refill = elapsed.as_secs_f64() * self.limit_bps as f64;
+        self.tokens = (self.tokens + refill).min(self.limit_bps as f64);
+        self.last_refill = Instant::now();
+
+        if self.tokens >= n as f64 {
+            self.tokens -= n as f64;
+            None
+        } else {
+            let deficit = n as f64 - self.tokens;
+            self.tokens = 0.0;
+            Some(Duration::from_secs_f64(deficit / self.limit_bps as f64))
+        }
+    }
+}
+
 /// High-performance downloader with parallel connections and resume support.
 ///
 /// `AdvancedDownloader` is the recommended way to download large files. It provides:
@@ -129,6 +184,8 @@ pub struct AdvancedDownloader {
     status_callback: Option<Arc<dyn Fn(String) + Send + Sync>>,
     cancel_token: Arc<AtomicBool>,
     expected_sha256: Option<String>,
+    extra_headers: Vec<(String, String)>,
+    resume_policy: ResumePolicy,
 }
 
 impl AdvancedDownloader {
@@ -161,7 +218,7 @@ impl AdvancedDownloader {
         quiet_mode: bool,
         proxy_config: ProxyConfig,
         optimizer: Optimizer,
-    ) -> Self {
+    ) -> Result<Self, Box<dyn Error + Send + Sync>> {
         let _is_iso = url.to_lowercase().ends_with(".iso");
 
         let mut client_builder = Client::builder()
@@ -192,9 +249,9 @@ impl AdvancedDownloader {
 
         let client = client_builder
             .build()
-            .expect("Failed to create HTTP client");
+            .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
-        Self {
+        Ok(Self {
             client,
             url,
             output_path,
@@ -205,7 +262,9 @@ impl AdvancedDownloader {
             status_callback: None,
             cancel_token: Arc::new(AtomicBool::new(false)),
             expected_sha256: None,
-        }
+            extra_headers: Vec::new(),
+            resume_policy: ResumePolicy::default(),
+        })
     }
 
     /// Set a custom cancellation token for graceful download interruption.
@@ -275,6 +334,32 @@ impl AdvancedDownloader {
     /// Set an expected SHA-256 hash for automatic verification after download.
     pub fn set_expected_sha256(&mut self, expected_sha256: impl Into<String>) {
         self.expected_sha256 = Some(expected_sha256.into());
+    }
+
+    /// Set extra HTTP headers sent with every request (e.g. `Referer` or `Cookie`).
+    pub fn set_extra_headers(&mut self, headers: Vec<(String, String)>) {
+        self.extra_headers = headers;
+    }
+
+    /// Set how the downloader handles interactive prompts.
+    ///
+    /// Library and automation callers must set [`ResumePolicy::AlwaysResume`] to
+    /// avoid blocking on stdin.
+    pub fn set_resume_policy(&mut self, policy: ResumePolicy) {
+        self.resume_policy = policy;
+    }
+
+    /// Apply `self.extra_headers` to a request builder.
+    fn apply_headers(&self, mut req: reqwest::blocking::RequestBuilder) -> reqwest::blocking::RequestBuilder {
+        for (name, value) in &self.extra_headers {
+            if let (Ok(n), Ok(v)) = (
+                reqwest::header::HeaderName::from_bytes(name.as_bytes()),
+                reqwest::header::HeaderValue::from_str(value),
+            ) {
+                req = req.header(n, v);
+            }
+        }
+        req
     }
 
     fn send_status(&self, msg: &str) {
@@ -348,6 +433,13 @@ impl AdvancedDownloader {
             }
         }
 
+        // AlwaysRestart: discard any existing partial file and start fresh.
+        let existing_size = if self.resume_policy == ResumePolicy::AlwaysRestart {
+            None
+        } else {
+            existing_size
+        };
+
         // Create a progress bar if not quiet or if we have a callback
         let progress = if !self.quiet_mode || self.progress_callback.is_some() {
             let bar = ProgressBar::new(total_size);
@@ -378,12 +470,8 @@ impl AdvancedDownloader {
         } else {
             File::create(&self.output_path)?
         };
-        file.set_len(total_size)?;
-        if !self.quiet_mode {
-            println!("File preallocated to {} bytes", total_size);
-        }
 
-        // If range not supported, do a single download
+        // If range not supported, do a single download (no preallocation required)
         if !supports_range {
             if !self.quiet_mode {
                 println!("Range requests not supported, falling back to single-threaded download");
@@ -400,6 +488,12 @@ impl AdvancedDownloader {
             return Ok(());
         }
 
+        // Range supported: preallocate file so parallel chunk writes land at the right offsets.
+        file.set_len(total_size)?;
+        if !self.quiet_mode {
+            println!("File preallocated to {} bytes", total_size);
+        }
+
         // Calculate chunks for parallel download
         if !self.quiet_mode {
             println!("Calculating download chunks...");
@@ -408,6 +502,11 @@ impl AdvancedDownloader {
         if !self.quiet_mode {
             println!("Download will be split into {} chunks", chunks.len());
         }
+
+        // Build a global token bucket so the aggregate rate across all threads stays at the limit.
+        let throttle_bucket = self.optimizer.speed_limit.map(|limit| {
+            Arc::new(Mutex::new(TokenBucket::new(limit)))
+        });
 
         // Download parallel chunks
         if !self.quiet_mode {
@@ -419,6 +518,7 @@ impl AdvancedDownloader {
             progress.clone(),
             total_size,
             existing_size.unwrap_or(0),
+            throttle_bucket,
         )?;
 
         if let Some(ref bar) = progress {
@@ -430,17 +530,23 @@ impl AdvancedDownloader {
         // Verify download integrity
         if !self.quiet_mode || self.status_callback.is_some() {
             if is_iso || self.expected_sha256.is_some() {
-                let should_verify = if self.status_callback.is_some() {
-                    true
-                } else if self.expected_sha256.is_some() {
+                let should_verify = if self.status_callback.is_some()
+                    || self.expected_sha256.is_some()
+                {
                     true
                 } else {
-                    println!(
-                        "\nThis is an ISO file. Would you like to verify its integrity? (y/N)"
-                    );
-                    let mut input = String::new();
-                    std::io::stdin().read_line(&mut input).is_ok()
-                        && input.trim().to_lowercase() == "y"
+                    match self.resume_policy {
+                        ResumePolicy::Ask => {
+                            println!(
+                                "\nThis is an ISO file. Would you like to verify its integrity? (y/N)"
+                            );
+                            let mut input = String::new();
+                            std::io::stdin().read_line(&mut input).is_ok()
+                                && input.trim().to_lowercase() == "y"
+                        }
+                        ResumePolicy::AlwaysResume => true,
+                        ResumePolicy::AlwaysRestart => false,
+                    }
                 };
 
                 if should_verify {
@@ -464,7 +570,7 @@ impl AdvancedDownloader {
     }
 
     fn get_file_size_and_range(&self) -> Result<(u64, bool), Box<dyn Error + Send + Sync>> {
-        let head_response = self.client.head(&self.url).send();
+        let head_response = self.apply_headers(self.client.head(&self.url)).send();
         let Ok(response) = head_response else {
             return self.get_file_size_with_range_probe();
         };
@@ -495,8 +601,7 @@ impl AdvancedDownloader {
 
     fn get_file_size_with_range_probe(&self) -> Result<(u64, bool), Box<dyn Error + Send + Sync>> {
         let response = self
-            .client
-            .get(&self.url)
+            .apply_headers(self.client.get(&self.url))
             .header(reqwest::header::RANGE, "bytes=0-0")
             .send()?;
 
@@ -555,7 +660,7 @@ impl AdvancedDownloader {
         offset: u64,
         progress: Option<Arc<Mutex<ProgressBar>>>,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let response = self.client.get(&self.url).send()?;
+        let response = self.apply_headers(self.client.get(&self.url)).send()?;
         if offset > 0 {
             // Resume not possible without range; warn
             return Err("Server does not support range; cannot resume partial file".into());
@@ -609,19 +714,18 @@ impl AdvancedDownloader {
         progress: Option<Arc<Mutex<ProgressBar>>>,
         total_size: u64,
         initial_downloaded: u64,
+        throttle_bucket: Option<Arc<Mutex<TokenBucket>>>,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let file = Arc::new(file);
         let client = Arc::new(self.client.clone());
         let url = Arc::new(self.url.clone());
-        let _optimizer = Arc::new(self.optimizer.clone());
         let progress_callback = self.progress_callback.clone();
         let cancel_token = self.cancel_token.clone();
+        let extra_headers = Arc::new(self.extra_headers.clone());
 
         // Shared progress counter for pipe-friendly output
         let downloaded_bytes = Arc::new(AtomicU64::new(initial_downloaded));
         let last_print_time = Arc::new(Mutex::new(Instant::now()));
-        let started_at = Arc::new(Instant::now());
-        let speed_limit = self.optimizer.speed_limit;
         let quiet_mode = self.quiet_mode;
 
         chunks.par_iter().try_for_each(|&(start, end)| {
@@ -640,7 +744,15 @@ impl AdvancedDownloader {
                     return Err("Download cancelled".into());
                 }
 
-                let request = client.get(url.as_str());
+                let mut request = client.get(url.as_str());
+                for (name, value) in extra_headers.as_ref() {
+                    if let (Ok(n), Ok(v)) = (
+                        reqwest::header::HeaderName::from_bytes(name.as_bytes()),
+                        reqwest::header::HeaderValue::from_str(value),
+                    ) {
+                        request = request.header(n, v);
+                    }
+                }
                 let request = request.header(reqwest::header::RANGE, range_header.clone());
 
                 match request.send() {
@@ -694,11 +806,17 @@ impl AdvancedDownloader {
                                     }
                                 }
 
-                                throttle_parallel_download(
-                                    new_downloaded.saturating_sub(initial_downloaded),
-                                    *started_at,
-                                    speed_limit,
-                                );
+                                if let Some(ref bucket) = throttle_bucket {
+                                    let sleep_dur = {
+                                        let mut guard = bucket
+                                            .lock()
+                                            .expect("throttle bucket poisoned");
+                                        guard.consume(n as u64)
+                                    };
+                                    if let Some(dur) = sleep_dur {
+                                        std::thread::sleep(dur);
+                                    }
+                                }
 
                                 if let Some(ref bar) = progress {
                                     let guard = bar.lock().expect("Progress bar mutex was poisoned");
@@ -804,15 +922,3 @@ fn parse_content_range_total(value: &str) -> Option<u64> {
     total.parse::<u64>().ok()
 }
 
-fn throttle_parallel_download(downloaded_this_run: u64, started_at: Instant, speed_limit: Option<u64>) {
-    let Some(limit) = speed_limit else { return };
-    if limit == 0 {
-        return;
-    }
-
-    let expected_elapsed = Duration::from_secs_f64(downloaded_this_run as f64 / limit as f64);
-    let actual_elapsed = started_at.elapsed();
-    if expected_elapsed > actual_elapsed {
-        std::thread::sleep(expected_elapsed - actual_elapsed);
-    }
-}

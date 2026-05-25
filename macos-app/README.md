@@ -1,56 +1,54 @@
 # KGet Native macOS App
 
-A native macOS frontend for KGet built with SwiftUI, providing deep system integration.
+A native macOS frontend for KGet built with SwiftUI, providing deep system integration. Requires macOS 13.0+.
 
 ## Features
 
-### 🖥️ Native SwiftUI Interface
-- Modern, native macOS look and feel
-- Dark mode support
-- Drag and drop support
+### Modern SwiftUI Interface (v1.7.0 redesign)
+- `NavigationSplitView` layout with collapsible sidebar
+- Sidebar: All / Active / Completed / Failed nav items with live count badges
+- Clean URL input bar with inline Turbo toggle
+- 3px thin progress bar with shimmer animation
+- Download cards: status dot, type badges (Turbo / ISO / Torrent), compact action icons
+- Empty state with protocol chips
 
-### 📍 Menu Bar Integration
-- Always-accessible menu bar icon
-- Quick download from clipboard
-- View active downloads at a glance
+### Download Features
+- **Drag-and-drop URLs** — drag any HTTP/HTTPS/FTP/magnet link into the window
+- **Clipboard monitor** — detects new URLs every 1.5s, shows dismissable banner with one-click download
+- **Speed sparkline** — 44×16pt real-time speed graph per active download (last 30 samples)
+- **History tab** — full download history from `history.json`; hover to re-download
+- **yt-dlp auto-detection** — video URLs routed through yt-dlp; quality picker in Settings
+- **WebDAV support** — `webdav://` and `webdavs://` auto-detected from URL scheme
+- **Auto-extract archives** — toggle in Settings → Downloads
 
-### 🔗 URL Scheme Handlers
-- `kget://example.com/file.zip` - Opens KGet and starts download
-- `magnet:?xt=...` - Handles magnet links directly
-
-### 📁 File Associations
-- `.torrent` files - Open with KGet
-- `.metalink` files - Open with KGet
-
-### 🔧 macOS Services Menu
-- Select any URL in any app
-- Right-click → Services → "Download with KGet"
-
-### 📤 Share Extension
-- Share URLs from Safari directly to KGet
-- Works with any app that supports sharing
-
-### 🔔 Native Notifications
-- Download completion notifications
-- Error notifications
+### System Integration
+- **Menu bar icon** — always-accessible, shows active download count
+- **Share Extension** — share URLs from Safari (or any app) directly to KGet
+- **URL scheme** — `kget://download?url=<encoded>` opens KGet and starts a download
+- **Magnet links** — `.torrent` and magnet: links handled directly
+- **Native notifications** — download completion and error notifications
 
 ## Building
 
-### Quick Build (CLI)
 ```bash
+# Build CLI backend + Swift app + DMG
 ./build-native-macos.sh
 ```
 
-### With Xcode
-1. Open `macos-app/` folder in Xcode
-2. Build and run
+The script:
+1. Builds the Rust binary with all features (`gui,torrent-native,torrent-transmission`)
+2. Compiles the Swift app via `swift build`
+3. Assembles `KGet.app` bundle with the Rust binary renamed to `kget-bin`
+4. Compiles and embeds `KGetShareExtension.appex` into `Contents/PlugIns/`
+5. Creates `release/KGet-<version>-macOS-Native.dmg`
 
 ## Requirements
-- macOS 13.0+
-- Xcode 15+
-- Rust toolchain (for backend)
 
-## Architecture
+- macOS 13.0+
+- Xcode 15+ (or Swift 5.9+ command line tools)
+- Rust toolchain (`rustup.rs`)
+
+## App Bundle Layout
 
 ```
 KGet.app/
@@ -61,37 +59,49 @@ KGet.app/
 │   ├── Resources/
 │   │   └── AppIcon.icns
 │   ├── PlugIns/
-│   │   └── ShareExtension.appex
+│   │   └── KGetShareExtension.appex
 │   └── Info.plist
 ```
 
 The Swift frontend handles:
-- UI rendering (SwiftUI)
-- System integration (URL schemes, Services, notifications)
-- Download management
+- UI rendering (SwiftUI + AppKit integration)
+- System integration (URL schemes, Share Extension, notifications, drag-and-drop)
+- Download queue management and history display
+- Clipboard monitoring and sparkline charting
 
 The Rust backend (`kget-bin`) handles:
-- Actual file downloads
-- FTP/SFTP/HTTP protocols
-- Torrent integration
-- Progress reporting
+- All actual file downloads (HTTP/HTTPS, FTP, SFTP, WebDAV, torrent)
+- Progress reporting via stdout (transitioning to JSONL)
+- yt-dlp subprocess management
+- History persistence
+
+## Key Source Files
+
+| File | Purpose |
+|------|---------|
+| `KGet/ContentView.swift` | Main `NavigationSplitView` UI, sidebar, download list |
+| `KGet/DownloadManager.swift` | ObservableObject driving Rust subprocess, clipboard monitor, history |
+| `KGet/MenuBarView.swift` | Menu bar extra with active download count |
+| `KGet/SettingsView.swift` | Settings panel (connections, speed limit, yt-dlp quality, auto-extract) |
+| `KGet/KGetApp.swift` | App entry point, URL scheme handler (`kget://download?url=`) |
+| `ShareExtension/ShareViewController.swift` | Share Extension entry point |
+| `Package.swift` | Swift package manifest |
 
 ## Development
 
-### Adding new features
+1. **Swift-side changes**: edit files in `macos-app/KGet/`
+2. **Rust-side changes**: edit files in `src/`
+3. Rebuild with `./build-native-macos.sh`
 
-1. **Swift-side changes**: Edit files in `macos-app/KGet/`
-2. **Rust-side changes**: Edit files in `src/`
-3. Run `./build-native-macos.sh` to rebuild
-
-### Debugging
+Debugging:
 ```bash
-# Run Swift app directly
-swift run -c release
+# Test Rust backend directly
+./target/release/kget --jsonl https://example.com/file.zip
 
-# Test Rust backend
-cargo run -- https://example.com/file.zip
+# Watch JSONL events
+./target/release/kget --jsonl -a https://example.com/file.zip | jq .
 ```
 
 ## License
-MIT License - see [LICENSE](../LICENSE)
+
+MIT — see [LICENSE](../LICENSE)

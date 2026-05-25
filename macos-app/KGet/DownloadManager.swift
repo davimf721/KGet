@@ -10,6 +10,7 @@ import Combine
 import UserNotifications
 import CommonCrypto
 import AppKit
+import SwiftUI
 
 // MARK: - Constants
 
@@ -320,14 +321,21 @@ class DownloadManager: ObservableObject {
     @Published var showNotifications = true
     @Published var useAdvancedByDefault = false
     @Published var speedLimitKBPerSecond = ""
-    
+    @Published var autoExtract = false
+    @Published var videoQuality = "best"
+    @Published var historyEntries: [HistoryEntry] = []
+    @Published var clipboardDetectedURL: String?
+
     private var processes: [UUID: Process] = [:]
     private var progressTimers: [UUID: Timer] = [:]
     private var cancellables = Set<AnyCancellable>()
+    private var clipboardChangeCount = NSPasteboard.general.changeCount
+    private var clipboardTimer: Timer?
     
     init() {
         defaultDownloadPath = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
         loadSettings()
+        startClipboardMonitoring()
     }
     
     // MARK: - Public API
@@ -444,6 +452,44 @@ class DownloadManager: ObservableObject {
         }
     }
     
+    func loadHistory() {
+        guard let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return }
+        let historyURL = appSupport.appendingPathComponent("kget/history.json")
+        guard let data = try? Data(contentsOf: historyURL),
+              let entries = try? JSONDecoder().decode([HistoryEntry].self, from: data) else { return }
+        historyEntries = entries.sorted { $0.createdAt > $1.createdAt }
+    }
+
+    func dismissClipboardURL() {
+        clipboardDetectedURL = nil
+    }
+
+    func isDownloadableURL(_ string: String) -> Bool {
+        let t = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.hasPrefix("http://") || t.hasPrefix("https://")
+            || t.hasPrefix("ftp://") || t.hasPrefix("sftp://")
+            || t.hasPrefix("webdav://") || t.hasPrefix("webdavs://")
+            || t.lowercased().hasPrefix("magnet:?")
+    }
+
+    func isVideoURL(_ string: String) -> Bool {
+        let hosts = [
+            "youtube.com/watch", "youtube.com/shorts", "youtu.be/",
+            "vimeo.com/", "dailymotion.com/video", "twitch.tv/",
+            "twitter.com/i/status", "x.com/i/status",
+            "instagram.com/reel", "instagram.com/p/",
+            "tiktok.com/", "facebook.com/watch", "facebook.com/videos",
+            "bilibili.com/video", "rumble.com/v",
+        ]
+        let lower = string.lowercased()
+        return hosts.contains(where: { lower.contains($0) })
+    }
+
+    func isWebDAVURL(_ string: String) -> Bool {
+        let lower = string.lowercased()
+        return lower.hasPrefix("webdav://") || lower.hasPrefix("webdavs://")
+    }
+
     func saveSettings() {
         UserDefaults.standard.set(defaultDownloadPath.path, forKey: "defaultDownloadPath")
         UserDefaults.standard.set(isMenuBarOnly, forKey: "isMenuBarOnly")
@@ -451,10 +497,35 @@ class DownloadManager: ObservableObject {
         UserDefaults.standard.set(showNotifications, forKey: "showNotifications")
         UserDefaults.standard.set(useAdvancedByDefault, forKey: "useAdvancedByDefault")
         UserDefaults.standard.set(speedLimitKBPerSecond, forKey: "speedLimitKBPerSecond")
+        UserDefaults.standard.set(autoExtract, forKey: "autoExtract")
+        UserDefaults.standard.set(videoQuality, forKey: "videoQuality")
     }
     
+    // MARK: - Clipboard Monitoring
+
+    private func startClipboardMonitoring() {
+        clipboardTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+            self?.checkClipboard()
+        }
+        if let timer = clipboardTimer {
+            RunLoop.main.add(timer, forMode: .common)
+        }
+    }
+
+    private func checkClipboard() {
+        let currentCount = NSPasteboard.general.changeCount
+        guard currentCount != clipboardChangeCount else { return }
+        clipboardChangeCount = currentCount
+        guard let string = NSPasteboard.general.string(forType: .string) else { return }
+        let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard isDownloadableURL(trimmed) else { return }
+        guard !downloads.contains(where: { $0.url == trimmed }) else { return }
+        guard clipboardDetectedURL != trimmed else { return }
+        DispatchQueue.main.async { self.clipboardDetectedURL = trimmed }
+    }
+
     // MARK: - Private Helpers
-    
+
     private func createDownload(from config: DownloadConfiguration) -> Download {
         let filename = FilenameExtractor.extract(from: config.url)
         let fullPath = (config.outputPath as NSString).appendingPathComponent(filename)
@@ -511,6 +582,10 @@ class DownloadManager: ObservableObject {
         }
         useAdvancedByDefault = UserDefaults.standard.bool(forKey: "useAdvancedByDefault")
         speedLimitKBPerSecond = UserDefaults.standard.string(forKey: "speedLimitKBPerSecond") ?? ""
+        if UserDefaults.standard.object(forKey: "autoExtract") != nil {
+            autoExtract = UserDefaults.standard.bool(forKey: "autoExtract")
+        }
+        videoQuality = UserDefaults.standard.string(forKey: "videoQuality") ?? "best"
     }
     
     func verifyISOChecksum(_ download: Download) {
@@ -575,15 +650,41 @@ class DownloadManager: ObservableObject {
     }
     
     private func buildArguments(for download: Download, advanced: Bool) -> [String] {
+        let isVideo = isVideoURL(download.url)
+        let isWebDAV = isWebDAVURL(download.url)
+
+        if isVideo {
+            // Route through yt-dlp; output dir is the parent folder
+            let outputDir = (download.fullFilePath as NSString).deletingLastPathComponent
+            return [download.url, "--ytdlp", "--quality", videoQuality, "-O", outputDir]
+        }
+
         var args = [download.url, "-O", download.fullFilePath]
-        if advanced { args.append("-a") }
+
+        if isWebDAV {
+            args.append("--webdav")
+        } else if advanced {
+            args.append("-a")
+        }
+
         if let speedLimit = speedLimitBytesPerSecond() {
             args.append(contentsOf: ["-l", "\(speedLimit)"])
         }
         if let expectedSHA256 = download.expectedSHA256 {
             args.append(contentsOf: ["--sha256", expectedSHA256])
         }
+        if autoExtract && isArchiveFilename(download.filename) {
+            args.append("--extract")
+        }
         return args
+    }
+
+    private func isArchiveFilename(_ name: String) -> Bool {
+        let n = name.lowercased()
+        return n.hasSuffix(".zip") || n.hasSuffix(".tar.gz") || n.hasSuffix(".tgz")
+            || n.hasSuffix(".tar.bz2") || n.hasSuffix(".tbz2")
+            || n.hasSuffix(".tar.xz") || n.hasSuffix(".txz")
+            || n.hasSuffix(".7z")
     }
 
     private func speedLimitBytesPerSecond() -> Int? {
@@ -644,7 +745,15 @@ class DownloadManager: ObservableObject {
             dl.status = .downloading
             if !parsed.downloadedSize.isEmpty { dl.downloadedSize = parsed.downloadedSize }
             if !parsed.totalSize.isEmpty { dl.totalSize = parsed.totalSize }
-            if !parsed.speed.isEmpty { dl.speed = parsed.speed }
+            if !parsed.speed.isEmpty {
+                dl.speed = parsed.speed
+                let raw = self.speedStringToBytes(parsed.speed)
+                if raw > 0 {
+                    dl.speedRaw = raw
+                    dl.speedHistory.append(raw)
+                    if dl.speedHistory.count > 30 { dl.speedHistory.removeFirst() }
+                }
+            }
             if !parsed.eta.isEmpty { dl.eta = parsed.eta }
         }
     }
@@ -801,6 +910,11 @@ class DownloadManager: ObservableObject {
         downloads[index].downloadedSize = Formatters.formatBytes(currentSize)
         downloads[index].speed = Formatters.formatSpeed(speed)
         downloads[index].eta = eta
+        if speed > 0 {
+            downloads[index].speedRaw = speed
+            downloads[index].speedHistory.append(speed)
+            if downloads[index].speedHistory.count > 30 { downloads[index].speedHistory.removeFirst() }
+        }
         
         if expectedBytes > 0 {
             downloads[index].totalSize = Formatters.formatBytes(expectedBytes)
@@ -822,6 +936,18 @@ class DownloadManager: ObservableObject {
     
     private func getFileSize(_ path: String) -> Int64 {
         (try? FileManager.default.attributesOfItem(atPath: path)[.size] as? Int64) ?? 0
+    }
+
+    private func speedStringToBytes(_ s: String) -> Double {
+        let lower = s.lowercased()
+        let multiplier: Double
+        if lower.contains("gb/s") { multiplier = 1_000_000_000 }
+        else if lower.contains("mb/s") { multiplier = 1_000_000 }
+        else if lower.contains("kb/s") { multiplier = 1_000 }
+        else if lower.contains("b/s") { multiplier = 1 }
+        else { return 0 }
+        let digits = lower.components(separatedBy: CharacterSet.decimalDigits.union(CharacterSet(charactersIn: ".")).inverted).joined()
+        return (Double(digits) ?? 0) * multiplier
     }
     
     // MARK: - Notifications
@@ -873,7 +999,9 @@ struct Download: Identifiable {
     var verificationProgress: Double
     var torrentFiles: [TorrentFile]
     var isExpanded: Bool
-    
+    var speedRaw: Double          // current bytes/s (for sparkline)
+    var speedHistory: [Double]    // last 30 readings in bytes/s
+
     init(id: UUID, url: String, outputPath: String, fullFilePath: String, status: DownloadStatus,
          progress: Double, speed: String, eta: String, totalSize: String = "", downloadedSize: String = "",
          expectedBytes: Int64 = 0, error: String? = nil, isISO: Bool = false, isTorrent: Bool = false,
@@ -902,6 +1030,8 @@ struct Download: Identifiable {
         self.verificationProgress = verificationProgress
         self.torrentFiles = torrentFiles
         self.isExpanded = isExpanded
+        self.speedRaw = 0
+        self.speedHistory = []
     }
     
     var filename: String { URL(string: url)?.lastPathComponent ?? "download" }
@@ -914,9 +1044,9 @@ struct Download: Identifiable {
 
 enum DownloadStatus: String, CaseIterable {
     case pending, downloading, verifying, completed, failed, cancelled
-    
+
     var displayName: String { rawValue.capitalized }
-    
+
     var systemImage: String {
         switch self {
         case .pending: return "clock"
@@ -927,7 +1057,7 @@ enum DownloadStatus: String, CaseIterable {
         case .cancelled: return "xmark.circle.fill"
         }
     }
-    
+
     var color: String {
         switch self {
         case .pending: return "gray"
@@ -936,6 +1066,58 @@ enum DownloadStatus: String, CaseIterable {
         case .completed: return "green"
         case .failed: return "red"
         case .cancelled: return "orange"
+        }
+    }
+}
+
+// MARK: - History Entry
+
+struct HistoryEntry: Codable, Identifiable {
+    let id: String
+    let url: String
+    let filename: String
+    let outputDir: String
+    let status: String
+    let bytesTotal: Int64?
+    let sha256: String?
+    let expectedSha256: String?
+    let createdAt: UInt64
+    let finishedAt: UInt64?
+    let error: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, url, filename, status, error, sha256
+        case outputDir = "output_dir"
+        case bytesTotal = "bytes_total"
+        case expectedSha256 = "expected_sha256"
+        case createdAt = "created_at"
+        case finishedAt = "finished_at"
+    }
+
+    var createdAtDate: Date {
+        Date(timeIntervalSince1970: TimeInterval(createdAt))
+    }
+
+    var bytesFormatted: String? {
+        guard let bytes = bytesTotal else { return nil }
+        return ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+
+    var statusColor: Color {
+        switch status {
+        case "completed": return .green
+        case "failed":    return .red
+        case "cancelled": return .orange
+        default:          return .secondary
+        }
+    }
+
+    var statusIcon: String {
+        switch status {
+        case "completed": return "checkmark.circle.fill"
+        case "failed":    return "xmark.circle.fill"
+        case "cancelled": return "minus.circle.fill"
+        default:          return "clock"
         }
     }
 }

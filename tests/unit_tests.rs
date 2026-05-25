@@ -226,7 +226,10 @@ mod content_disposition_tests {
 
     #[test]
     fn test_empty_filename_falls_through() {
-        assert_eq!(parse_content_disposition_filename(r#"attachment; filename="""#), None);
+        assert_eq!(
+            parse_content_disposition_filename(r#"attachment; filename="""#),
+            None
+        );
     }
 }
 
@@ -261,6 +264,49 @@ mod download_tests {
     fn test_validate_filename_rejects_all_platform_separators() {
         assert!(validate_filename("path/file.txt").is_err());
         assert!(validate_filename(r"path\file.txt").is_err());
+    }
+
+    #[test]
+    fn test_validate_filename_rejects_null_byte() {
+        let name = "file\0name.txt";
+        let result = validate_filename(name);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("null"));
+    }
+
+    #[test]
+    fn test_validate_filename_rejects_path_traversal() {
+        assert!(validate_filename("../etc/passwd").is_err());
+        assert!(validate_filename("../../secret").is_err());
+        assert!(validate_filename("..").is_err());
+    }
+
+    #[test]
+    fn test_validate_filename_rejects_too_long() {
+        let long = format!("{}.txt", "a".repeat(253)); // 253 + 4 = 257 > 255
+        let result = validate_filename(&long);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("255"));
+    }
+
+    #[test]
+    fn test_validate_filename_rejects_windows_reserved() {
+        for name in &["CON", "PRN", "AUX", "NUL", "COM1", "COM9", "LPT1", "LPT9"] {
+            let result = validate_filename(name);
+            assert!(result.is_err(), "{} should be rejected", name);
+        }
+        // Reserved names with extension
+        assert!(validate_filename("NUL.txt").is_err());
+        assert!(validate_filename("COM1.exe").is_err());
+        // Case-insensitive
+        assert!(validate_filename("nul").is_err());
+        assert!(validate_filename("Con").is_err());
+    }
+
+    #[test]
+    fn test_validate_filename_exactly_255_bytes_ok() {
+        let name = "a".repeat(255);
+        assert!(validate_filename(&name).is_ok());
     }
 
     #[test]
@@ -342,6 +388,7 @@ mod download_options_tests {
             output_path: Some("/tmp/download.iso".to_string()),
             verify_iso: true,
             expected_sha256: Some("abc123".to_string()),
+            extra_headers: Vec::new(),
         };
 
         assert!(options.quiet_mode);
@@ -357,6 +404,7 @@ mod download_options_tests {
             output_path: Some("file.txt".to_string()),
             verify_iso: false,
             expected_sha256: None,
+            extra_headers: Vec::new(),
         };
 
         let cloned = original.clone();
@@ -535,8 +583,10 @@ mod url_edge_cases {
     }
 
     #[test]
-    fn test_very_long_filename() {
-        let long_name = "a".repeat(255);
+    fn test_very_long_filename_extracted_from_url() {
+        // get_filename_from_url_or_default extracts what the server claims — validation is
+        // a separate step (validate_filename). This test verifies extraction still works.
+        let long_name = "a".repeat(200);
         let url = format!("https://example.com/{}.txt", long_name);
         let filename = get_filename_from_url_or_default(&url, "default.txt");
         assert_eq!(filename, format!("{}.txt", long_name));

@@ -2,111 +2,563 @@
 //  ContentView.swift
 //  KGet
 //
-//  Main window view with logo, progress bars, and file management
+//  Liquid Glass design — glass pill URL bar, translucent materials, fluid shapes
 //
 
 import SwiftUI
+import UniformTypeIdentifiers
 
-private enum DownloadFilter: String, CaseIterable, Identifiable {
-    case all = "All"
+// MARK: - Sidebar Navigation
+
+private enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
+    case all = "All Downloads"
     case active = "Active"
     case completed = "Completed"
     case failed = "Failed"
+    case history = "History"
 
     var id: String { rawValue }
+
+    var systemImage: String {
+        switch self {
+        case .all:       return "arrow.down.circle"
+        case .active:    return "arrow.down"
+        case .completed: return "checkmark.circle"
+        case .failed:    return "xmark.circle"
+        case .history:   return "clock.arrow.circlepath"
+        }
+    }
 }
+
+// MARK: - Liquid Glass Modifiers
+
+struct GlassCard: ViewModifier {
+    var cornerRadius: CGFloat = 12
+    var isSelected: Bool = false
+    var isHovered: Bool = false
+
+    func body(content: Content) -> some View {
+        content
+            .background {
+                ZStack {
+                    RoundedRectangle(cornerRadius: cornerRadius)
+                        .fill(.ultraThinMaterial)
+                    RoundedRectangle(cornerRadius: cornerRadius)
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    Color.white.opacity(isHovered ? 0.18 : 0.10),
+                                    Color.white.opacity(0.02)
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                    if isSelected {
+                        RoundedRectangle(cornerRadius: cornerRadius)
+                            .fill(Color.accentColor.opacity(0.10))
+                    }
+                }
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: cornerRadius)
+                    .strokeBorder(
+                        LinearGradient(
+                            colors: [
+                                Color.white.opacity(isSelected ? 0.55 : 0.35),
+                                Color.white.opacity(0.08)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        lineWidth: 0.75
+                    )
+            }
+            .shadow(color: .black.opacity(isHovered ? 0.12 : 0.06), radius: isHovered ? 8 : 4, y: 2)
+    }
+}
+
+extension View {
+    func glassCard(cornerRadius: CGFloat = 12, isSelected: Bool = false, isHovered: Bool = false) -> some View {
+        modifier(GlassCard(cornerRadius: cornerRadius, isSelected: isSelected, isHovered: isHovered))
+    }
+}
+
+// MARK: - Content View
 
 struct ContentView: View {
     @EnvironmentObject var downloadManager: DownloadManager
     @State private var urlInput = ""
     @State private var useAdvancedMode = false
-    @State private var selectedFilter: DownloadFilter = .all
+    @State private var selectedSidebar: SidebarItem? = .all
     @State private var showDeleteAlert = false
     @State private var downloadToDelete: Download?
-    @State private var deleteFileAlso = false
+    @State private var isDragTargeted = false
     @FocusState private var urlFieldFocused: Bool
-    
+
+    private var currentFilter: SidebarItem { selectedSidebar ?? .all }
+
+    private var filteredDownloads: [Download] {
+        switch currentFilter {
+        case .all:       return downloadManager.downloads
+        case .active:    return downloadManager.downloads.filter { $0.status == .downloading || $0.status == .verifying || $0.status == .pending }
+        case .completed: return downloadManager.downloads.filter { $0.status == .completed }
+        case .failed:    return downloadManager.downloads.filter { $0.status == .failed || $0.status == .cancelled }
+        case .history:   return []
+        }
+    }
+
     var body: some View {
-        VStack(spacing: 0) {
-            // Header with logo and new download input
-            HeaderView(
-                urlInput: $urlInput,
-                useAdvancedMode: $useAdvancedMode,
-                urlFieldFocused: $urlFieldFocused,
-                validationError: downloadManager.lastStartError,
-                startDownload: startDownload,
-                pasteAndDownload: pasteAndDownload
-            )
-            
-            Divider()
+        NavigationSplitView {
+            sidebarView
+        } detail: {
+            detailView
+        }
+        .navigationSplitViewStyle(.balanced)
+        .frame(minWidth: 720, minHeight: 500)
+        .onAppear { useAdvancedMode = downloadManager.useAdvancedByDefault }
+        .alert("Delete Download", isPresented: $showDeleteAlert, presenting: downloadToDelete) { dl in
+            Button("Delete from List Only", role: .cancel) { downloadManager.deleteDownload(dl, deleteFile: false) }
+            Button("Delete File Also", role: .destructive) { downloadManager.deleteDownload(dl, deleteFile: true) }
+            Button("Cancel", role: .cancel) {}
+        } message: { dl in
+            Text("Delete '\(dl.filename)' from list, or also delete the downloaded file?")
+        }
+        .background(hiddenShortcuts)
+    }
 
-            if !downloadManager.downloads.isEmpty {
-                filterBar
-                    .padding(.horizontal)
-                    .padding(.vertical, 8)
+    // MARK: - Sidebar
 
-                Divider()
-            }
-            
-            // Downloads list
-            if downloadManager.downloads.isEmpty {
-                EmptyStateView()
-            } else if filteredDownloads.isEmpty {
-                EmptyFilteredStateView(filter: selectedFilter.rawValue)
-            } else {
-                ScrollView {
-                    LazyVStack(spacing: 8) {
-                        ForEach(filteredDownloads) { download in
-                            DownloadRowView(
-                                download: download,
-                                isSelected: downloadManager.selectedDownloadId == download.id,
-                                onDelete: { dl in
-                                    downloadToDelete = dl
-                                    showDeleteAlert = true
-                                },
-                                onVerify: { dl in
-                                    downloadManager.verifyISOChecksum(dl)
-                                }
-                            )
-                            .padding(.horizontal)
-                            .onTapGesture {
-                                downloadManager.selectedDownloadId = download.id
-                            }
-                        }
-                    }
-                    .padding(.vertical, 8)
+    private var sidebarView: some View {
+        List(SidebarItem.allCases, id: \.self, selection: $selectedSidebar) { item in
+            HStack {
+                Label(item.rawValue, systemImage: item.systemImage)
+                Spacer()
+                let count = downloadCount(for: item)
+                if count > 0 {
+                    Text("\(count)")
+                        .font(.system(.caption2, design: .rounded))
+                        .fontWeight(.semibold)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(.secondary.opacity(0.15))
+                        .clipShape(Capsule())
                 }
             }
-            
-            // Footer
-            FooterView()
+            .tag(item)
         }
-        .frame(minWidth: 650, minHeight: 450)
-        .background(shortcutButtons)
+        .listStyle(.sidebar)
+        .navigationSplitViewColumnWidth(min: 160, ideal: 190, max: 240)
+        .navigationTitle("KGet")
+    }
+
+    private func downloadCount(for item: SidebarItem) -> Int {
+        switch item {
+        case .all:       return downloadManager.downloads.count
+        case .active:    return downloadManager.downloads.filter { $0.status == .downloading || $0.status == .verifying || $0.status == .pending }.count
+        case .completed: return downloadManager.downloads.filter { $0.status == .completed }.count
+        case .failed:    return downloadManager.downloads.filter { $0.status == .failed || $0.status == .cancelled }.count
+        case .history:   return downloadManager.historyEntries.count
+        }
+    }
+
+    // MARK: - Detail
+
+    private var detailView: some View {
+        VStack(spacing: 0) {
+            if currentFilter == .history {
+                historyView
+            } else {
+                downloadsView
+            }
+        }
+        .background(Color(NSColor.windowBackgroundColor))
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
+                if currentFilter != .history,
+                   downloadManager.downloads.filter({ $0.status == .completed }).count > 0 {
+                    Button("Clear Completed") { downloadManager.clearCompleted() }
+                }
+            }
+        }
         .sheet(isPresented: $downloadManager.showNewDownloadSheet) {
             NewDownloadSheet()
         }
-        .onAppear {
-            useAdvancedMode = downloadManager.useAdvancedByDefault
+        .onDrop(of: [UTType.url, UTType.plainText], isTargeted: $isDragTargeted) { providers in
+            handleURLDrop(providers: providers)
         }
-        .alert("Delete Download", isPresented: $showDeleteAlert, presenting: downloadToDelete) { download in
-            Button("Delete from List Only", role: .cancel) {
-                downloadManager.deleteDownload(download, deleteFile: false)
+        .overlay {
+            if isDragTargeted {
+                ZStack {
+                    Color.accentColor.opacity(0.08)
+                    VStack(spacing: 12) {
+                        Image(systemName: "arrow.down.circle.fill")
+                            .font(.system(size: 52, weight: .light))
+                        Text("Drop URL here")
+                            .font(.title2).fontWeight(.semibold)
+                    }
+                    .foregroundStyle(Color.accentColor.opacity(0.75))
+                }
+                .allowsHitTesting(false)
+                .transition(.opacity)
+                .animation(.easeInOut(duration: 0.15), value: isDragTargeted)
             }
-            Button("Delete File Also", role: .destructive) {
-                downloadManager.deleteDownload(download, deleteFile: true)
+        }
+        .onChange(of: selectedSidebar) { sidebar in
+            if sidebar == .history { downloadManager.loadHistory() }
+        }
+        .animation(.easeInOut(duration: 0.25), value: downloadManager.clipboardDetectedURL)
+    }
+
+    // MARK: - Downloads (normal mode)
+
+    private var downloadsView: some View {
+        VStack(spacing: 0) {
+            if let url = downloadManager.clipboardDetectedURL {
+                clipboardBannerView(url: url)
+                    .transition(.move(edge: .top).combined(with: .opacity))
             }
-            Button("Cancel", role: .cancel) {}
-        } message: { download in
-            Text("Do you want to delete '\(download.filename)' from the list, or also delete the downloaded file?")
+
+            urlInputBar
+
+            if filteredDownloads.isEmpty {
+                emptyState
+            } else {
+                downloadsList
+            }
+
+            if !downloadManager.downloads.isEmpty {
+                footerBar
+            }
         }
     }
-    
+
+    // MARK: - History View
+
+    private var historyView: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Download History")
+                    .font(.headline)
+                Spacer()
+                Button { downloadManager.loadHistory() } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 12))
+                }
+                .buttonStyle(.plain)
+                .help("Refresh history")
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .overlay(alignment: .bottom) { Divider().opacity(0.45) }
+
+            if downloadManager.historyEntries.isEmpty {
+                VStack(spacing: 16) {
+                    Spacer()
+                    ZStack {
+                        Circle().fill(.ultraThinMaterial)
+                            .overlay {
+                                Circle().fill(LinearGradient(
+                                    colors: [Color.white.opacity(0.18), Color.white.opacity(0.02)],
+                                    startPoint: .topLeading, endPoint: .bottomTrailing
+                                ))
+                                Circle().strokeBorder(LinearGradient(
+                                    colors: [Color.white.opacity(0.45), Color.white.opacity(0.08)],
+                                    startPoint: .topLeading, endPoint: .bottomTrailing
+                                ), lineWidth: 0.75)
+                            }
+                            .frame(width: 80, height: 80)
+                        Image(systemName: "clock.arrow.circlepath")
+                            .font(.system(size: 34, weight: .light))
+                            .foregroundStyle(.secondary)
+                    }
+                    VStack(spacing: 6) {
+                        Text("No History Yet")
+                            .font(.title2).fontWeight(.semibold)
+                        Text("Completed downloads will appear here")
+                            .font(.callout).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 8) {
+                        ForEach(downloadManager.historyEntries) { entry in
+                            HistoryRowView(entry: entry) {
+                                _ = downloadManager.startDownload(url: entry.url)
+                                selectedSidebar = .all
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                }
+            }
+        }
+        .onAppear { downloadManager.loadHistory() }
+    }
+
+    // MARK: - Clipboard Banner
+
+    @ViewBuilder
+    private func clipboardBannerView(url: String) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "doc.on.clipboard.fill")
+                .font(.system(size: 13))
+                .foregroundStyle(Color.accentColor)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Link detected in clipboard")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Text(url)
+                    .font(.system(size: 12))
+                    .lineLimit(1)
+                    .foregroundStyle(.primary)
+            }
+
+            Spacer()
+
+            Button("Download") {
+                withAnimation { downloadManager.dismissClipboardURL() }
+                urlInput = url
+                startDownload()
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+
+            Button {
+                withAnimation { downloadManager.dismissClipboardURL() }
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.tertiary)
+                    .font(.system(size: 14))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(Color.accentColor.opacity(0.07))
+        .overlay(alignment: .bottom) { Divider().opacity(0.35) }
+    }
+
+    // MARK: - URL Input Bar (glass pill)
+
+    private var urlInputBar: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+
+                // Glass pill search field
+                HStack(spacing: 10) {
+                    Image(systemName: "arrow.down.circle.fill")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(
+                            LinearGradient(
+                                colors: [Color.accentColor, Color.accentColor.opacity(0.7)],
+                                startPoint: .top, endPoint: .bottom
+                            )
+                        )
+
+                    TextField("Paste a URL to download…", text: $urlInput)
+                        .textFieldStyle(.plain)
+                        .focused($urlFieldFocused)
+                        .font(.system(size: 14))
+                        .onSubmit { startDownload() }
+
+                    if !urlInput.isEmpty {
+                        Button { urlInput = "" } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.tertiary)
+                                .font(.system(size: 14))
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    Button(action: pasteAndDownload) {
+                        Image(systemName: "doc.on.clipboard")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Paste from clipboard and download")
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 9)
+                .glassCard(cornerRadius: 22)
+
+                // Turbo glass pill toggle
+                HStack(spacing: 6) {
+                    Toggle("", isOn: $useAdvancedMode)
+                        .toggleStyle(.checkbox)
+                        .help("Parallel chunk downloading")
+                    Text("Turbo")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(useAdvancedMode ? Color.orange : Color.secondary)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .glassCard(cornerRadius: 12)
+
+                // Download button
+                Button(action: startDownload) {
+                    Label("Download", systemImage: "arrow.down")
+                        .fontWeight(.semibold)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(urlInput.isEmpty)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 11)
+
+            Divider().opacity(0.45)
+        }
+        .background(Color(NSColor.windowBackgroundColor))
+    }
+
+    // MARK: - Downloads List
+
+    private var downloadsList: some View {
+        ScrollView {
+            LazyVStack(spacing: 8) {
+                ForEach(filteredDownloads) { download in
+                    DownloadRowView(
+                        download: download,
+                        isSelected: downloadManager.selectedDownloadId == download.id,
+                        onDelete: { dl in downloadToDelete = dl; showDeleteAlert = true },
+                        onVerify: { dl in downloadManager.verifyISOChecksum(dl) }
+                    )
+                    .onTapGesture { downloadManager.selectedDownloadId = download.id }
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+        }
+    }
+
+    // MARK: - Empty State
+
+    private var emptyState: some View {
+        VStack(spacing: 18) {
+            Spacer()
+
+            // Floating glass icon
+            ZStack {
+                Circle()
+                    .fill(.ultraThinMaterial)
+                    .overlay {
+                        Circle()
+                            .fill(LinearGradient(
+                                colors: [Color.white.opacity(0.22), Color.white.opacity(0.02)],
+                                startPoint: .topLeading, endPoint: .bottomTrailing
+                            ))
+                        Circle()
+                            .strokeBorder(
+                                LinearGradient(
+                                    colors: [Color.white.opacity(0.50), Color.white.opacity(0.08)],
+                                    startPoint: .topLeading, endPoint: .bottomTrailing
+                                ),
+                                lineWidth: 0.75
+                            )
+                    }
+                    .frame(width: 84, height: 84)
+                    .shadow(color: Color.accentColor.opacity(0.10), radius: 20, y: 6)
+                    .shadow(color: .black.opacity(0.08), radius: 8, y: 3)
+
+                Image(systemName: currentFilter == .all ? "arrow.down.circle" : currentFilter.systemImage)
+                    .font(.system(size: 38, weight: .light))
+                    .foregroundStyle(
+                        LinearGradient(
+                            colors: [.primary.opacity(0.5), .primary.opacity(0.25)],
+                            startPoint: .top, endPoint: .bottom
+                        )
+                    )
+            }
+
+            VStack(spacing: 7) {
+                Text(currentFilter == .all ? "No Downloads" : "No \(currentFilter.rawValue)")
+                    .font(.title2)
+                    .fontWeight(.semibold)
+
+                Text(currentFilter == .all
+                     ? "Paste a URL above to start your first download"
+                     : "Downloads will appear here when available")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+
+            if currentFilter == .all {
+                HStack(spacing: 10) {
+                    glassChip(label: "HTTP/HTTPS", icon: "globe")
+                    glassChip(label: "FTP/SFTP",   icon: "server.rack")
+                    glassChip(label: "Magnets",     icon: "link")
+                    glassChip(label: "Metalink",    icon: "list.bullet")
+                }
+                .padding(.top, 2)
+            }
+
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func glassChip(label: String, icon: String) -> some View {
+        VStack(spacing: 7) {
+            Image(systemName: icon).font(.title3)
+            Text(label).font(.caption2).fontWeight(.medium)
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+        .glassCard(cornerRadius: 12)
+    }
+
+    // MARK: - Footer Bar
+
+    private var footerBar: some View {
+        HStack {
+            let activeCount    = downloadManager.downloads.filter { $0.status == .downloading }.count
+            let completedCount = downloadManager.downloads.filter { $0.status == .completed }.count
+
+            if activeCount > 0 {
+                Label("\(activeCount) downloading", systemImage: "arrow.down")
+                    .foregroundStyle(Color.accentColor)
+            }
+            Label("\(completedCount) completed", systemImage: "checkmark")
+                .foregroundStyle(completedCount > 0 ? Color.green : Color.secondary)
+
+            Spacer()
+
+            if completedCount > 0 {
+                Button("Clear Completed") { downloadManager.clearCompleted() }
+                    .buttonStyle(.link)
+            }
+        }
+        .font(.caption)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 9)
+        .background(Color(NSColor.windowBackgroundColor))
+        .overlay(alignment: .top) { Divider().opacity(0.45) }
+    }
+
+    // MARK: - Keyboard Shortcuts
+
+    @ViewBuilder
+    private var hiddenShortcuts: some View {
+        Group {
+            Button("") { pasteAndDownload() }.keyboardShortcut("v", modifiers: .command)
+            Button("") { urlFieldFocused = true }.keyboardShortcut("l", modifiers: .command)
+            Button("") { downloadManager.cancelSelectedDownload() }.keyboardShortcut(.escape, modifiers: [])
+        }
+        .opacity(0).frame(width: 0, height: 0)
+    }
+
+    // MARK: - Actions
+
     private func startDownload() {
         guard !urlInput.isEmpty else { return }
-        if downloadManager.startDownload(url: urlInput, advanced: useAdvancedMode) {
-            urlInput = ""
-        }
+        if downloadManager.startDownload(url: urlInput, advanced: useAdvancedMode) { urlInput = "" }
     }
 
     private func pasteAndDownload() {
@@ -115,248 +567,96 @@ struct ContentView: View {
         startDownload()
     }
 
-    private var filteredDownloads: [Download] {
-        switch selectedFilter {
-        case .all:
-            return downloadManager.downloads
-        case .active:
-            return downloadManager.downloads.filter { $0.status == .downloading || $0.status == .verifying || $0.status == .pending }
-        case .completed:
-            return downloadManager.downloads.filter { $0.status == .completed }
-        case .failed:
-            return downloadManager.downloads.filter { $0.status == .failed || $0.status == .cancelled }
-        }
-    }
-
-    private var filterBar: some View {
-        HStack {
-            Picker("Filter", selection: $selectedFilter) {
-                ForEach(DownloadFilter.allCases) { filter in
-                    Text(filter.rawValue).tag(filter)
+    private func handleURLDrop(providers: [NSItemProvider]) -> Bool {
+        for provider in providers {
+            if provider.hasItemConformingToTypeIdentifier(UTType.url.identifier) {
+                _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                    guard let url = url, !url.isFileURL else { return }
+                    DispatchQueue.main.async { self.urlInput = url.absoluteString }
                 }
+                return true
             }
-            .pickerStyle(.segmented)
-            .frame(width: 360)
-
-            Spacer()
+            if provider.hasItemConformingToTypeIdentifier(UTType.plainText.identifier) {
+                _ = provider.loadObject(ofClass: String.self) { string, _ in
+                    guard let string = string else { return }
+                    let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard self.downloadManager.isDownloadableURL(trimmed) else { return }
+                    DispatchQueue.main.async { self.urlInput = trimmed }
+                }
+                return true
+            }
         }
-    }
-
-    @ViewBuilder
-    private var shortcutButtons: some View {
-        Group {
-            Button("") { pasteAndDownload() }
-                .keyboardShortcut("v", modifiers: .command)
-            Button("") { urlFieldFocused = true }
-                .keyboardShortcut("l", modifiers: .command)
-            Button("") { downloadManager.cancelSelectedDownload() }
-                .keyboardShortcut(.escape, modifiers: [])
-            Button("") { downloadManager.deleteSelectedDownload() }
-                .keyboardShortcut(.delete, modifiers: [])
-        }
-        .opacity(0)
-        .frame(width: 0, height: 0)
+        return false
     }
 }
 
-// MARK: - Header with Logo
+// MARK: - History Row
 
-struct HeaderView: View {
-    @Binding var urlInput: String
-    @Binding var useAdvancedMode: Bool
-    var urlFieldFocused: FocusState<Bool>.Binding
-    let validationError: String?
-    let startDownload: () -> Void
-    let pasteAndDownload: () -> Void
-    
-    var body: some View {
-        VStack(spacing: 12) {
-            // Logo and title row
-            HStack(spacing: 16) {
-                // Logo image
-                LogoView()
-                    .frame(width: 48, height: 48)
-                
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("KGet")
-                        .font(.largeTitle)
-                        .fontWeight(.bold)
-                    
-                    Text("Modern Download Manager")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                
-                Spacer()
-                
-                Text("v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown")")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Color.secondary.opacity(0.1))
-                    .cornerRadius(4)
-            }
-            
-            // URL input row
-            HStack(spacing: 8) {
-                Image(systemName: "link")
-                    .foregroundColor(.secondary)
-                
-                TextField("Enter URL or paste link...", text: $urlInput)
-                    .textFieldStyle(.plain)
-                    .focused(urlFieldFocused)
-                    .onSubmit {
-                        startDownload()
-                    }
-                
-                Button(action: pasteAndDownload) {
-                    Image(systemName: "doc.on.clipboard")
-                }
-                .buttonStyle(.borderless)
-                .help("Paste from clipboard and start")
-                
-                Divider()
-                    .frame(height: 20)
-                
-                Toggle("Advanced", isOn: $useAdvancedMode)
-                    .toggleStyle(.checkbox)
-                    .help("Use parallel chunk downloading")
-                
-                Button(action: startDownload) {
-                    Label("Download", systemImage: "arrow.down.circle.fill")
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(urlInput.isEmpty)
-            }
-            .padding(10)
-            .background(Color(NSColor.textBackgroundColor))
-            .cornerRadius(8)
+struct HistoryRowView: View {
+    let entry: HistoryEntry
+    let onRedownload: () -> Void
+    @State private var isHovered = false
 
-            if let validationError {
-                HStack(spacing: 6) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                    Text(validationError)
-                }
-                .font(.caption)
-                .foregroundColor(.red)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-        }
-        .padding()
-        .background(Color(NSColor.controlBackgroundColor))
-    }
-    
-}
-
-struct EmptyFilteredStateView: View {
-    let filter: String
+    private static let dateFormatter: DateFormatter = {
+        let df = DateFormatter()
+        df.dateStyle = .medium
+        df.timeStyle = .short
+        return df
+    }()
 
     var body: some View {
-        VStack(spacing: 10) {
-            Spacer()
-            Image(systemName: "line.3.horizontal.decrease.circle")
-                .font(.system(size: 42))
-                .foregroundColor(.secondary)
-            Text("No \(filter.lowercased()) downloads")
-                .font(.headline)
-                .foregroundColor(.secondary)
-            Spacer()
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-}
-
-// MARK: - Logo View
-
-struct LogoView: View {
-    var body: some View {
-        // Try to load logo from bundle Resources
-        if let resourcePath = Bundle.main.resourcePath,
-           let nsImage = NSImage(contentsOfFile: resourcePath + "/logo.png") {
-            Image(nsImage: nsImage)
-                .resizable()
-                .aspectRatio(contentMode: .fit)
-        } else if let bundlePath = Bundle.main.executableURL?.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Resources/logo.png").path,
-                  let nsImage = NSImage(contentsOfFile: bundlePath) {
-            Image(nsImage: nsImage)
-                .resizable()
-                .aspectRatio(contentMode: .fit)
-        } else if FileManager.default.fileExists(atPath: "logo.png"),
-                  let nsImage = NSImage(contentsOfFile: "logo.png") {
-            // Development fallback - current directory
-            Image(nsImage: nsImage)
-                .resizable()
-                .aspectRatio(contentMode: .fit)
-        } else {
-            // Fallback gradient icon
+        HStack(spacing: 12) {
             ZStack {
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(
-                        LinearGradient(
-                            colors: [.blue, .purple],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-                
-                Image(systemName: "arrow.down.circle.fill")
-                    .font(.system(size: 28))
-                    .foregroundColor(.white)
+                Circle()
+                    .fill(entry.statusColor.opacity(0.18))
+                    .frame(width: 34, height: 34)
+                Image(systemName: entry.statusIcon)
+                    .font(.system(size: 15))
+                    .foregroundStyle(entry.statusColor)
+            }
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(entry.filename)
+                    .font(.system(size: 13, weight: .semibold))
+                    .lineLimit(1)
+                Text(entry.url)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer()
+
+            VStack(alignment: .trailing, spacing: 3) {
+                Text(Self.dateFormatter.string(from: entry.createdAtDate))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                if let size = entry.bytesFormatted {
+                    Text(size)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if isHovered {
+                Button(action: onRedownload) {
+                    Image(systemName: "arrow.down.circle.fill")
+                        .font(.system(size: 17))
+                        .foregroundStyle(Color.accentColor)
+                }
+                .buttonStyle(.plain)
+                .help("Re-download")
+                .transition(.opacity.combined(with: .scale))
             }
         }
+        .padding(12)
+        .glassCard(cornerRadius: 10, isHovered: isHovered)
+        .onHover { isHovered = $0 }
+        .animation(.easeInOut(duration: 0.15), value: isHovered)
     }
 }
 
-// MARK: - Empty State
-
-struct EmptyStateView: View {
-    var body: some View {
-        VStack(spacing: 20) {
-            Spacer()
-            
-            LogoView()
-                .frame(width: 80, height: 80)
-                .opacity(0.5)
-            
-            Text("No Downloads")
-                .font(.title2)
-                .foregroundColor(.secondary)
-            
-            Text("Paste a URL above to start downloading")
-                .font(.caption)
-                .foregroundColor(.secondary)
-            
-            HStack(spacing: 16) {
-                VStack {
-                    Image(systemName: "globe")
-                        .font(.title3)
-                    Text("HTTP/HTTPS")
-                        .font(.caption2)
-                }
-                VStack {
-                    Image(systemName: "server.rack")
-                        .font(.title3)
-                    Text("FTP/SFTP")
-                        .font(.caption2)
-                }
-                VStack {
-                    Image(systemName: "link")
-                        .font(.title3)
-                    Text("Magnet")
-                        .font(.caption2)
-                }
-            }
-            .foregroundColor(.secondary)
-            .padding(.top, 8)
-            
-            Spacer()
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-}
-
-// MARK: - Download Row with Progress Bar
+// MARK: - Download Row
 
 struct DownloadRowView: View {
     @EnvironmentObject var downloadManager: DownloadManager
@@ -364,736 +664,376 @@ struct DownloadRowView: View {
     let isSelected: Bool
     let onDelete: (Download) -> Void
     let onVerify: (Download) -> Void
-    
     @State private var isHovered = false
-    
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            // Top row: Status icon, filename, actions
-            HStack {
-                statusIcon
-                    .frame(width: 24)
-                
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .center, spacing: 8) {
+                statusIndicator
+
                 VStack(alignment: .leading, spacing: 2) {
-                    HStack {
+                    HStack(spacing: 5) {
                         Text(download.filename)
-                            .font(.headline)
+                            .font(.system(size: 13, weight: .semibold))
                             .lineLimit(1)
-                        
-                        if download.isAdvanced {
-                            HStack(spacing: 2) {
-                                Image(systemName: "bolt.fill")
-                                    .font(.system(size: 8))
-                                Text("TURBO")
-                            }
-                            .font(.caption2)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 2)
-                            .background(
-                                LinearGradient(
-                                    colors: [.orange, .red],
-                                    startPoint: .leading,
-                                    endPoint: .trailing
-                                )
-                            )
-                            .foregroundColor(.white)
-                            .cornerRadius(3)
-                        }
-                        
-                        if download.isISO {
-                            Text("ISO")
-                                .font(.caption2)
-                                .padding(.horizontal, 4)
-                                .padding(.vertical, 2)
-                                .background(Color.purple.opacity(0.2))
-                                .foregroundColor(.purple)
-                                .cornerRadius(3)
-                        }
-                        
-                        if download.isTorrent {
-                            Text("🧲 TORRENT")
-                                .font(.caption2)
-                                .padding(.horizontal, 4)
-                                .padding(.vertical, 2)
-                                .background(Color.green.opacity(0.2))
-                                .foregroundColor(.green)
-                                .cornerRadius(3)
-                        }
+                        if download.isAdvanced { TypeBadge(text: "Turbo",   color: .orange) }
+                        if download.isISO      { TypeBadge(text: "ISO",     color: .purple) }
+                        if download.isTorrent  { TypeBadge(text: "Torrent", color: .green)  }
                     }
-                    
-                    Text(download.url)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .lineLimit(1)
+                    Text(download.url).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 }
-                
+
                 Spacer()
-                
                 actionButtons
             }
-            
-            // Progress section (only when downloading or verifying)
+
             if download.status == .downloading || download.status == .verifying {
-                VStack(spacing: 6) {
-                    // Verification progress bar
+                let pv    = download.status == .verifying ? download.verificationProgress / 100.0 : download.progress / 100.0
+                let pcolor: Color = download.status == .verifying ? .purple : .accentColor
+
+                LiquidProgressBar(progress: pv, color: pcolor).frame(height: 5)
+
+                HStack {
+                    Text("\(Int(pv * 100))%")
+                        .font(.system(.caption, design: .monospaced))
+                        .fontWeight(.semibold)
+                        .foregroundStyle(pcolor)
+                    Spacer()
                     if download.status == .verifying {
-                        VerificationProgressBar(progress: download.verificationProgress)
-                            .frame(height: 10)
-                    }
-                    // Progress bar - different style for advanced mode
-                    else if download.isAdvanced {
-                        // Multi-segment progress bar for advanced/parallel download
-                        AdvancedProgressBar(
-                            progress: download.progress,
-                            connections: download.activeConnections
-                        )
-                        .frame(height: 12)
+                        Label("Calculating SHA256…", systemImage: "checkmark.shield")
+                            .font(.caption).foregroundStyle(.purple)
                     } else {
-                        // Standard progress bar
-                        GeometryReader { geometry in
-                            ZStack(alignment: .leading) {
-                                // Background
-                                RoundedRectangle(cornerRadius: 4)
-                                    .fill(Color.secondary.opacity(0.2))
-                                
-                                // Progress fill
-                                RoundedRectangle(cornerRadius: 4)
-                                    .fill(progressGradient)
-                                    .frame(width: geometry.size.width * CGFloat(download.progress / 100))
-                                    .animation(.easeInOut(duration: 0.3), value: download.progress)
-                            }
-                        }
-                        .frame(height: 8)
-                    }
-                    
-                    // Stats row
-                    HStack {
-                        // Percentage
-                        if download.status == .verifying {
-                            Text("\(Int(download.verificationProgress))%")
-                                .font(.system(.caption, design: .monospaced))
-                                .fontWeight(.semibold)
-                                .foregroundColor(.purple)
-                        } else {
-                            Text("\(Int(download.progress))%")
-                                .font(.system(.caption, design: .monospaced))
-                                .fontWeight(.semibold)
-                        }
-                        
-                        Spacer()
-                        
-                        // Show verification status
-                        if download.status == .verifying {
-                            HStack(spacing: 4) {
-                                Image(systemName: "checkmark.shield")
-                                    .font(.caption2)
-                                Text("Calculating SHA256...")
-                                    .font(.caption)
-                            }
-                            .foregroundColor(.purple)
-                        } else {
-                            // Downloaded / Total
-                            if !download.downloadedSize.isEmpty || !download.totalSize.isEmpty {
-                                Text("\(download.downloadedSize) / \(download.totalSize)")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                            
-                            // Speed
-                            if !download.speed.isEmpty {
-                                HStack(spacing: 4) {
-                                    Image(systemName: "speedometer")
-                                        .font(.caption2)
-                                    Text(download.speed)
-                                        .font(.system(.caption, design: .monospaced))
-                                }
-                                .foregroundColor(.blue)
-                            }
-                            
-                            // Connections indicator for advanced mode
-                            if download.isAdvanced && download.activeConnections > 1 {
-                                HStack(spacing: 3) {
-                                    Image(systemName: "arrow.triangle.branch")
-                                        .font(.caption2)
-                                    Text("\(download.activeConnections)x")
-                                        .font(.system(.caption, design: .monospaced))
-                                }
-                                .foregroundColor(.orange)
-                                .help("Parallel connections active")
-                            }
-                            
-                            // ETA
-                            if !download.eta.isEmpty {
-                                HStack(spacing: 4) {
-                                    Image(systemName: "clock")
-                                        .font(.caption2)
-                                    Text(download.eta)
-                                        .font(.system(.caption, design: .monospaced))
-                                }
-                                .foregroundColor(.secondary)
-                            }
-                        }
+                        downloadStatsRow
                     }
                 }
             }
-            
-            // Torrent files expandable section
-            if download.isTorrent && !download.torrentFiles.isEmpty {
-                VStack(spacing: 4) {
-                    // Expand/collapse button
-                    Button(action: {
-                        if let index = downloadManager.downloads.firstIndex(where: { $0.id == download.id }) {
-                            withAnimation(.easeInOut(duration: 0.2)) {
-                                downloadManager.downloads[index].isExpanded.toggle()
-                            }
-                        }
-                    }) {
-                        HStack {
-                            Image(systemName: download.isExpanded ? "chevron.down" : "chevron.right")
-                                .font(.caption)
-                            Text("\(download.torrentFiles.count) file(s)")
-                                .font(.caption)
-                            Spacer()
-                        }
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundColor(.secondary)
-                    
-                    // File list when expanded
-                    if download.isExpanded {
-                        VStack(spacing: 6) {
-                            ForEach(download.torrentFiles) { file in
-                                HStack(spacing: 8) {
-                                    Image(systemName: "doc")
-                                        .font(.caption2)
-                                        .foregroundColor(.secondary)
-                                    
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(file.name)
-                                            .font(.caption)
-                                            .lineLimit(1)
-                                        
-                                        // File progress bar
-                                        GeometryReader { geometry in
-                                            ZStack(alignment: .leading) {
-                                                RoundedRectangle(cornerRadius: 2)
-                                                    .fill(Color.secondary.opacity(0.2))
-                                                RoundedRectangle(cornerRadius: 2)
-                                                    .fill(Color.green)
-                                                    .frame(width: geometry.size.width * CGFloat(file.progress / 100))
-                                            }
-                                        }
-                                        .frame(height: 4)
-                                    }
-                                    
-                                    Text("\(Int(file.progress))%")
-                                        .font(.system(.caption2, design: .monospaced))
-                                        .foregroundColor(.secondary)
-                                        .frame(width: 35, alignment: .trailing)
-                                    
-                                    Text(file.sizeFormatted)
-                                        .font(.caption2)
-                                        .foregroundColor(.secondary)
-                                        .frame(width: 60, alignment: .trailing)
-                                }
-                            }
-                        }
-                        .padding(.leading, 16)
-                        .padding(.top, 4)
-                    }
-                }
-            }
-            
-            // Completed info
-            if download.status == .completed {
-                HStack {
-                    if let fileSize = download.fileSize {
-                        Label(fileSize, systemImage: "doc")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    
-                    if let checksum = download.sha256Checksum {
-                        Spacer()
-                        HStack(spacing: 4) {
-                            Image(systemName: "checkmark.shield.fill")
-                                .foregroundColor(.green)
-                            Text("SHA256: \(String(checksum.prefix(12)))...")
-                                .font(.system(.caption2, design: .monospaced))
-                                .foregroundColor(.secondary)
-                        }
-                        .help("Full SHA256: \(checksum)")
-                    }
-                    
-                    Spacer()
-                    
-                    Text("Completed")
-                        .font(.caption)
-                        .foregroundColor(.green)
-                }
-            }
-            
-            // Error message
+
+            if download.isTorrent && !download.torrentFiles.isEmpty { torrentFilesSection }
+            if download.status == .completed { completedInfoRow }
+
             if let error = download.error {
-                HStack {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundColor(.red)
-                    Text(error)
-                        .font(.caption)
-                        .foregroundColor(.red)
-                        .lineLimit(2)
+                HStack(spacing: 4) {
+                    Image(systemName: "exclamationmark.triangle.fill").font(.caption2)
+                    Text(error).font(.caption).lineLimit(2)
                 }
+                .foregroundStyle(.red)
             }
         }
-        .padding(12)
-        .background(
-            RoundedRectangle(cornerRadius: 10)
-                .fill(isSelected ? Color.accentColor.opacity(0.12) : (isHovered ? Color(NSColor.controlBackgroundColor) : Color(NSColor.textBackgroundColor)))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(isSelected ? Color.accentColor.opacity(0.55) : Color.secondary.opacity(0.1), lineWidth: 1)
-        )
-        .contextMenu {
-            Button("Copy URL") { downloadManager.copyURL(download) }
-            if download.status == .completed {
-                Button("Open File") { downloadManager.openFile(download) }
-                Button("Open Folder") { downloadManager.openFolder(download) }
-            }
-            if download.sha256Checksum != nil {
-                Button("Copy SHA256") { downloadManager.copySHA256(download) }
-            }
-            if download.status == .failed || download.status == .cancelled || download.status == .completed {
-                Button("Restart") { downloadManager.retryDownload(download) }
-            }
-            Divider()
-            Button("Remove", role: .destructive) { onDelete(download) }
+        .padding(13)
+        .glassCard(cornerRadius: 12, isSelected: isSelected, isHovered: isHovered)
+        .animation(.easeInOut(duration: 0.15), value: isHovered)
+        .animation(.easeInOut(duration: 0.15), value: isSelected)
+        .contextMenu { contextMenuContent }
+        .onHover { isHovered = $0 }
+    }
+
+    private var statusIndicator: some View {
+        ZStack {
+            Circle().fill(statusColor.opacity(0.22)).frame(width: 14, height: 14)
+            Circle().fill(statusColor).frame(width: 8, height: 8)
         }
-        .onHover { hovering in
-            isHovered = hovering
+        .shadow(color: statusColor.opacity(download.status == .downloading ? 0.6 : 0.0), radius: 4)
+    }
+
+    private var statusColor: Color {
+        switch download.status {
+        case .pending:     return .secondary
+        case .downloading: return .accentColor
+        case .verifying:   return .purple
+        case .completed:   return .green
+        case .failed:      return .red
+        case .cancelled:   return .orange
         }
     }
-    
-    private var progressGradient: LinearGradient {
-        if download.status == .verifying {
-            return LinearGradient(
-                colors: [.purple, .pink],
-                startPoint: .leading,
-                endPoint: .trailing
-            )
-        }
-        return LinearGradient(
-            colors: [.blue, .cyan],
-            startPoint: .leading,
-            endPoint: .trailing
-        )
-    }
-    
-    @ViewBuilder
-    private var statusIcon: some View {
-        let status = download.status
-        
-        Group {
-            switch status {
-            case .pending:
-                Image(systemName: "clock")
-                    .foregroundColor(.gray)
-            case .downloading:
-                Image(systemName: "arrow.down.circle")
-                    .foregroundColor(.blue)
-            case .verifying:
-                Image(systemName: "checkmark.shield")
-                    .foregroundColor(.purple)
-            case .completed:
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundColor(.green)
-            case .failed:
-                Image(systemName: "exclamationmark.circle.fill")
-                    .foregroundColor(.red)
-            case .cancelled:
-                Image(systemName: "xmark.circle.fill")
-                    .foregroundColor(.orange)
-            }
-        }
-        .font(.title3)
-    }
-    
-    @ViewBuilder
+
     private var actionButtons: some View {
-        HStack(spacing: 6) {
-            Button(action: { downloadManager.copyURL(download) }) {
-                Image(systemName: "link")
-                    .foregroundColor(.secondary)
-            }
-            .buttonStyle(.plain)
-            .help("Copy URL")
+        HStack(spacing: 4) {
+            Button { downloadManager.copyURL(download) } label: {
+                Image(systemName: "link").foregroundStyle(.secondary)
+            }.buttonStyle(.plain).help("Copy URL")
 
-            // Cancel button (during download)
             if download.status == .downloading {
-                Button(action: { downloadManager.cancelDownload(download) }) {
-                    Image(systemName: "xmark.circle")
-                        .foregroundColor(.red)
-                }
-                .buttonStyle(.plain)
-                .help("Cancel download")
+                Button { downloadManager.cancelDownload(download) } label: {
+                    Image(systemName: "stop.circle").foregroundStyle(.red)
+                }.buttonStyle(.plain).help("Cancel")
             }
-            
-            // Retry button (failed or cancelled)
+
             if download.status == .failed || download.status == .cancelled {
-                Button(action: { downloadManager.retryDownload(download) }) {
-                    Image(systemName: "arrow.clockwise.circle")
-                        .foregroundColor(.blue)
-                }
-                .buttonStyle(.plain)
-                .help("Retry download")
+                Button { downloadManager.retryDownload(download) } label: {
+                    Image(systemName: "arrow.clockwise").foregroundStyle(Color.accentColor)
+                }.buttonStyle(.plain).help("Retry")
             }
-            
-            // Verify ISO button (completed ISO files)
+
             if download.status == .completed && download.isISO && download.sha256Checksum == nil {
-                Button(action: { onVerify(download) }) {
-                    Image(systemName: "checkmark.shield")
-                        .foregroundColor(.purple)
-                }
-                .buttonStyle(.plain)
-                .help("Verify SHA256 checksum")
+                Button { onVerify(download) } label: {
+                    Image(systemName: "checkmark.shield").foregroundStyle(.purple)
+                }.buttonStyle(.plain).help("Verify SHA256")
             }
 
             if download.sha256Checksum != nil {
-                Button(action: { downloadManager.copySHA256(download) }) {
-                    Image(systemName: "number")
-                        .foregroundColor(.green)
-                }
-                .buttonStyle(.plain)
-                .help("Copy SHA256")
+                Button { downloadManager.copySHA256(download) } label: {
+                    Image(systemName: "number").foregroundStyle(.green)
+                }.buttonStyle(.plain).help("Copy SHA256")
             }
-            
-            // Reveal in Finder (completed)
+
             if download.status == .completed {
-                Button(action: { downloadManager.openFile(download) }) {
-                    Image(systemName: "doc")
-                        .foregroundColor(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help("Open file")
+                Button { downloadManager.openFile(download) } label: {
+                    Image(systemName: "doc").foregroundStyle(.secondary)
+                }.buttonStyle(.plain).help("Open file")
+                Button { downloadManager.openFolder(download) } label: {
+                    Image(systemName: "folder").foregroundStyle(.secondary)
+                }.buttonStyle(.plain).help("Show in Finder")
+            }
 
-                Button(action: { revealInFinder() }) {
-                    Image(systemName: "folder")
-                        .foregroundColor(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help("Show in Finder")
-            }
-            
-            // Delete button (always available)
-            Button(action: { onDelete(download) }) {
-                Image(systemName: "trash")
-                    .foregroundColor(.red.opacity(0.7))
-            }
-            .buttonStyle(.plain)
-            .help("Delete")
+            Button { onDelete(download) } label: {
+                Image(systemName: "trash").foregroundStyle(.red.opacity(0.7))
+            }.buttonStyle(.plain).help("Delete")
         }
+        .font(.system(size: 13))
     }
-    
-    private func revealInFinder() {
-        downloadManager.openFolder(download)
-    }
-}
 
-// MARK: - Footer
+    private var downloadStatsRow: some View {
+        HStack(spacing: 10) {
+            if !download.downloadedSize.isEmpty || !download.totalSize.isEmpty {
+                Text("\(download.downloadedSize) / \(download.totalSize)").foregroundStyle(.secondary)
+            }
+            if !download.speed.isEmpty {
+                HStack(spacing: 2) {
+                    Image(systemName: "arrow.down").font(.system(size: 9))
+                    Text(download.speed).monospacedDigit()
+                }.foregroundStyle(Color.accentColor)
+            }
+            if download.speedHistory.count > 1 {
+                SparklineView(samples: download.speedHistory)
+                    .frame(width: 44, height: 16)
+            }
+            if !download.eta.isEmpty {
+                HStack(spacing: 2) {
+                    Image(systemName: "clock").font(.system(size: 9))
+                    Text(download.eta).monospacedDigit()
+                }.foregroundStyle(.secondary)
+            }
+            if download.isAdvanced && download.activeConnections > 1 {
+                HStack(spacing: 2) {
+                    Image(systemName: "arrow.triangle.branch").font(.system(size: 9))
+                    Text("\(download.activeConnections)x").monospacedDigit()
+                }.foregroundStyle(.orange).help("Parallel connections")
+            }
+        }
+        .font(.caption)
+    }
 
-struct FooterView: View {
-    @EnvironmentObject var downloadManager: DownloadManager
-    
-    var activeCount: Int {
-        downloadManager.downloads.filter { $0.status == .downloading }.count
+    private var torrentFilesSection: some View {
+        DisclosureGroup(
+            isExpanded: Binding(
+                get: { download.isExpanded },
+                set: { newVal in
+                    if let idx = downloadManager.downloads.firstIndex(where: { $0.id == download.id }) {
+                        withAnimation(.easeInOut(duration: 0.18)) { downloadManager.downloads[idx].isExpanded = newVal }
+                    }
+                }
+            )
+        ) {
+            VStack(spacing: 5) {
+                ForEach(download.torrentFiles) { file in
+                    HStack(spacing: 8) {
+                        Image(systemName: "doc").font(.caption2).foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(file.name).font(.caption).lineLimit(1)
+                            LiquidProgressBar(progress: file.progress / 100.0, color: .green).frame(height: 2)
+                        }
+                        Text("\(Int(file.progress))%")
+                            .font(.system(.caption2, design: .monospaced))
+                            .foregroundStyle(.secondary).frame(width: 34, alignment: .trailing)
+                        Text(file.sizeFormatted)
+                            .font(.caption2).foregroundStyle(.secondary).frame(width: 58, alignment: .trailing)
+                    }
+                }
+            }
+            .padding(.leading, 4).padding(.top, 4)
+        } label: {
+            Text("\(download.torrentFiles.count) file(s)").font(.caption).foregroundStyle(.secondary)
+        }
+        .buttonStyle(.plain)
     }
-    
-    var completedCount: Int {
-        downloadManager.downloads.filter { $0.status == .completed }.count
-    }
-    
-    var body: some View {
+
+    private var completedInfoRow: some View {
         HStack {
-            HStack(spacing: 16) {
-                Label("\(activeCount) active", systemImage: "arrow.down")
-                    .foregroundColor(activeCount > 0 ? .blue : .secondary)
-                
-                Label("\(completedCount) completed", systemImage: "checkmark")
-                    .foregroundColor(completedCount > 0 ? .green : .secondary)
+            if let size = download.fileSize {
+                Label(size, systemImage: "doc").font(.caption).foregroundStyle(.secondary)
             }
-            .font(.caption)
-            
             Spacer()
-            
-            if completedCount > 0 {
-                Button("Clear Completed") {
-                    downloadManager.clearCompleted()
-                }
-                .buttonStyle(.link)
-                .font(.caption)
+            if let checksum = download.sha256Checksum {
+                HStack(spacing: 4) {
+                    Image(systemName: "checkmark.seal.fill").font(.caption2).foregroundStyle(.green)
+                    Text("SHA256: \(String(checksum.prefix(12)))…")
+                        .font(.system(.caption2, design: .monospaced)).foregroundStyle(.secondary)
+                }.help("Full SHA256: \(checksum)")
             }
+            Label("Completed", systemImage: "checkmark.circle.fill").font(.caption).foregroundStyle(.green)
         }
-        .padding(.horizontal)
-        .padding(.vertical, 10)
-        .background(Color(NSColor.controlBackgroundColor))
+    }
+
+    @ViewBuilder
+    private var contextMenuContent: some View {
+        Button("Copy URL") { downloadManager.copyURL(download) }
+        if download.status == .completed {
+            Button("Open File")   { downloadManager.openFile(download) }
+            Button("Open Folder") { downloadManager.openFolder(download) }
+        }
+        if download.sha256Checksum != nil { Button("Copy SHA256") { downloadManager.copySHA256(download) } }
+        if download.status == .failed || download.status == .cancelled || download.status == .completed {
+            Button("Restart") { downloadManager.retryDownload(download) }
+        }
+        Divider()
+        Button("Remove", role: .destructive) { onDelete(download) }
     }
 }
 
-// MARK: - Advanced Progress Bar with Multi-Segment Animation
+// MARK: - Type Badge
 
-struct AdvancedProgressBar: View {
-    let progress: Double
-    let connections: Int
-    
-    @State private var animationPhase: CGFloat = 0
-    @State private var pulsePhase: [CGFloat] = [0, 0, 0, 0]
-    
+struct TypeBadge: View {
+    let text: String
+    let color: Color
+
     var body: some View {
-        GeometryReader { geometry in
-            ZStack(alignment: .leading) {
-                // Background with segment indicators
-                HStack(spacing: 2) {
-                    ForEach(0..<connections, id: \.self) { index in
-                        RoundedRectangle(cornerRadius: 4)
-                            .fill(Color.secondary.opacity(0.15))
-                    }
-                }
-                
-                // Multi-color progress fill with segments
-                HStack(spacing: 2) {
-                    ForEach(0..<connections, id: \.self) { index in
-                        let segmentWidth = (geometry.size.width - CGFloat(connections - 1) * 2) / CGFloat(connections)
-                        let segmentProgress = calculateSegmentProgress(
-                            overallProgress: progress,
-                            segmentIndex: index,
-                            totalSegments: connections
-                        )
-                        
-                        ZStack {
-                            // Segment background glow when active
-                            if segmentProgress > 0 && segmentProgress < 100 {
-                                RoundedRectangle(cornerRadius: 4)
-                                    .fill(segmentColors(for: index)[0].opacity(0.3))
-                                    .blur(radius: 2)
-                            }
-                            
-                            // Main progress fill
-                            RoundedRectangle(cornerRadius: 4)
-                                .fill(
-                                    LinearGradient(
-                                        colors: segmentColors(for: index),
-                                        startPoint: .leading,
-                                        endPoint: .trailing
-                                    )
-                                )
-                                .frame(width: max(0, segmentWidth * CGFloat(segmentProgress / 100)))
-                                .animation(.easeInOut(duration: 0.3), value: segmentProgress)
-                            
-                            // Active download pulse effect
-                            if segmentProgress > 0 && segmentProgress < 100 {
-                                RoundedRectangle(cornerRadius: 4)
-                                    .fill(Color.white.opacity(0.4))
-                                    .frame(width: max(0, segmentWidth * CGFloat(segmentProgress / 100)))
-                                    .scaleEffect(x: 1, y: index < pulsePhase.count ? CGFloat(0.5) + pulsePhase[index] * CGFloat(0.5) : CGFloat(1))
-                                    .opacity(index < pulsePhase.count ? Double(1.0 - pulsePhase[index]) : 0.5)
-                            }
-                            
-                            // Shimmer effect for active segments
-                            if segmentProgress > 5 && segmentProgress < 95 {
-                                RoundedRectangle(cornerRadius: 4)
-                                    .fill(
-                                        LinearGradient(
-                                            colors: [.clear, .white.opacity(0.5), .clear],
-                                            startPoint: .leading,
-                                            endPoint: .trailing
-                                        )
-                                    )
-                                    .frame(width: max(0, segmentWidth * CGFloat(segmentProgress / 100)))
-                                    .mask(
-                                        Rectangle()
-                                            .fill(
-                                                LinearGradient(
-                                                    colors: [.clear, .white, .clear],
-                                                    startPoint: .leading,
-                                                    endPoint: .trailing
-                                                )
-                                            )
-                                            .frame(width: 40)
-                                            .offset(x: CGFloat(-segmentWidth/2) + CGFloat(animationPhase) * segmentWidth)
-                                    )
-                            }
-                            
-                            // Chunk number indicator
-                            if segmentProgress > 20 {
-                                Text("C\(index + 1)")
-                                    .font(.system(size: 7, weight: .bold, design: .monospaced))
-                                    .foregroundColor(.white.opacity(0.7))
-                            }
-                        }
-                        .frame(width: segmentWidth, alignment: .leading)
-                    }
-                }
-                
-                // Separator bolts between segments
-                HStack(spacing: 0) {
-                    ForEach(0..<connections, id: \.self) { index in
-                        Spacer()
-                        if index < connections - 1 {
-                            ZStack {
-                                Circle()
-                                    .fill(Color.black.opacity(0.5))
-                                    .frame(width: 12, height: 12)
-                                Image(systemName: "bolt.fill")
-                                    .font(.system(size: 7))
-                                    .foregroundColor(.yellow)
-                            }
-                        }
-                    }
-                    Spacer()
-                }
-            }
-        }
-        .onAppear {
-            // Shimmer animation
-            withAnimation(.linear(duration: 1.2).repeatForever(autoreverses: false)) {
-                animationPhase = 1
-            }
-            // Pulse animations for each segment (staggered)
-            for i in 0..<min(4, connections) {
-                let delay = Double(i) * 0.2
-                DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                    withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) {
-                        if i < pulsePhase.count {
-                            pulsePhase[i] = 1
-                        }
-                    }
-                }
-            }
-        }
-    }
-    
-    private func calculateSegmentProgress(overallProgress: Double, segmentIndex: Int, totalSegments: Int) -> Double {
-        // Each segment represents a chunk being downloaded in parallel
-        // They download somewhat independently but overall progress drives them
-        let segmentSize = 100.0 / Double(totalSegments)
-        let segmentStart = Double(segmentIndex) * segmentSize
-        let segmentEnd = segmentStart + segmentSize
-        
-        // Each segment has its own "virtual" progress based on overall
-        // Earlier segments tend to be slightly ahead, later ones catch up
-        let phaseOffset = Double(segmentIndex) * 3.0 // Slight offset per segment
-        _ = overallProgress + phaseOffset - Double(segmentIndex * 2)
-        
-        // Map overall progress to this segment's fill
-        if overallProgress >= segmentEnd {
-            return 100 // This segment is fully downloaded
-        } else if overallProgress <= segmentStart {
-            // Segment hasn't started yet in theory, but in parallel mode
-            // all segments start together, just at different rates
-            let earlyStart = max(0, overallProgress * 1.1 - Double(segmentIndex) * 5)
-            return min(earlyStart, 100)
-        } else {
-            // Segment is actively downloading
-            let withinSegment = (overallProgress - segmentStart) / segmentSize * 100
-            // Add some variation to make it look more natural
-            let wave = sin(overallProgress / 10.0 + Double(segmentIndex)) * 8
-            return min(max(withinSegment + wave, 0), 100)
-        }
-    }
-    
-    private func segmentColors(for index: Int) -> [Color] {
-        let colorSets: [[Color]] = [
-            [.orange, .red],
-            [.red, .pink],
-            [.pink, .purple],
-            [.purple, .blue]
-        ]
-        return colorSets[index % colorSets.count]
+        Text(text.uppercased())
+            .font(.system(size: 8, weight: .bold)).tracking(0.3)
+            .padding(.horizontal, 5).padding(.vertical, 2)
+            .foregroundStyle(color)
+            .background(color.opacity(0.15))
+            .clipShape(RoundedRectangle(cornerRadius: 3))
+            .overlay { RoundedRectangle(cornerRadius: 3).strokeBorder(color.opacity(0.25), lineWidth: 0.5) }
     }
 }
 
-// MARK: - Verification Progress Bar with Shield Animation
+// MARK: - Liquid Progress Bar
 
-struct VerificationProgressBar: View {
+struct LiquidProgressBar: View {
     let progress: Double
-    
+    let color: Color
     @State private var shimmerPhase: CGFloat = 0
-    @State private var pulseScale: CGFloat = 1.0
-    
+
     var body: some View {
-        GeometryReader { geometry in
+        GeometryReader { geo in
             ZStack(alignment: .leading) {
-                // Background
-                RoundedRectangle(cornerRadius: 5)
-                    .fill(Color.purple.opacity(0.15))
-                
-                // Progress fill with gradient
-                RoundedRectangle(cornerRadius: 5)
-                    .fill(
-                        LinearGradient(
-                            colors: [.purple, .indigo, .blue],
-                            startPoint: .leading,
-                            endPoint: .trailing
-                        )
+                // Track
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(color.opacity(0.12))
+                    .overlay { RoundedRectangle(cornerRadius: 3).strokeBorder(color.opacity(0.10), lineWidth: 0.5) }
+
+                // Liquid fill
+                let fw = geo.size.width * CGFloat(min(max(progress, 0), 1))
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(LinearGradient(colors: [color.opacity(0.9), color], startPoint: .leading, endPoint: .trailing))
+                    .frame(width: fw)
+                    .animation(.easeInOut(duration: 0.3), value: progress)
+                    .overlay(alignment: .top) {
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(LinearGradient(colors: [.white.opacity(0.45), .white.opacity(0)], startPoint: .top, endPoint: .bottom))
+                            .frame(height: geo.size.height / 2)
+                    }
+                    .overlay(
+                        Rectangle()
+                            .fill(LinearGradient(colors: [.clear, .white.opacity(0.55), .clear], startPoint: .leading, endPoint: .trailing))
+                            .frame(width: 28)
+                            .offset(x: -fw + shimmerPhase * (fw + 28))
+                            .clipped()
                     )
-                    .frame(width: geometry.size.width * CGFloat(progress / 100))
-                    .animation(.easeInOut(duration: 0.2), value: progress)
-                
-                // Shimmer effect
-                if progress > 0 && progress < 100 {
-                    RoundedRectangle(cornerRadius: 5)
-                        .fill(
-                            LinearGradient(
-                                colors: [.clear, .white.opacity(0.4), .clear],
-                                startPoint: .leading,
-                                endPoint: .trailing
-                            )
-                        )
-                        .frame(width: geometry.size.width * CGFloat(progress / 100))
-                        .mask(
-                            Rectangle()
-                                .fill(
-                                    LinearGradient(
-                                        colors: [.clear, .white, .clear],
-                                        startPoint: .leading,
-                                        endPoint: .trailing
-                                    )
-                                )
-                                .frame(width: 60)
-                                .offset(x: -geometry.size.width + shimmerPhase * geometry.size.width * 2)
-                        )
-                }
-                
-                // Shield icon overlay
-                HStack {
-                    Spacer()
-                    Image(systemName: "checkmark.shield.fill")
-                        .font(.system(size: 14))
-                        .foregroundColor(.white.opacity(0.8))
-                        .scaleEffect(pulseScale)
-                        .padding(.trailing, 8)
-                }
+                    .clipShape(RoundedRectangle(cornerRadius: 3))
+                    .shadow(color: color.opacity(0.45), radius: 4, y: 1)
             }
         }
         .onAppear {
-            // Shimmer animation
-            withAnimation(.linear(duration: 2.0).repeatForever(autoreverses: false)) {
-                shimmerPhase = 1
-            }
-            // Pulse animation
-            withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) {
-                pulseScale = 1.15
+            withAnimation(.linear(duration: 1.6).repeatForever(autoreverses: false)) { shimmerPhase = 1 }
+        }
+    }
+}
+
+// MARK: - Logo View
+
+struct LogoView: View {
+    var body: some View {
+        Group {
+            if let resourcePath = Bundle.main.resourcePath,
+               let nsImage = NSImage(contentsOfFile: resourcePath + "/logo.png") {
+                Image(nsImage: nsImage).resizable().aspectRatio(contentMode: .fit)
+            } else if let bundlePath = Bundle.main.executableURL?
+                .deletingLastPathComponent().deletingLastPathComponent()
+                .appendingPathComponent("Resources/logo.png").path,
+               let nsImage = NSImage(contentsOfFile: bundlePath) {
+                Image(nsImage: nsImage).resizable().aspectRatio(contentMode: .fit)
+            } else if FileManager.default.fileExists(atPath: "logo.png"),
+                      let nsImage = NSImage(contentsOfFile: "logo.png") {
+                Image(nsImage: nsImage).resizable().aspectRatio(contentMode: .fit)
+            } else {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 18)
+                        .fill(.ultraThinMaterial)
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 18)
+                                .fill(LinearGradient(colors: [.blue.opacity(0.8), .purple.opacity(0.8)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                            RoundedRectangle(cornerRadius: 18)
+                                .fill(LinearGradient(colors: [.white.opacity(0.25), .white.opacity(0.02)], startPoint: .topLeading, endPoint: .bottom))
+                        }
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 18)
+                                .strokeBorder(LinearGradient(colors: [.white.opacity(0.5), .white.opacity(0.1)], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 0.75)
+                        }
+                    Image(systemName: "arrow.down.circle.fill").font(.system(size: 28)).foregroundStyle(.white)
+                        .shadow(color: .black.opacity(0.2), radius: 4, y: 2)
+                }
             }
         }
     }
 }
 
-// MARK: - Preview
+// MARK: - SparklineView
+
+struct SparklineView: View {
+    let samples: [Double]
+    var color: Color = .accentColor
+
+    var body: some View {
+        GeometryReader { geo in
+            let w = geo.size.width
+            let h = geo.size.height
+            let max = samples.max() ?? 1
+            let min = samples.min() ?? 0
+            let range = max - min > 0 ? max - min : 1
+            let points = samples.enumerated().map { i, v -> CGPoint in
+                let x = w * CGFloat(i) / CGFloat(samples.count - 1)
+                let y = h - h * CGFloat(v - min) / CGFloat(range)
+                return CGPoint(x: x, y: y)
+            }
+
+            ZStack {
+                if points.count > 1 {
+                    Path { p in
+                        p.move(to: CGPoint(x: points[0].x, y: h))
+                        p.addLine(to: points[0])
+                        for pt in points.dropFirst() { p.addLine(to: pt) }
+                        p.addLine(to: CGPoint(x: points.last!.x, y: h))
+                        p.closeSubpath()
+                    }
+                    .fill(LinearGradient(
+                        colors: [color.opacity(0.3), color.opacity(0.05)],
+                        startPoint: .top, endPoint: .bottom
+                    ))
+
+                    Path { p in
+                        p.move(to: points[0])
+                        for pt in points.dropFirst() { p.addLine(to: pt) }
+                    }
+                    .stroke(color, lineWidth: 1.5)
+                }
+            }
+        }
+    }
+}
 
 #if DEBUG
 #Preview {
-    ContentView()
-        .environmentObject(DownloadManager.shared)
+    ContentView().environmentObject(DownloadManager.shared)
 }
 #endif

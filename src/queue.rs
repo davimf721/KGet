@@ -146,12 +146,7 @@ impl DownloadHistory {
 
     /// Finalise an entry with a status and optional error message, then
     /// append (or replace, if the same URL already has an entry) it.
-    pub fn record(
-        &mut self,
-        mut entry: HistoryEntry,
-        status: EntryStatus,
-        error: Option<String>,
-    ) {
+    pub fn record(&mut self, mut entry: HistoryEntry, status: EntryStatus, error: Option<String>) {
         entry.status = status;
         entry.finished_at = Some(unix_now());
         entry.error = error;
@@ -180,8 +175,7 @@ impl DownloadHistory {
     /// Returns the number of entries removed.
     pub fn clear_completed(&mut self) -> usize {
         let before = self.entries.len();
-        self.entries
-            .retain(|e| e.status == EntryStatus::Failed);
+        self.entries.retain(|e| e.status == EntryStatus::Failed);
         before - self.entries.len()
     }
 

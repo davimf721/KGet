@@ -128,3 +128,115 @@ pub fn resolve_output_path(output_arg: Option<String>, url: &str, default_name: 
         get_filename_from_url_or_default(url, default_name)
     }
 }
+
+/// Returns `true` when the path's extension is a supported archive format.
+pub fn is_extractable(path: &std::path::Path) -> bool {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    name.ends_with(".zip")
+        || name.ends_with(".tar.gz")
+        || name.ends_with(".tgz")
+        || name.ends_with(".tar.bz2")
+        || name.ends_with(".tbz2")
+        || name.ends_with(".tar.xz")
+        || name.ends_with(".txz")
+        || name.ends_with(".7z")
+}
+
+/// Extract an archive at `path` into its parent directory using the system tool
+/// (`unzip`, `tar`, or `7z`).  Returns `Ok(())` if the path is not a recognised
+/// archive type (no-op) or if extraction succeeds.
+///
+/// # Errors
+///
+/// Returns an error if the tool is not found or exits with a non-zero status.
+pub fn auto_extract(
+    path: &std::path::Path,
+    quiet: bool,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let path_str = path.to_str().ok_or("Invalid UTF-8 in path")?;
+    let dir_str = path
+        .parent()
+        .and_then(|d| d.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(".");
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    let (cmd, args): (&str, Vec<String>) = if name.ends_with(".zip") {
+        (
+            "unzip",
+            vec![
+                "-o".into(),
+                path_str.into(),
+                "-d".into(),
+                dir_str.into(),
+            ],
+        )
+    } else if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
+        (
+            "tar",
+            vec![
+                "-xzf".into(),
+                path_str.into(),
+                "-C".into(),
+                dir_str.into(),
+            ],
+        )
+    } else if name.ends_with(".tar.bz2") || name.ends_with(".tbz2") {
+        (
+            "tar",
+            vec![
+                "-xjf".into(),
+                path_str.into(),
+                "-C".into(),
+                dir_str.into(),
+            ],
+        )
+    } else if name.ends_with(".tar.xz") || name.ends_with(".txz") {
+        (
+            "tar",
+            vec![
+                "-xJf".into(),
+                path_str.into(),
+                "-C".into(),
+                dir_str.into(),
+            ],
+        )
+    } else if name.ends_with(".7z") {
+        (
+            "7z",
+            vec!["x".into(), path_str.into(), format!("-o{dir_str}")],
+        )
+    } else {
+        return Ok(());
+    };
+
+    if !quiet {
+        println!("Extracting {} …", path.display());
+    }
+
+    let status = std::process::Command::new(cmd)
+        .args(&args)
+        .status()
+        .map_err(|e| format!("Failed to run `{cmd}`: {e} — is it installed?"))?;
+
+    if !status.success() {
+        return Err(format!(
+            "`{cmd}`: extraction failed (exit {:?})",
+            status.code()
+        )
+        .into());
+    }
+
+    if !quiet {
+        println!("Extracted to: {dir_str}");
+    }
+    Ok(())
+}

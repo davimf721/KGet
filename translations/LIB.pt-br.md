@@ -1,8 +1,8 @@
 # Usando o KGet como Biblioteca Rust
 
 KGet é um gerenciador de downloads e também um motor Rust reutilizável para
-HTTP/HTTPS, FTP, SFTP, links magnet, callbacks de progresso, retomada de
-downloads, proxy e verificação SHA256.
+HTTP/HTTPS, FTP, SFTP, WebDAV, magnet links, callbacks de progresso, retomada
+de downloads, proxy e verificação de checksum multi-algoritmo.
 
 [English](../LIB.md) | [Português](LIB.pt-br.md) | [Español](LIB.es.md)
 
@@ -10,75 +10,169 @@ downloads, proxy e verificação SHA256.
 
 ```toml
 [dependencies]
-Kget = "1.6.3"
+Kget = "1.7.0"
+
+# Opcional: cliente torrent nativo
+Kget = { version = "1.7.0", features = ["torrent-native"] }
+
+# Opcional: API async
+Kget = { version = "1.7.0", features = ["async"] }
 ```
 
-Features opcionais:
-
-```toml
-Kget = { version = "1.6.3", features = ["torrent-native"] }
-Kget = { version = "1.6.3", features = ["gui"] }
-```
-
-## API Principal
-
-- `download`: download HTTP/HTTPS em fluxo único com retry, proxy, streaming para disco e SHA256 opcional.
-- `AdvancedDownloader`: download HTTP/HTTPS paralelo e retomável usando byte ranges.
-- `download_magnet`: download de magnet links com cliente nativo quando compilado com `torrent-native`.
-- `DownloadOptions`: modo silencioso, caminho de saída, verificação ISO e hash SHA256 esperado.
-- `Config`, `ProxyConfig`, `Optimizer`: configuração reutilizável.
-- `verify_file_sha256` e `verify_iso_integrity`: utilitários de checksum.
-- `metalink::download_metalink`: analisa manifesto `.meta4`/`.metalink` e baixa todos os arquivos, tentando mirrors em ordem de prioridade com verificação automática de hash.
-- `queue::{DownloadHistory, HistoryEntry, EntryStatus}`: histórico persistente de downloads em `history.json` no diretório de configuração do SO.
-
-## Download Simples
+## Quick Start — API Builder (recomendada)
 
 ```rust,no_run
-use kget::{download, DownloadOptions, Optimizer, ProxyConfig};
+use kget::KgetError;
 
-fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let options = DownloadOptions {
-        output_path: Some("arquivo.zip".to_string()),
-        ..Default::default()
-    };
-
-    download(
-        "https://example.com/arquivo.zip",
-        ProxyConfig::default(),
-        Optimizer::new(),
-        options,
-        None,
-    )?;
-
+fn main() -> Result<(), KgetError> {
+    kget::builder("https://example.com/arquivo.zip")
+        .output("./downloads/")
+        .connections(8)
+        .sha256("abc123def456...")
+        .download()?;
     Ok(())
 }
 ```
 
-## SHA256 Esperado
+## Métodos do Builder
+
+`kget::builder(url)` retorna um `DownloadBuilder`. Todos os métodos são encadeáveis:
+
+| Método | Descrição |
+|--------|-----------|
+| `.output(caminho)` | Salvar em arquivo ou diretório |
+| `.connections(n)` | Conexões paralelas (modo turbo) |
+| `.speed_limit(bps)` | Máximo de bytes/s (token bucket global) |
+| `.proxy(url)` | URL do proxy HTTP ou SOCKS5 |
+| `.quiet(bool)` | Suprimir saída de progresso |
+| `.sha256(hash)` | Verificar SHA-256 após download |
+| `.sha512(hash)` | Verificar SHA-512 após download |
+| `.sha1(hash)` | Verificar SHA-1 após download |
+| `.md5(hash)` | Verificar MD5 após download |
+| `.blake3(hash)` | Verificar BLAKE3 após download |
+| `.verify_from(url)` | Baixar e analisar arquivo de checksum sidecar GNU/BSD |
+| `.header(nome, valor)` | Adicionar header HTTP |
+| `.retry(config)` | Política de retry customizada (`RetryConfig`) |
+| `.range(inicio, fim)` | Solicitar faixa de bytes específica |
+
+Métodos terminais:
+
+| Método | Retorna | Descrição |
+|--------|---------|-----------|
+| `.download()` | `Result<DownloadResult, KgetError>` | Download para disco |
+| `.download_to_bytes()` | `Result<Vec<u8>, KgetError>` | Download em memória |
+| `.download_to_reader()` | `Result<impl Read, KgetError>` | Reader de streaming |
+| `.spawn()` | `Result<(JoinHandle, Receiver<DownloadEvent>), KgetError>` | Thread em background com canal de eventos |
+| `.download_async()` | `impl Future<…>` | API async (feature `async`) |
+
+## Downloads em Lote
 
 ```rust,no_run
-use kget::{download, DownloadOptions, Optimizer, ProxyConfig};
+let results = kget::batch([
+    "https://mirror1.example.com/arquivo.iso",
+    "https://mirror2.example.com/outro.tar.gz",
+])
+.concurrency(4)
+.output_dir("./downloads/")
+.download_all();
 
-let options = DownloadOptions {
-    output_path: Some("imagem.iso".to_string()),
-    verify_iso: true,
-    expected_sha256: Some("hash_sha256_esperado".to_string()),
-    ..Default::default()
-};
+for r in results {
+    match r.result {
+        Ok(d) => println!("✓ {} — {:.1} MB/s", r.url, d.avg_speed_bps / 1e6),
+        Err(e) => eprintln!("✗ {}: {}", r.url, e),
+    }
+}
+```
 
-download(
-    "https://example.com/imagem.iso",
+## Canal de Eventos
+
+```rust,no_run
+use kget::{DownloadEvent, KgetError};
+
+let (handle, rx) = kget::builder("https://example.com/grande.iso")
+    .connections(4)
+    .spawn()?;
+
+for event in rx {
+    match event {
+        DownloadEvent::Progress { percent, speed_bps, eta_secs } => {
+            print!("\r{:.1}%  {:.1} MB/s  eta {}s", percent, speed_bps / 1e6, eta_secs.unwrap_or(0));
+        }
+        DownloadEvent::Completed { path, bytes, .. } => {
+            println!("\nSalvo {} bytes em {path}", bytes);
+        }
+        DownloadEvent::Error(e) => eprintln!("Erro: {e}"),
+        _ => {}
+    }
+}
+handle.join().ok();
+# Ok::<(), KgetError>(())
+```
+
+## Erros Tipados
+
+```rust
+pub enum KgetError {
+    Network(reqwest::Error),
+    Io(std::io::Error),
+    ChecksumMismatch { algorithm: String, expected: String, got: String },
+    Protocol(String),
+    Cancelled,
+    NotFound(String),
+    SidecarError(String),
+    Other(String),
+}
+```
+
+Erros permanentes (`Cancelled`, `NotFound`, `ChecksumMismatch`) nunca são tentados novamente.
+
+## Checksums
+
+```rust,no_run
+use kget::checksum::{compute_checksum, ChecksumAlgorithm};
+
+let hash = compute_checksum(ChecksumAlgorithm::Blake3, std::path::Path::new("arquivo.bin"))?;
+println!("BLAKE3: {hash}");
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Algoritmos suportados: `Sha256`, `Sha512`, `Sha1`, `Md5`, `Blake3`.
+
+Verificação por arquivo sidecar:
+
+```rust,no_run
+kget::builder("https://example.com/release.tar.gz")
+    .verify_from("https://example.com/release.tar.gz.sha256sum")
+    .download()?;
+# Ok::<(), kget::KgetError>(())
+```
+
+## ResumePolicy
+
+```rust,no_run
+use kget::{AdvancedDownloader, ResumePolicy, Optimizer, ProxyConfig};
+
+let mut dl = AdvancedDownloader::new(
+    "https://example.com/imagem.iso".to_string(),
+    "imagem.iso".to_string(),
+    true,
     ProxyConfig::default(),
     Optimizer::new(),
-    options,
-    Some(&|status| println!("{status}")),
 )?;
+dl.set_resume_policy(ResumePolicy::AlwaysResume); // nunca bloqueia no stdin
+dl.download()?;
 # Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 ```
 
-Se o SHA256 calculado não bater, a função retorna erro.
+| Variante | Comportamento |
+|----------|--------------|
+| `Ask` (padrão) | Solicita via stdin em sessões interativas |
+| `AlwaysResume` | Ignora prompt, prossegue sem perguntar |
+| `AlwaysRestart` | Ignora prompt, reinicia do zero |
 
-## Download Avançado
+Chamadores da biblioteca devem sempre definir `AlwaysResume` ou `AlwaysRestart` para evitar bloqueio.
+
+## Download HTTP Avançado Paralelo
 
 ```rust,no_run
 use kget::{AdvancedDownloader, Optimizer, ProxyConfig};
@@ -86,32 +180,127 @@ use kget::{AdvancedDownloader, Optimizer, ProxyConfig};
 let mut downloader = AdvancedDownloader::new(
     "https://example.com/grande.iso".to_string(),
     "grande.iso".to_string(),
-    true,
+    false,
     ProxyConfig::default(),
     Optimizer::new(),
-);
+)?;  // new() retorna Result — propague com ?
 
+downloader.set_resume_policy(kget::ResumePolicy::AlwaysResume);
 downloader.set_progress_callback(|progress| {
-    println!("{:.1}%", progress * 100.0);
+    print!("\r{:.1}%", progress * 100.0);
 });
-downloader.set_expected_sha256("hash_sha256_esperado");
 downloader.download()?;
 # Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 ```
 
-O downloader avançado usa byte ranges e rejeita servidores que anunciam range
-mas respondem com conteúdo completo, evitando corrupção silenciosa.
+## Download HTTP Simples
 
-## Links Magnet
+```rust,no_run
+use kget::{download, DownloadOptions, Optimizer, ProxyConfig};
+
+let options = DownloadOptions {
+    output_path: Some("arquivo.zip".to_string()),
+    ..Default::default()
+};
+
+download(
+    "https://example.com/arquivo.zip",
+    ProxyConfig::default(),
+    Optimizer::new(),
+    options,
+    None,
+)?;
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+```
+
+## Download em Memória
+
+```rust,no_run
+let bytes: Vec<u8> = kget::builder("https://example.com/dados.json")
+    .download_to_bytes()?;
+println!("Recebidos {} bytes", bytes.len());
+# Ok::<(), kget::KgetError>(())
+```
+
+## FTP
+
+```rust,no_run
+use kget::ftp::FtpDownloader;
+use kget::{Optimizer, ProxyConfig};
+
+let dl = FtpDownloader::new(
+    "ftp://ftp.gnu.org/gnu/emacs/emacs-28.2.tar.gz".to_string(),
+    "emacs-28.2.tar.gz".to_string(),
+    false,
+    ProxyConfig::default(),
+    Optimizer::new(),
+);
+dl.download()?;
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+```
+
+## SFTP
+
+```rust,no_run
+use kget::sftp::SftpDownloader;
+use kget::{Optimizer, ProxyConfig};
+
+let dl = SftpDownloader::new(
+    "sftp://usuario:senha@servidor.example.com/caminho/arquivo.tar.gz".to_string(),
+    "arquivo.tar.gz".to_string(),
+    false,
+    ProxyConfig::default(),
+    Optimizer::new(),
+);
+dl.download()?;
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+```
+
+Prioridade de autenticação:
+1. Senha na URL (`sftp://usuario:senha@host/caminho`)
+2. SSH agent ativo
+3. Arquivos de chave padrão (`~/.ssh/id_ed25519`, `~/.ssh/id_rsa`, `~/.ssh/id_ecdsa`)
+
+Host keys verificadas contra `~/.ssh/known_hosts`; divergências geram erro.
+
+## WebDAV
+
+```rust,no_run
+use kget::webdav::WebDavDownloader;
+use kget::{Optimizer, ProxyConfig};
+
+let dl = WebDavDownloader::new(
+    "webdavs://usuario:senha@nas.local/backups/db.tar.gz".to_string(),
+    "db.tar.gz".to_string(),
+    false,
+    ProxyConfig::default(),
+    Optimizer::new(),
+);
+dl.download()?;
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+```
+
+## yt-dlp
+
+```rust,no_run
+use kget::ytdlp::{download_video, VideoQuality, is_video_url};
+
+if is_video_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ") {
+    download_video(
+        "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        VideoQuality::Quality720p,
+        "./downloads",
+        None,
+    )?;
+}
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+```
+
+## Magnet Links
 
 ```rust,no_run
 use kget::{download_magnet, Optimizer, ProxyConfig, TorrentCallbacks};
 use std::sync::Arc;
-
-let callbacks = TorrentCallbacks {
-    status: Some(Arc::new(|message| println!("{message}"))),
-    progress: Some(Arc::new(|progress| println!("{:.1}%", progress * 100.0))),
-};
 
 download_magnet(
     "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
@@ -119,22 +308,15 @@ download_magnet(
     true,
     ProxyConfig::default(),
     Optimizer::new(),
-    callbacks,
+    TorrentCallbacks {
+        status: Some(Arc::new(|msg| println!("{msg}"))),
+        progress: Some(Arc::new(|p| println!("{:.1}%", p * 100.0))),
+    },
 )?;
 # Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 ```
 
-Use `download_magnet` com a feature `torrent-native` para o cliente torrent embutido. Sem essa feature, o KGet tenta usar o app padrão do sistema para magnet links.
-
-## Comportamento da Biblioteca
-
-- Chamadas da biblioteca nunca perguntam nada via `stdin`.
-- Progresso e status são enviados por callbacks.
-- Arquivos são gravados em streaming no disco.
-- Nomes de saída são validados contra separadores de caminho.
-- Helpers SHA256 retornam erro quando o hash esperado não confere.
-
-## Downloads Metalink
+## Metalink
 
 ```rust,no_run
 use kget::metalink::download_metalink;
@@ -150,32 +332,46 @@ download_metalink(
 # Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 ```
 
-Analisa o manifesto RFC 5854, ordena mirrors por prioridade (menor número = primeiro), tenta cada um e verifica SHA-256 após o download. Mirror corrompido é deletado e o próximo é tentado automaticamente.
-
 ## Histórico de Downloads
 
 ```rust,no_run
 use kget::queue::{DownloadHistory, EntryStatus, HistoryEntry};
 
 let mut history = DownloadHistory::load();
-
-let entry = HistoryEntry::new(
-    "https://example.com/arquivo.iso",
-    "/home/user/Downloads",
-    Some("hash_sha256_esperado"),
-);
+let entry = HistoryEntry::new("https://example.com/arquivo.iso", "/home/user/Downloads", None);
 history.record(entry, EntryStatus::Completed, None);
 history.save()?;
 
 for e in history.recent(10) {
     println!("{} {} {}", e.created_at_display(), e.status, e.filename);
 }
+history.clear_completed();
+history.save()?;
 # Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 ```
 
-Localização do arquivo de histórico:
-- macOS: `~/Library/Application Support/kget/history.json`
-- Linux: `~/.config/kget/history.json`
-- Windows: `%APPDATA%\kget\history.json`
+## API Async
 
-Veja [examples/lib_usage.rs](../examples/lib_usage.rs) para exemplos maiores.
+Com `--features async`:
+
+```rust,no_run
+#[tokio::main]
+async fn main() -> Result<(), kget::KgetError> {
+    kget::builder("https://example.com/arquivo.zip")
+        .output("./downloads/")
+        .connections(4)
+        .download_async()
+        .await?;
+    Ok(())
+}
+```
+
+## Garantias da Biblioteca
+
+- Chamadores da biblioteca nunca bloqueiam no `stdin` quando `ResumePolicy` está definida.
+- Progresso e status são expostos via callbacks e canais de eventos.
+- Arquivos são transmitidos para disco (exceto `.download_to_bytes()`).
+- Nomes de arquivo são validados: rejeita bytes nulos, path traversal, >255 bytes e nomes reservados do Windows.
+- Apenas erros 5xx e de conexão são tentados novamente; 4xx falha imediatamente.
+
+Veja [examples/lib_usage.rs](../examples/lib_usage.rs) para mais exemplos.

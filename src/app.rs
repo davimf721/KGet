@@ -109,38 +109,40 @@ fn download_worker(
 
                             download_magnet(&url, &output_path, true, proxy, optimizer, callbacks)
                         } else if is_advanced {
-                            let mut downloader = AdvancedDownloader::new(
+                            AdvancedDownloader::new(
                                 url.clone(),
                                 output_path.clone(),
                                 true,
                                 proxy,
                                 optimizer,
-                            );
+                            )
+                            .and_then(|mut downloader| {
+                                downloader.set_cancel_token(cancel_token_clone.clone());
+                                if let Some(expected_sha256) = expected_sha256.clone() {
+                                    downloader.set_expected_sha256(expected_sha256);
+                                }
 
-                            downloader.set_cancel_token(cancel_token_clone.clone());
-                            if let Some(expected_sha256) = expected_sha256.clone() {
-                                downloader.set_expected_sha256(expected_sha256);
-                            }
+                                let status_tx_cb = status_tx_clone.clone();
+                                downloader.set_progress_callback(move |p| {
+                                    status_tx_cb.send(WorkerToGuiMessage::Progress(p)).ok();
+                                });
 
-                            let status_tx_cb = status_tx_clone.clone();
-                            downloader.set_progress_callback(move |p| {
-                                status_tx_cb.send(WorkerToGuiMessage::Progress(p)).ok();
-                            });
+                                let status_tx_cb = status_tx_clone.clone();
+                                downloader.set_status_callback(move |msg| {
+                                    status_tx_cb
+                                        .send(WorkerToGuiMessage::StatusUpdate(msg))
+                                        .ok();
+                                });
 
-                            let status_tx_cb = status_tx_clone.clone();
-                            downloader.set_status_callback(move |msg| {
-                                status_tx_cb
-                                    .send(WorkerToGuiMessage::StatusUpdate(msg))
-                                    .ok();
-                            });
-
-                            downloader.download()
+                                downloader.download()
+                            })
                         } else {
                             let options = DownloadOptions {
                                 quiet_mode: true,
                                 output_path: Some(output_path.clone()),
                                 verify_iso,
                                 expected_sha256: expected_sha256.clone(),
+                                extra_headers: Vec::new(),
                             };
 
                             let status_tx_cb = status_tx_clone.clone();

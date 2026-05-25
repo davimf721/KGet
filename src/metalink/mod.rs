@@ -113,9 +113,7 @@ pub fn parse(content: &str) -> Result<MetalinkDoc, Box<dyn Error + Send + Sync>>
         for child in file_node.children().filter(|n| n.is_element()) {
             match child.tag_name().name() {
                 "size" => {
-                    size = child
-                        .text()
-                        .and_then(|t| t.trim().parse::<u64>().ok());
+                    size = child.text().and_then(|t| t.trim().parse::<u64>().ok());
                 }
                 "hash" => {
                     let hash_type = child.attribute("type").unwrap_or("").to_lowercase();
@@ -159,9 +157,7 @@ pub fn parse(content: &str) -> Result<MetalinkDoc, Box<dyn Error + Send + Sync>>
     }
 
     if files.is_empty() {
-        return Err(
-            "Metalink contains no downloadable files with at least one URL".into(),
-        );
+        return Err("Metalink contains no downloadable files with at least one URL".into());
     }
 
     Ok(MetalinkDoc { files })
@@ -191,10 +187,7 @@ pub fn download_metalink(
     let manifest = parse(&xml)?;
 
     if !quiet {
-        println!(
-            "Metalink: {} file(s) to download",
-            manifest.files.len()
-        );
+        println!("Metalink: {} file(s) to download", manifest.files.len());
     }
 
     let out_dir = PathBuf::from(output_dir);
@@ -247,7 +240,9 @@ fn build_http_client(
         .timeout(std::time::Duration::from_secs(60))
         .user_agent(concat!("KGet/", env!("CARGO_PKG_VERSION")));
 
-    if proxy.enabled && let Some(proxy_url) = &proxy.url {
+    if proxy.enabled
+        && let Some(proxy_url) = &proxy.url
+    {
         let p = match proxy.proxy_type {
             crate::config::ProxyType::Http => reqwest::Proxy::http(proxy_url),
             crate::config::ProxyType::Https => reqwest::Proxy::https(proxy_url),
@@ -290,12 +285,7 @@ fn download_one_file(
 
     for (idx, mirror) in file.urls.iter().enumerate() {
         if !quiet {
-            println!(
-                "  Mirror {}/{}: {}",
-                idx + 1,
-                file.urls.len(),
-                mirror.url
-            );
+            println!("  Mirror {}/{}: {}", idx + 1, file.urls.len(), mirror.url);
         }
 
         match download_from_mirror(&mirror.url, &dest, quiet, proxy, optimizer) {
@@ -367,7 +357,7 @@ fn download_from_mirror(
         quiet,
         proxy.clone(),
         optimizer.clone(),
-    );
+    )?;
     dl.download()
 }
 

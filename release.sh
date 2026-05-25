@@ -21,6 +21,7 @@
 #   cargo, rustup, git, gh authenticated, crates.io token/login
 #   macOS app: swift, xcrun, codesign, hdiutil
 #   cross-platform binaries: cross+Docker or cargo-zigbuild+zig
+#   Homebrew tap: SSH access to git@github.com:davimf721/homebrew-kget.git
 #
 # Optional environment:
 #   KGET_RELEASE_INCLUDE_UNTRACKED=true  # include untracked files in the release commit
@@ -442,8 +443,15 @@ make_release_notes() {
         done
         echo "- \`SHA256SUMS-${VERSION}.txt\`: checksums for all release assets."
         echo ""
-        echo "## Rust"
+        echo "## Install"
         echo ""
+        echo "**Homebrew (macOS / Linux):**"
+        echo '```bash'
+        echo "brew tap davimf721/kget"
+        echo "brew install kget"
+        echo '```'
+        echo ""
+        echo "**Rust / crates.io:**"
         echo '```bash'
         echo "cargo install Kget --version ${VERSION}"
         echo '```'
@@ -522,6 +530,87 @@ create_github_release() {
     success "GitHub release: https://github.com/davimf721/KGet/releases/tag/${TAG}"
 }
 
+update_homebrew_formula() {
+    if ! $DO_GITHUB; then
+        warn "Skipping Homebrew formula update (--github disabled)"
+        return
+    fi
+
+    if $DRY_RUN; then
+        warn "DRY RUN: would fetch tarball SHA256, update Formula/kget.rb, and push to homebrew-kget tap"
+        return
+    fi
+
+    info "Updating Formula/kget.rb for ${TAG}..."
+    local tarball_url="https://github.com/davimf721/KGet/archive/refs/tags/${TAG}.tar.gz"
+
+    # Retry up to 10 times — GitHub CDN may take a few seconds after tag push
+    local sha=""
+    for i in $(seq 1 10); do
+        sha=$(curl -fsSL "$tarball_url" 2>/dev/null | shasum -a 256 | awk '{print $1}')
+        [ -n "$sha" ] && break
+        warn "Attempt $i: tarball not yet available, retrying in 5s…"
+        sleep 5
+    done
+
+    if [ -z "$sha" ]; then
+        warn "Could not compute tarball SHA256 — update Formula/kget.rb manually"
+        return
+    fi
+
+    # Update tarball URL to new version tag
+    sed -i.bak -E "s|refs/tags/v[0-9]+\.[0-9]+\.[0-9]+\.tar\.gz|refs/tags/${TAG}.tar.gz|g" Formula/kget.rb
+    # Update bottle root_url to new version tag
+    sed -i.bak -E "s|releases/download/v[0-9]+\.[0-9]+\.[0-9]+\"|releases/download/${TAG}\"|g" Formula/kget.rb
+    # Update sha256 — handles both PLACEHOLDER and an existing 64-char hex hash
+    sed -i.bak -E "s/sha256 \"(PLACEHOLDER_SHA256|[a-f0-9]{64})\"/sha256 \"${sha}\"/" Formula/kget.rb
+    rm -f Formula/kget.rb.bak
+
+    git add Formula/kget.rb
+    if ! git diff --cached --quiet; then
+        git commit -m "chore: update Homebrew formula to ${VERSION}"
+        git push "$REMOTE" "$BRANCH"
+        success "Formula/kget.rb committed (SHA256: ${sha})"
+    else
+        success "Formula/kget.rb already up to date"
+    fi
+
+    push_formula_to_tap
+}
+
+push_formula_to_tap() {
+    local tap_repo="git@github.com:davimf721/homebrew-kget.git"
+    local tap_dir
+    tap_dir=$(mktemp -d)
+
+    info "Pushing formula to davimf721/homebrew-kget tap..."
+
+    if ! git clone --depth=1 "$tap_repo" "$tap_dir" 2>/dev/null; then
+        warn "Could not clone homebrew-kget tap — copy Formula/kget.rb to the tap manually"
+        rm -rf "$tap_dir"
+        return
+    fi
+
+    # Tap stores the formula at root level as kget.rb
+    cp Formula/kget.rb "$tap_dir/kget.rb"
+
+    git -C "$tap_dir" add kget.rb
+    if git -C "$tap_dir" diff --cached --quiet; then
+        success "homebrew-kget tap already up to date"
+        rm -rf "$tap_dir"
+        return
+    fi
+
+    git -C "$tap_dir" \
+        -c "user.name=$(git config user.name)" \
+        -c "user.email=$(git config user.email)" \
+        commit -m "chore: release ${VERSION}"
+    git -C "$tap_dir" push origin HEAD
+    success "homebrew-kget tap updated: https://github.com/davimf721/homebrew-kget"
+
+    rm -rf "$tap_dir"
+}
+
 final_push_verify() {
     if ! $DO_GITHUB || $DRY_RUN; then
         return
@@ -555,6 +644,7 @@ print_summary() {
     echo ""
     if $DO_GITHUB && ! $DRY_RUN; then
         echo "GitHub : https://github.com/davimf721/KGet/releases/tag/${TAG}"
+        echo "Tap    : https://github.com/davimf721/homebrew-kget"
     fi
     if $DO_CRATES && ! $DRY_RUN; then
         echo "crates : https://crates.io/crates/Kget/${VERSION}"
@@ -572,5 +662,6 @@ make_release_notes
 push_git
 publish_crates
 create_github_release
+update_homebrew_formula
 final_push_verify
 print_summary

@@ -44,22 +44,27 @@ struct KGetApp: App {
     }
     
     private func handleURL(_ url: URL) {
-        // Handle kget:// URLs
         if url.scheme == "kget" {
-            // Convert kget://example.com/file.zip to https://example.com/file.zip
-            var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
-            components?.scheme = "https"
-            if let downloadURL = components?.url {
+            // Share Extension sends: kget://download?url=<percent-encoded original URL>
+            if url.host == "download",
+               let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+               let urlParam = components.queryItems?.first(where: { $0.name == "url" })?.value {
+                downloadManager.startDownload(url: urlParam)
+                return
+            }
+            // Legacy: kget://host/path -> https://host/path
+            var comps = URLComponents(url: url, resolvingAgainstBaseURL: false)
+            comps?.scheme = "https"
+            if let downloadURL = comps?.url {
                 downloadManager.startDownload(url: downloadURL.absoluteString)
             }
         } else if url.scheme == "magnet" {
-            // Use KGet's native torrent client for magnet links
+            downloadManager.startDownload(url: url.absoluteString)
+        } else if url.scheme == "webdav" || url.scheme == "webdavs" {
             downloadManager.startDownload(url: url.absoluteString)
         } else if url.isFileURL && url.pathExtension == "torrent" {
-            // .torrent files not supported yet
             appDelegate.showTorrentFileWarning()
         } else if url.isFileURL {
-            // Other files - try to download
             downloadManager.startDownload(url: url.path)
         }
     }

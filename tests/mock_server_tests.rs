@@ -150,13 +150,15 @@ async fn test_mock_server_range_requests() {
 #[tokio::test]
 async fn test_mock_server_json_response() {
     let mock_server = MockServer::start().await;
+    let version = env!("CARGO_PKG_VERSION");
 
     // Test JSON response body parsing
     Mock::given(method("GET"))
         .and(path("/data.json"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_string(r#"{"name": "KGet", "version": "1.6.1"}"#),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+            r#"{{"name": "KGet", "version": "{}"}}"#,
+            version
+        )))
         .mount(&mock_server)
         .await;
 
@@ -172,11 +174,12 @@ async fn test_mock_server_json_response() {
 
     let body = response.text().await.unwrap();
     assert!(body.contains("KGet"));
-    assert!(body.contains("1.6.1"));
+    assert!(body.contains(version));
 
     // Verify it's valid JSON
     let json: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(json["name"], "KGet");
+    assert_eq!(json["version"], version);
 }
 
 #[tokio::test]
@@ -293,23 +296,72 @@ async fn test_mock_server_iso_detection() {
 // ============================================================================
 
 #[tokio::test]
-async fn test_download_options_integration() {
-    use kget::DownloadOptions;
+async fn test_download_server_error_retries_and_fails() {
+    // 5xx responses should be retried; after MAX_RETRIES attempts return an error.
+    let mock_server = MockServer::start().await;
 
-    let options = DownloadOptions {
-        quiet_mode: true,
-        output_path: Some("/tmp/test_download.txt".to_string()),
-        verify_iso: false,
-        expected_sha256: None,
-    };
+    Mock::given(method("GET"))
+        .and(path("/flaky.txt"))
+        .respond_with(ResponseTemplate::new(503).set_body_string("Service Unavailable"))
+        .mount(&mock_server)
+        .await;
 
-    // Verify the options are correctly set
-    assert!(options.quiet_mode);
-    assert_eq!(
-        options.output_path,
-        Some("/tmp/test_download.txt".to_string())
-    );
-    assert!(!options.verify_iso);
+    use kget::{DownloadOptions, Optimizer, ProxyConfig, download};
+    let url = format!("{}/flaky.txt", mock_server.uri());
+    let result = tokio::task::spawn_blocking(move || {
+        download(
+            &url,
+            ProxyConfig::default(),
+            Optimizer::new(),
+            DownloadOptions {
+                quiet_mode: true,
+                output_path: Some("/tmp/kget_flaky_test.txt".to_string()),
+                verify_iso: false,
+                expected_sha256: None,
+                extra_headers: Vec::new(),
+            },
+            None,
+        )
+    })
+    .await
+    .unwrap();
+    assert!(result.is_err(), "503 should eventually fail");
+    let msg = result.unwrap_err().to_string();
+    assert!(msg.contains("503") || msg.contains("after"), "unexpected error: {}", msg);
+}
+
+#[tokio::test]
+async fn test_download_client_error_fails_immediately() {
+    // 4xx responses must NOT be retried — fail immediately.
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/missing.txt"))
+        .respond_with(ResponseTemplate::new(404).set_body_string("Not Found"))
+        .mount(&mock_server)
+        .await;
+
+    use kget::{DownloadOptions, Optimizer, ProxyConfig, download};
+    let url = format!("{}/missing.txt", mock_server.uri());
+    let result = tokio::task::spawn_blocking(move || {
+        download(
+            &url,
+            ProxyConfig::default(),
+            Optimizer::new(),
+            DownloadOptions {
+                quiet_mode: true,
+                output_path: Some("/tmp/kget_missing_test.txt".to_string()),
+                verify_iso: false,
+                expected_sha256: None,
+                extra_headers: Vec::new(),
+            },
+            None,
+        )
+    })
+    .await
+    .unwrap();
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("404"));
 }
 
 #[tokio::test]
@@ -372,6 +424,7 @@ async fn test_simple_download_writes_expected_file() {
                 output_path: Some(output_path_str),
                 verify_iso: false,
                 expected_sha256: None,
+                extra_headers: Vec::new(),
             },
             None,
         )
@@ -418,6 +471,7 @@ async fn test_simple_download_verifies_expected_sha256() {
                 output_path: Some(output_path_str),
                 verify_iso: false,
                 expected_sha256: Some(expected_hash),
+                extra_headers: Vec::new(),
             },
             None,
         )
@@ -494,7 +548,7 @@ async fn test_advanced_download_parallel_ranges_write_expected_file() {
             true,
             ProxyConfig::default(),
             Optimizer::from_config(config.optimization),
-        );
+        )?;
         downloader.download()
     })
     .await
@@ -542,7 +596,8 @@ async fn test_advanced_download_rejects_range_ignored_by_server() {
             true,
             ProxyConfig::default(),
             Optimizer::new(),
-        );
+        )
+        .unwrap();
         downloader.download().unwrap_err().to_string()
     })
     .await

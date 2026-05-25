@@ -79,14 +79,37 @@ pub fn check_disk_space(
 /// # Errors
 ///
 /// Returns an error if the filename:
-/// - Contains directory separators
 /// - Is empty
+/// - Contains directory separators
+/// - Contains null bytes
+/// - Contains path traversal sequences (`..`)
+/// - Exceeds 255 bytes
+/// - Matches a Windows reserved name (CON, NUL, COM1–9, LPT1–9, etc.)
 pub fn validate_filename(filename: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+    if filename.is_empty() {
+        return Err("Filename cannot be empty".into());
+    }
     if filename.contains('/') || filename.contains('\\') {
         return Err("Filename cannot contain directory separators".into());
     }
-    if filename.is_empty() {
-        return Err("Filename cannot be empty".into());
+    if filename.contains('\0') {
+        return Err("Filename cannot contain null bytes".into());
+    }
+    if filename.contains("..") {
+        return Err("Filename cannot contain path traversal sequences".into());
+    }
+    if filename.len() > 255 {
+        return Err("Filename exceeds maximum length of 255 bytes".into());
+    }
+    // Windows reserved device names — forbidden even on Unix to stay cross-platform safe.
+    let stem = filename.split('.').next().unwrap_or(filename);
+    const RESERVED: &[&str] = &[
+        "CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    if RESERVED.iter().any(|r| stem.eq_ignore_ascii_case(r)) {
+        return Err(format!("'{}' is a reserved filename on Windows", stem).into());
     }
     Ok(())
 }
@@ -165,8 +188,43 @@ pub fn download(
 
     let mut retries = 0;
     let response = loop {
-        match client.get(target).send() {
-            Ok(resp) => break resp,
+        let mut req = client.get(target);
+        for (name, value) in &options.extra_headers {
+            if let (Ok(n), Ok(v)) = (
+                reqwest::header::HeaderName::from_bytes(name.as_bytes()),
+                reqwest::header::HeaderValue::from_str(value),
+            ) {
+                req = req.header(n, v);
+            }
+        }
+        match req.send() {
+            Ok(resp) => {
+                let status = resp.status();
+                if status.is_success() {
+                    break resp;
+                } else if status.is_server_error() {
+                    // 5xx — transient, worth retrying
+                    retries += 1;
+                    if retries >= MAX_RETRIES {
+                        return Err(
+                            format!("HTTP {} after {} attempts", status, MAX_RETRIES).into()
+                        );
+                    }
+                    print(
+                        &format!(
+                            "Server error {} on attempt {}, retrying in {} seconds...",
+                            status,
+                            retries,
+                            RETRY_DELAY.as_secs()
+                        ),
+                        quiet_mode,
+                    );
+                    std::thread::sleep(RETRY_DELAY);
+                } else {
+                    // 4xx and others — permanent failure, do not retry
+                    return Err(format!("HTTP error: {}", status).into());
+                }
+            }
             Err(e) => {
                 retries += 1;
                 if retries >= MAX_RETRIES {
@@ -189,10 +247,6 @@ pub fn download(
         &format!("HTTP request sent... {}", response.status()),
         quiet_mode,
     );
-
-    if !response.status().is_success() {
-        return Err(format!("HTTP error: {}", response.status()).into());
-    }
 
     let content_length = response
         .headers()
@@ -227,7 +281,7 @@ pub fn download(
 
     let is_iso = target.to_lowercase().ends_with(".iso")
         || content_type.as_ref().map_or(false, |ct| {
-            ct.essence_str() == "application/x-iso9001"
+            ct.essence_str() == "application/x-iso9660-image"
                 || ct.essence_str() == "application/x-cd-image"
         });
 
@@ -350,7 +404,10 @@ pub fn download(
         if let Some(total) = response_content_length {
             if let Some(cb) = status_callback {
                 let percent = downloaded as f64 / total.max(1) as f64 * 100.0;
-                cb(format!("PROGRESS: {:.1}% ({}/{})", percent, downloaded, total));
+                cb(format!(
+                    "PROGRESS: {:.1}% ({}/{})",
+                    percent, downloaded, total
+                ));
             }
         }
 
@@ -464,11 +521,13 @@ pub fn verify_file_sha256(
     expected_hash: Option<&str>,
     callback: Option<&(dyn Fn(String) + Send + Sync)>,
 ) -> Result<String, Box<dyn Error + Send + Sync>> {
-    let msg = "Calculating SHA256 hash... (this may take a while for large ISOs)";
-    if let Some(cb) = callback {
-        cb(msg.to_string());
-    }
-    println!("{}", msg);
+    let send = |msg: &str| {
+        if let Some(cb) = callback {
+            cb(msg.to_string());
+        }
+    };
+
+    send("Calculating SHA256 hash... (this may take a while for large ISOs)");
 
     let mut file = File::open(path)?;
     let mut hasher = sha2::Sha256::new();
@@ -482,17 +541,8 @@ pub fn verify_file_sha256(
     }
     let hash = hex::encode(hasher.finalize());
 
-    let msg_done = "Integrity check finished.";
-    if let Some(cb) = callback {
-        cb(msg_done.to_string());
-    }
-    println!("{}", msg_done);
-
-    let msg_hash = format!("SHA256: {}", hash);
-    if let Some(cb) = callback {
-        cb(msg_hash.clone());
-    }
-    println!("SHA256: {}", hash);
+    send("Integrity check finished.");
+    send(&format!("SHA256: {}", hash));
 
     if let Some(expected_hash) = expected_hash {
         let expected_hash = expected_hash.trim().to_ascii_lowercase();
@@ -501,14 +551,7 @@ pub fn verify_file_sha256(
                 format!("SHA256 mismatch: expected {}, got {}", expected_hash, hash).into(),
             );
         }
-
-        let msg_match = "SHA256 matches expected hash.";
-        if let Some(cb) = callback {
-            cb(msg_match.to_string());
-        }
-        println!("{}", msg_match);
-    } else {
-        println!("You can compare this hash with the one provided by the source.");
+        send("SHA256 matches expected hash.");
     }
 
     Ok(hash)

@@ -1,3 +1,4 @@
+use kget::DownloadOptions;
 use kget::advanced_download::AdvancedDownloader;
 use kget::config::Config;
 use kget::download::download as http_download;
@@ -7,7 +8,6 @@ use kget::optimization::Optimizer;
 use kget::queue::{DownloadHistory, EntryStatus, HistoryEntry};
 use kget::sftp::SftpDownloader;
 use kget::utils;
-use kget::DownloadOptions;
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 use std::error::Error;
@@ -99,7 +99,12 @@ fn parse_download_args(parts: &[&str]) -> Result<DownloadArgs, String> {
                 }
                 args.url = token.to_string();
             }
-            unknown => return Err(format!("Unknown flag: '{}'. Run 'help' for usage.", unknown)),
+            unknown => {
+                return Err(format!(
+                    "Unknown flag: '{}'. Run 'help' for usage.",
+                    unknown
+                ));
+            }
         }
         i += 1;
     }
@@ -168,17 +173,19 @@ fn run_download(args: DownloadArgs, config: &Config) -> Result<(), Box<dyn Error
                 .download()
         } else if args.advanced {
             let output = utils::resolve_output_path(args.output, &args.url, "download");
-            let mut dl = AdvancedDownloader::new(
+            AdvancedDownloader::new(
                 args.url,
                 output,
                 args.quiet,
                 config.proxy.clone(),
                 optimizer,
-            );
-            if let Some(hash) = args.sha256 {
-                dl.set_expected_sha256(hash);
-            }
-            dl.download()
+            )
+            .and_then(|mut dl| {
+                if let Some(hash) = args.sha256 {
+                    dl.set_expected_sha256(hash);
+                }
+                dl.download()
+            })
         } else {
             // Default: simple HTTP/HTTPS
             let options = DownloadOptions {
@@ -186,13 +193,18 @@ fn run_download(args: DownloadArgs, config: &Config) -> Result<(), Box<dyn Error
                 output_path: args.output,
                 verify_iso: args.sha256.is_some(),
                 expected_sha256: args.sha256,
+                extra_headers: Vec::new(),
             };
             http_download(&args.url, config.proxy.clone(), optimizer, options, None)
         };
 
     // Record to history (best-effort)
     let mut history = DownloadHistory::load();
-    let entry = HistoryEntry::new(&url_for_history, &output_dir_for_history, sha256_for_history.as_deref());
+    let entry = HistoryEntry::new(
+        &url_for_history,
+        &output_dir_for_history,
+        sha256_for_history.as_deref(),
+    );
     let (status, err) = match &result {
         Ok(()) => (EntryStatus::Completed, None),
         Err(e) => (EntryStatus::Failed, Some(e.to_string())),
@@ -212,10 +224,7 @@ fn cmd_config(parts: &[&str], config: &mut Config) -> Result<(), Box<dyn Error +
     match subcmd {
         "show" => {
             println!("Current configuration:");
-            println!(
-                "  connections   {}",
-                config.optimization.max_connections
-            );
+            println!("  connections   {}", config.optimization.max_connections);
             println!(
                 "  speed-limit   {}",
                 match config.optimization.speed_limit {
@@ -254,7 +263,10 @@ fn cmd_config(parts: &[&str], config: &mut Config) -> Result<(), Box<dyn Error +
                         .map_err(|_| format!("'{}' is not a valid number", value))?;
                     config.optimization.max_connections = n.clamp(1, 32);
                     config.save()?;
-                    println!("Max connections set to {}", config.optimization.max_connections);
+                    println!(
+                        "Max connections set to {}",
+                        config.optimization.max_connections
+                    );
                 }
                 "speed-limit" => {
                     if value == "0" || value == "unlimited" {
@@ -430,7 +442,10 @@ pub fn interactive_mode() {
                                 if entries.is_empty() {
                                     println!("No download history.");
                                 } else {
-                                    println!("{:<10} {:<22} {:<12} {}", "ID", "Date (UTC)", "Status", "File");
+                                    println!(
+                                        "{:<10} {:<22} {:<12} {}",
+                                        "ID", "Date (UTC)", "Status", "File"
+                                    );
                                     println!("{}", "-".repeat(80));
                                     for e in entries {
                                         println!(

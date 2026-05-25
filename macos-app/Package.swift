@@ -12,6 +12,10 @@ let package = Package(
         .executableTarget(
             name: "KGet",
             path: "KGet",
+            exclude: [
+                "Info.plist",
+                "KGet.entitlements"
+            ],
             sources: [
                 "KGetApp.swift",
                 "DownloadManager.swift",

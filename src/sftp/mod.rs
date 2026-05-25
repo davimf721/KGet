@@ -93,15 +93,11 @@ impl SftpDownloader {
 
     /// Download the file via SFTP.
     pub fn download(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let parsed = Url::parse(&self.url)
-            .map_err(|e| format!("Invalid SFTP URL '{}': {}", self.url, e))?;
+        let parsed =
+            Url::parse(&self.url).map_err(|e| format!("Invalid SFTP URL '{}': {}", self.url, e))?;
 
         if parsed.scheme() != "sftp" {
-            return Err(format!(
-                "Expected sftp:// URL, got scheme '{}'",
-                parsed.scheme()
-            )
-            .into());
+            return Err(format!("Expected sftp:// URL, got scheme '{}'", parsed.scheme()).into());
         }
 
         let host = parsed
@@ -111,8 +107,9 @@ impl SftpDownloader {
         let remote_path = parsed.path();
 
         if remote_path.is_empty() || remote_path == "/" {
-            return Err("SFTP URL must include a file path (e.g., sftp://user@host/path/to/file)"
-                .into());
+            return Err(
+                "SFTP URL must include a file path (e.g., sftp://user@host/path/to/file)".into(),
+            );
         }
 
         let username = if parsed.username().is_empty() {
@@ -130,8 +127,8 @@ impl SftpDownloader {
         let tcp = std::net::TcpStream::connect((host, port))
             .map_err(|e| format!("Cannot connect to {}:{} — {}", host, port, e))?;
 
-        let mut sess = ssh2::Session::new()
-            .map_err(|e| format!("SSH session init failed: {}", e))?;
+        let mut sess =
+            ssh2::Session::new().map_err(|e| format!("SSH session init failed: {}", e))?;
         sess.set_tcp_stream(tcp);
         sess.handshake()
             .map_err(|e| format!("SSH handshake with {}:{} failed: {}", host, port, e))?;
@@ -176,12 +173,7 @@ impl SftpDownloader {
             }
         }
 
-        let progress = create_progress_bar(
-            self.quiet,
-            remote_path.to_string(),
-            file_size,
-            false,
-        );
+        let progress = create_progress_bar(self.quiet, remote_path.to_string(), file_size, false);
 
         let mut remote_file = sftp
             .open(remote)
@@ -281,10 +273,12 @@ impl SftpDownloader {
                 .into());
             }
             ssh2::CheckResult::Failure => {
-                eprintln!(
-                    "Warning: Could not check host key for '{}'; proceeding without verification",
+                return Err(format!(
+                    "Host key check failed for '{}': internal libssh2 error. \
+                     Connection aborted to prevent security bypass.",
                     host
-                );
+                )
+                .into());
             }
         }
 

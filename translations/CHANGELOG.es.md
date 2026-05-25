@@ -7,6 +7,47 @@ Todos los cambios notables en este proyecto serán documentados en este archivo.
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 y este proyecto se adhiere al [Versionado Semántico](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] - 2026-05-24
+
+### Añadido
+- **Descarga en lote (`--batch urls.txt`):** descarga múltiples archivos en paralelo desde un archivo de texto plano — una URL por línea, las líneas que empiezan con `#` se ignoran. Todas las URLs se ejecutan concurrentemente via hilos del SO. Estado `[OK]`/`[FAIL]` por URL; resumen al final.
+- **Pestaña de historial en la app macOS:** nuevo elemento "History" en la sidebar lee el `history.json` persistente generado por la CLI Rust. Muestra todas las descargas con fecha, tamaño y badge de estado. Pasa el cursor sobre una fila para revelar el botón de re-descarga.
+- **Drag-and-drop de URLs en la ventana macOS:** arrastra cualquier enlace HTTP/HTTPS/FTP/magnet desde Safari, Chrome o cualquier app y suéltalo en la ventana de KGet. Un overlay azul translúcido aparece durante el hover; al soltar, la URL aterriza en la barra de entrada lista para iniciar.
+- **Monitor de portapapeles en la app macOS:** la app vigila el portapapeles cada 1,5 s. Cuando se detecta una nueva URL HTTP, HTTPS, FTP, SFTP o magnet, aparece un banner descartable con un botón "Download" de un clic. El banner se suprime si la URL ya está en la lista actual.
+- **Headers HTTP personalizados (`-H "Nombre: Valor"`):** pasa una o más flags `-H` para inyectar headers arbitrarios en descargas simples y turbo. Se pueden apilar múltiples headers. Funciona en los modos URL única, lote e interactivo.
+- **Sparkline de velocidad en la app macOS:** cada fila de descarga activa muestra un gráfico de velocidad en tiempo real de 44×16pt que acumula las últimas 30 lecturas. Construido con SwiftUI `Path` + gradiente mediante el nuevo componente `SparklineView`.
+- **Auto-extracción de archivos:** `kget --extract` ejecuta automáticamente `unzip`, `tar` o `7z` en el archivo descargado cuando la extensión es `.zip`, `.tar.gz`, `.tgz`, `.tar.bz2`, `.tar.xz` o `.7z`. Controlable mediante la nueva opción "Auto-extraer archivos" en Ajustes macOS → Descargas.
+- **Programación de descarga (`--at "HH:MM"`):** pospone una descarga CLI a una hora local específica. El proceso duerme hasta que se alcanza el minuto objetivo, luego inicia la descarga.
+- **Integración yt-dlp (`--ytdlp`, auto-detectado):** si `yt-dlp` (o `youtube-dl`) está instalado, las URLs de YouTube, Vimeo, Twitch, TikTok, Instagram, Bilibili y 10+ otras plataformas se enrutan automáticamente por él. Calidad seleccionable via `--quality best|1080p|720p|480p|360p|audio`.
+- **Soporte WebDAV (`webdav://`, `webdavs://`):** nuevo adaptador `WebDavDownloader` en `src/webdav/mod.rs` convierte `webdav://` → `http://` y `webdavs://` → `https://`, extrae credenciales incrustadas e inyecta header `Authorization: Basic`. Detectado automáticamente por el scheme de la URL; flag explícita `--webdav` también disponible.
+- **Share Extension (`Compartir > KGet`):** la Share Extension de macOS ya está completa. `ShareViewController` codifica la URL compartida como `kget://download?url=<encoded>` y abre la app principal. Compilada e incrustada en `KGet.app/Contents/PlugIns/KGetShareExtension.appex` por `build-native-macos.sh`.
+- **Revisión de la API pública de la biblioteca (`src/builder.rs`, `src/error.rs`, `src/events.rs`, `src/checksum.rs`):**
+  - **Patrón Builder** — `kget::builder(url)` y `kget::batch([...])` reemplazan los argumentos posicionales. Métodos fluidos: `.output()`, `.connections()`, `.speed_limit()`, `.proxy()`, `.sha256/sha512/sha1/md5/blake3()`, `.verify_from()`, `.header()`, `.retry()`, `.range()`, `.quiet()`.
+  - **Errores tipados** — enum `KgetError` (`Network`, `Io`, `ChecksumMismatch`, `Protocol`, `Cancelled`, `NotFound`, `SidecarError`, `Other`) con impls `From` para `reqwest::Error`, `std::io::Error` y `Box<dyn Error>`.
+  - **Canal de eventos** — `.spawn()` retorna `(JoinHandle, Receiver<DownloadEvent>)` con variantes `Progress { percent, speed_bps, eta_secs }`, `Status`, `Completed`, `Error`.
+  - **Métricas de descarga** — struct `DownloadResult` con `path`, `bytes_downloaded`, `avg_speed_bps`, `duration`, `connections_used`, `checksums`.
+  - **Descarga en memoria** — `.download_to_bytes() -> Vec<u8>` y `.download_to_reader() -> impl Read`.
+  - **Checksums multi-algoritmo** — SHA-256, SHA-512, SHA-1 (crate `sha1`), MD5 (crate `md-5`), BLAKE3 (crate `blake3`). Enum `ChecksumAlgorithm` + `compute_checksum()` en `src/checksum.rs`.
+  - **Reintento configurable** — `RetryConfig { max_attempts, backoff: Backoff::Exponential { base_ms, max_ms }, retry_on_status }`.
+  - **Lote con control de concurrencia** — `BatchBuilder::concurrency(n)` usa pool de hilos Rayon; retorna `Vec<BatchResult>`.
+  - **API Async** — `DownloadBuilder::download_async()` y `BatchBuilder::download_all_async()` con `--features async`. Ambos usan `tokio::task::spawn_blocking`.
+
+### Corregido
+- **`AdvancedDownloader::new()` entraba en pánico si fallaba el build del cliente HTTP** — tipo de retorno cambiado de `Self` a `Result<Self, …>` para que el error se propague en lugar de crashear.
+- **El throttle paralelo era por hilo** — con N conexiones y límite de 1 MB/s, el throughput real era N×1 MB/s. Reemplazado por `Arc<Mutex<TokenBucket>>` global compartido entre todos los workers rayon; la tasa agregada ahora está correctamente limitada.
+- **`file.set_len(total_size)` ocurría antes de confirmar soporte de ranges** — si el servidor devolvía 200 en lugar de 206, el archivo era preasignado y luego sobreescrito por una descarga completa, produciendo resultado corrupto. La preasignación ahora solo ocurre cuando `supports_range` está confirmado.
+- **El prompt de integridad ISO leía de stdin en contexto de biblioteca/automatización** — `AdvancedDownloader` ahora tiene campo `ResumePolicy` (`Ask` / `AlwaysResume` / `AlwaysRestart`). Los llamadores de la biblioteca establecen `AlwaysResume` para evitar bloqueos.
+- **Tipo MIME ISO incorrecto** — `"application/x-iso9001"` (norma ISO 9001) corregido a `"application/x-iso9660-image"`.
+- **`verify_file_sha256` imprimía en stdout incondicionalmente** — todas las llamadas `println!` eliminadas; los mensajes ahora se envían solo via callback opcional.
+- **El descargador simple reintentaba en 404/403/410** — los errores 4xx permanentes ahora fallan inmediatamente; solo las respuestas 5xx transitorias y los errores de conexión se reintentan.
+- **`validate_filename` era insuficiente** — ahora también rechaza: bytes nulos (`\0`), secuencias de path traversal (`..`), nombres de archivo de más de 255 bytes y nombres de dispositivos reservados de Windows (CON, PRN, AUX, NUL, COM1–COM9, LPT1–LPT9) — case-insensitive, con o sin extensión.
+- **`sftp/mod.rs`: `CheckResult::Failure` continuaba silenciosamente** — el caso de error interno de libssh2 ahora devuelve un error grave y aborta la conexión en lugar de eludir la verificación de host-key.
+
+### Cambiado
+- **App macOS SwiftUI — rediseño completo:** layout `NavigationSplitView` con sidebar colapsable para navegación por filtros (Todos / Activos / Completados / Con Fallo con badges de recuento en tiempo real); barra de entrada URL limpia con toggle Turbo inline; barra de progreso fina de 3px con animación shimmer reemplazando la barra multi-segmento anterior; filas de descarga con status dot, type badges (Turbo / ISO / Torrent) e iconos de acción compactos.
+- **GUI egui (Linux/Windows) — rediseño completo:** paleta de colores inspirada en Apple iOS adaptativa al sistema; sidebar izquierda (180px) con navegación Library y badges de recuento por categoría; botón de toggle oscuro/claro; barra de progreso fina de 3px con shimmer; tarjetas de descarga con status dot, type badges, botones de acción limpios; sombras en las tarjetas; barra de estado con estadísticas en tiempo real.
+- **El tema egui ahora es adaptativo al sistema:** lee la preferencia de oscuro/claro del SO al inicio; botón de anulación manual en la sidebar.
+
 ## [1.6.3] - 2026-05-21
 
 ### Añadido

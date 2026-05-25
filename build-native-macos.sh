@@ -181,6 +181,46 @@ fi
 print_success "App bundle created!"
 
 # ============================================================================
+# STEP 3b: Build and embed Share Extension
+# ============================================================================
+print_step "Building Share Extension..."
+
+SHARE_EXT_DIR="macos-app/ShareExtension"
+SHARE_EXT_BUNDLE="${TEMP_APP}/Contents/PlugIns/KGetShareExtension.appex"
+
+mkdir -p "${SHARE_EXT_BUNDLE}/Contents/MacOS"
+mkdir -p "${SHARE_EXT_BUNDLE}/Contents/Resources"
+
+# Compile the Share Extension as a standalone executable
+swiftc \
+    -module-cache-path "$SWIFT_MODULE_CACHE" \
+    -module-name KGetShareExtension \
+    -O \
+    -target arm64-apple-macos13.0 \
+    -sdk "$(xcrun --show-sdk-path)" \
+    -parse-as-library \
+    -emit-executable \
+    -o "${SHARE_EXT_BUNDLE}/Contents/MacOS/KGetShareExtension" \
+    "${SHARE_EXT_DIR}/ShareViewController.swift" \
+    2>/dev/null || {
+        print_warning "Share Extension compilation failed — skipping (non-fatal)"
+    }
+
+if [ -f "${SHARE_EXT_BUNDLE}/Contents/MacOS/KGetShareExtension" ]; then
+    # Copy and version the extension Info.plist
+    cp "${SHARE_EXT_DIR}/Info.plist" "${SHARE_EXT_BUNDLE}/Contents/Info.plist"
+    /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION}" "${SHARE_EXT_BUNDLE}/Contents/Info.plist"
+    /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${VERSION}" "${SHARE_EXT_BUNDLE}/Contents/Info.plist"
+    # Ad-hoc sign the extension
+    codesign --force --sign - "${SHARE_EXT_BUNDLE}" 2>/dev/null || true
+    print_success "Share Extension built and embedded!"
+else
+    # Remove empty bundle dir if build failed
+    rm -rf "${SHARE_EXT_BUNDLE}"
+    print_warning "Share Extension not embedded (build failed)"
+fi
+
+# ============================================================================
 # STEP 4: Create app icon
 # ============================================================================
 print_step "Creating app icon..."
@@ -220,7 +260,7 @@ print_step "Code signing..."
 xattr -cr "${TEMP_APP}" 2>/dev/null || true
 
 # Check for Developer ID certificate
-CERT_NAME=$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | awk -F'"' '{print $2}')
+CERT_NAME=$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | awk -F'"' '{print $2}') || true
 
 if [ -n "$CERT_NAME" ]; then
     codesign --force --deep --sign "$CERT_NAME" \
@@ -240,7 +280,18 @@ mv "${TEMP_APP}" "${APP_NAME}.app"
 rm -rf "${TEMP_BUILD_DIR}"
 
 # ============================================================================
-# STEP 6: Create DMG
+# STEP 6: Generate DMG background
+# ============================================================================
+print_step "Generating DMG background (liquid glass)..."
+
+mkdir -p dmg_assets
+SWIFT_MODULE_CACHE_DIR=$(mktemp -d)
+swift -module-cache-path "$SWIFT_MODULE_CACHE_DIR" generate-dmg-background.swift dmg_assets/background.png
+rm -rf "$SWIFT_MODULE_CACHE_DIR"
+print_success "DMG background generated!"
+
+# ============================================================================
+# STEP 7: Create DMG
 # ============================================================================
 print_step "Creating DMG installer..."
 
@@ -253,17 +304,33 @@ if command -v create-dmg &> /dev/null; then
         --volname "KGet ${VERSION}" \
         --volicon "${APP_NAME}.app/Contents/Resources/AppIcon.icns" \
         --window-pos 200 120 \
-        --window-size 660 400 \
-        --icon-size 100 \
-        --icon "${APP_NAME}.app" 180 180 \
+        --window-size 720 440 \
+        --icon-size 110 \
+        --icon "${APP_NAME}.app" 190 230 \
         --hide-extension "${APP_NAME}.app" \
-        --app-drop-link 480 180 \
+        --app-drop-link 530 230 \
         --background "dmg_assets/background.png" \
+        --text-size 14 \
+        --no-internet-enable \
         "$OUTPUT_DIR/${DMG_NAME}.dmg" \
         "${APP_NAME}.app"
 else
-    # Fallback to hdiutil
-    hdiutil create -volname "KGet ${VERSION}" -srcfolder "${APP_NAME}.app" -ov -format UDZO "$OUTPUT_DIR/${DMG_NAME}.dmg"
+    # Fallback: create a DMG with Applications symlink via hdiutil + AppleScript
+    STAGING_DIR=$(mktemp -d)
+    cp -R "${APP_NAME}.app" "$STAGING_DIR/"
+    ln -s /Applications "$STAGING_DIR/Applications"
+
+    hdiutil create \
+        -volname "KGet ${VERSION}" \
+        -srcfolder "$STAGING_DIR" \
+        -ov -format UDRW \
+        "$OUTPUT_DIR/${DMG_NAME}-rw.dmg"
+
+    # Convert to compressed read-only
+    hdiutil convert "$OUTPUT_DIR/${DMG_NAME}-rw.dmg" \
+        -format UDZO -o "$OUTPUT_DIR/${DMG_NAME}.dmg"
+    rm -f "$OUTPUT_DIR/${DMG_NAME}-rw.dmg"
+    rm -rf "$STAGING_DIR"
 fi
 
 print_success "DMG created: $OUTPUT_DIR/${DMG_NAME}.dmg"
