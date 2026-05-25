@@ -2,7 +2,7 @@ class Kget < Formula
   desc "Fast, modern download manager and Rust library — HTTP/HTTPS, FTP/SFTP, WebDAV, torrent, yt-dlp"
   homepage "https://github.com/davimf721/KGet"
   url "https://github.com/davimf721/KGet/archive/refs/tags/v1.7.0.tar.gz"
-  sha256 "PLACEHOLDER_SHA256" # updated automatically by release.sh
+  sha256 "98f5c79b2ee640babf9fd6320b08243a1a4ca8e7fa2ea0df181963ccc6857f3f" # updated automatically by release.sh
   license "MIT"
   head "https://github.com/davimf721/KGet.git", branch: "main"
 
