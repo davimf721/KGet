@@ -71,11 +71,13 @@ Most download tools are either too simple (single-connection wget-clones) or too
 
 ## Screenshots
 
-| macOS App | CLI |
-|-----------|-----|
-| <img src="https://github.com/user-attachments/assets/d5603a9c-f1f7-46b9-bdc5-0072d21f96cb" width="400"/> | <img src="https://github.com/user-attachments/assets/a835c4df-5424-4aaa-b687-2445a99ba067" width="400"/> |
+| macOS App | CLI | Interactive |
+|-----------|-----|-------------|
+| <img src="https://github.com/user-attachments/assets/d5603a9c-f1f7-46b9-bdc5-0072d21f96cb" width="400"/> | <img src="https://github.com/user-attachments/assets/084ed2b1-9663-429b-8719-890a16bd545c" width="400"/> |<img src="https://github.com/user-attachments/assets/b49bb298-fd53-41f0-99fc-f02ae811f348" width="400"/>|
 
 ---
+<img width="909" height="618" alt="image" src="https://github.com/user-attachments/assets/084ed2b1-9663-429b-8719-890a16bd545c" />
+
 
 ## Installation
 
