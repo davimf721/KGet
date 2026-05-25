@@ -6,13 +6,6 @@ class Kget < Formula
   license "MIT"
   head "https://github.com/davimf721/KGet.git", branch: "main"
 
-  bottle do
-    root_url "https://github.com/davimf721/KGet/releases/download/v1.7.0"
-    sha256 cellar: :any_skip_relocation, arm64_sequoia: "PLACEHOLDER"
-    sha256 cellar: :any_skip_relocation, arm64_sonoma:  "PLACEHOLDER"
-    sha256 cellar: :any_skip_relocation, x86_64_linux:  "PLACEHOLDER"
-  end
-
   depends_on "rust" => :build
 
   # GUI (egui) requires native display libraries on Linux
