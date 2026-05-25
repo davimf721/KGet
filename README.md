@@ -372,12 +372,6 @@ cargo test --test mock_server_tests # HTTP mock server tests
 - [Contributing](CONTRIBUTING.md)
 - [Security](SECURITY.md)
 
-## Community
-
-- [Dev.to](https://dev.to/davimf7221/kelpsget-v014-modern-download-manager-in-rust-4b9f)
-- [r/rust](https://www.reddit.com/r/rust/comments/1kt69vh/after_5_months_of_development_i_finally_released/)
-- [PitchHut](https://www.pitchhut.com/project/kelpsget)
-- [Hacker News](https://hn.algolia.com/?query=Show%20HN%3A%20KelpsGet%20%E2%80%93%20Modern%20download%20manager%20built%20in%20Rust&type=story&dateRange=all&sort=byDate&storyText=false&prefix&page=0)
 
 ## License
 
