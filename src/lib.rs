@@ -31,15 +31,19 @@
 //!     false,
 //!     ProxyConfig::default(),
 //!     Optimizer::new(),
-//! );
+//! )?;
 //!
 //! // Set progress callback
 //! downloader.set_progress_callback(|progress| {
 //!     println!("Progress: {:.1}%", progress * 100.0);
 //! });
 //!
-//! downloader.download().unwrap();
+//! downloader.download()?;
+//! # Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 //! ```
+//!
+//! Interrupted downloads are kept as `<file>.part` (plus a `<file>.kget`
+//! resume state for turbo mode) and continue where they stopped on the next run.
 //!
 //! ## Torrent Downloads
 //!
@@ -78,9 +82,11 @@ pub mod config;
 pub mod download;
 pub mod error;
 pub mod events;
+pub mod http;
 pub mod metalink;
 pub mod optimization;
 pub mod progress;
+pub mod protocol;
 pub mod queue;
 pub mod utils;
 
@@ -96,15 +102,19 @@ pub use config::{Config, ProxyConfig, ProxyType};
 
 // Re-exports: Core download functionality
 pub use advanced_download::{AdvancedDownloader, ResumePolicy};
-pub use download::{download, verify_file_sha256, verify_iso_integrity};
+pub use download::{download, download_to_path, verify_file_sha256, verify_iso_integrity};
 pub use optimization::Optimizer;
-pub use progress::create_progress_bar;
+pub use progress::{Throttle, create_progress_bar};
+pub use protocol::Protocol;
 
 // Re-exports: Torrent types (when available)
 pub use torrent::{TorrentCallbacks, download_magnet};
 
 // Re-exports: Utilities
-pub use utils::{auto_extract, get_filename_from_url_or_default, is_extractable, print, resolve_output_path};
+pub use utils::{
+    auto_extract, expand_tilde, get_filename_from_url_or_default, is_extractable, print,
+    resolve_output_path, sanitize_filename,
+};
 
 // Re-exports: Protocol helpers
 pub use webdav::is_webdav_url;
@@ -112,12 +122,12 @@ pub use ytdlp::{is_video_url, ytdlp_available, ytdlp_binary};
 
 // Re-exports: High-level builder API (v1.7.0+)
 pub use builder::{
-    Backoff, BatchBuilder, BatchResult, ComputedChecksums, DownloadBuilder,
-    DownloadResult, RetryConfig,
+    Backoff, BatchBuilder, BatchResult, ComputedChecksums, DownloadBuilder, DownloadResult,
+    RetryConfig,
 };
 pub use checksum::ChecksumAlgorithm;
 pub use error::KgetError;
-pub use events::DownloadEvent;
+pub use events::{DownloadEvent, JsonEvent};
 
 /// Create a [`DownloadBuilder`] for a single URL — the recommended API entry point.
 ///
@@ -151,7 +161,25 @@ pub fn batch(urls: impl IntoIterator<Item = impl Into<String>>) -> BatchBuilder 
     BatchBuilder::new(urls)
 }
 
+/// What to do when the destination file already exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OverwritePolicy {
+    /// Replace the existing file (default, wget-compatible).
+    #[default]
+    Overwrite,
+    /// Keep the existing file and skip the download (`--no-clobber`).
+    Skip,
+    /// Save under a new name: `file (1).zip`, `file (2).zip`…
+    Rename,
+}
+
+/// Callback receiving `(bytes_downloaded, total_bytes)` during a transfer.
+pub type ByteProgressCallback = std::sync::Arc<dyn Fn(u64, Option<u64>) + Send + Sync>;
+
 /// Options for configuring a download operation.
+///
+/// Always build it with `..Default::default()` so new fields added in future
+/// versions do not break your code.
 ///
 /// # Example
 ///
@@ -161,11 +189,10 @@ pub fn batch(urls: impl IntoIterator<Item = impl Into<String>>) -> BatchBuilder 
 /// let options = DownloadOptions {
 ///     quiet_mode: true,
 ///     output_path: Some("./downloads/file.zip".to_string()),
-///     verify_iso: false,
-///     expected_sha256: None,
+///     ..Default::default()
 /// };
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DownloadOptions {
     /// Suppress progress output to stdout
     pub quiet_mode: bool,
@@ -177,6 +204,36 @@ pub struct DownloadOptions {
     pub expected_sha256: Option<String>,
     /// Extra HTTP headers sent with every request (e.g. `("Referer", "https://…")`)
     pub extra_headers: Vec<(String, String)>,
+    /// Continue an existing `<file>.part` instead of starting over (`-c`)
+    pub resume: bool,
+    /// Behaviour when the destination already exists
+    pub overwrite: OverwritePolicy,
+    /// Maximum attempts per request (default 3)
+    pub retries: u32,
+    /// Connect / per-read timeout in seconds (default 60, 0 = no read timeout)
+    pub timeout_secs: u64,
+    /// Set to `true` from another thread to stop the download (the `.part` file is kept)
+    pub cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Structured progress callback `(bytes, total)`, throttled to ~5 calls per second
+    pub progress_callback: Option<ByteProgressCallback>,
+}
+
+impl std::fmt::Debug for DownloadOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DownloadOptions")
+            .field("quiet_mode", &self.quiet_mode)
+            .field("output_path", &self.output_path)
+            .field("verify_iso", &self.verify_iso)
+            .field("expected_sha256", &self.expected_sha256)
+            .field("extra_headers", &self.extra_headers)
+            .field("resume", &self.resume)
+            .field("overwrite", &self.overwrite)
+            .field("retries", &self.retries)
+            .field("timeout_secs", &self.timeout_secs)
+            .field("cancel", &self.cancel.is_some())
+            .field("progress_callback", &self.progress_callback.is_some())
+            .finish()
+    }
 }
 
 impl Default for DownloadOptions {
@@ -187,6 +244,12 @@ impl Default for DownloadOptions {
             verify_iso: false,
             expected_sha256: None,
             extra_headers: Vec::new(),
+            resume: false,
+            overwrite: OverwritePolicy::default(),
+            retries: http::DEFAULT_RETRIES,
+            timeout_secs: http::DEFAULT_TIMEOUT_SECS,
+            cancel: None,
+            progress_callback: None,
         }
     }
 }
@@ -201,7 +264,8 @@ pub type StatusCallback = std::sync::Arc<dyn Fn(String) + Send + Sync>;
 pub mod prelude {
     pub use crate::torrent::{TorrentCallbacks, download_magnet};
     pub use crate::{
-        AdvancedDownloader, Config, DownloadOptions, Optimizer, ProgressCallback, ProxyConfig,
-        ProxyType, StatusCallback, download, verify_iso_integrity,
+        AdvancedDownloader, Config, DownloadOptions, KgetError, Optimizer, OverwritePolicy,
+        ProgressCallback, Protocol, ProxyConfig, ProxyType, StatusCallback, download,
+        download_to_path, verify_iso_integrity,
     };
 }

@@ -6,6 +6,15 @@
 //! - **Progress callbacks**: Real-time progress and status updates
 //! - **Cancellation**: Graceful download cancellation via atomic tokens
 //!
+//! # How resume works
+//!
+//! While downloading, data goes to `<file>.part` and the progress of every
+//! chunk is recorded in `<file>.kget` (JSON). The final file only appears once
+//! every chunk is complete and the size (and SHA-256, if given) matched. On the
+//! next run, the state is reused **only** if the remote resource is the same
+//! (URL, size, `ETag`, `Last-Modified`), and only the missing byte ranges are
+//! requested. A pre-existing final file is never used as a resume point.
+//!
 //! # Example
 //!
 //! ```rust,no_run
@@ -17,7 +26,7 @@
 //!     false,
 //!     ProxyConfig::default(),
 //!     Optimizer::new(),
-//! );
+//! )?;
 //!
 //! // Set progress callback (0.0 to 1.0)
 //! downloader.set_progress_callback(|progress| {
@@ -30,26 +39,29 @@
 //! });
 //!
 //! // Start download
-//! downloader.download().unwrap();
+//! downloader.download()?;
+//! # Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 //! ```
 //!
 //! # Parallel Downloads
 //!
-//! The downloader automatically determines the optimal number of connections
-//! based on the [`Optimizer`] configuration. For large files,
-//! this can provide significant speed improvements.
+//! The number of connections comes from the [`Optimizer`] configuration
+//! (`max_connections`, 1–32). Each connection runs on its own thread, so the
+//! count is not limited by the number of CPU cores.
 
+use crate::DownloadOptions;
 use crate::config::ProxyConfig;
+use crate::error::KgetError;
+use crate::http::{self, ClientOptions};
 use crate::optimization::Optimizer;
-use hex;
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use reqwest::blocking::Client;
-use sha2::{Digest, Sha256};
+use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fs::File;
-use std::io::{BufReader, Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::io::{IsTerminal, Read};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -59,24 +71,32 @@ use std::os::unix::fs::FileExt;
 #[cfg(target_family = "windows")]
 use std::os::windows::fs::FileExt;
 
+type BoxError = Box<dyn Error + Send + Sync>;
+
 /// Minimum chunk size for parallel downloads (4 MB)
 const MIN_CHUNK_SIZE: u64 = 4 * 1024 * 1024;
-/// Maximum retry attempts per chunk
-const MAX_RETRIES: usize = 3;
+/// Maximum chunk size for parallel downloads (64 MB)
+const MAX_CHUNK_SIZE: u64 = 64 * 1024 * 1024;
+/// Read buffer per connection
+const READ_BUF: usize = 64 * 1024;
+/// Version of the `.kget` state format
+const STATE_VERSION: u32 = 1;
 
-/// Controls how [`AdvancedDownloader`] behaves when user interaction would otherwise be required.
+/// Controls how [`AdvancedDownloader`] behaves around resume and prompts.
 ///
-/// Non-interactive callers (library, `--jsonl`, automation) must use
-/// [`AlwaysResume`](ResumePolicy::AlwaysResume) or [`AlwaysRestart`](ResumePolicy::AlwaysRestart)
-/// to avoid blocking on stdin.
+/// Non-interactive callers (library, `--jsonl`, automation) should use
+/// [`AlwaysResume`](ResumePolicy::AlwaysResume) or
+/// [`AlwaysRestart`](ResumePolicy::AlwaysRestart); [`Ask`](ResumePolicy::Ask)
+/// only ever prompts when stdin is a terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ResumePolicy {
-    /// Block on stdin for user confirmation (interactive CLI only).
+    /// Resume a compatible `.part`/`.kget` state; for ISO files without an
+    /// expected hash, ask on the terminal whether to compute the SHA-256.
     #[default]
     Ask,
-    /// Proceed automatically without prompting; verifies integrity when a hash is set.
+    /// Resume a compatible state and never prompt (ISO hashes are computed).
     AlwaysResume,
-    /// Always restart from scratch, discarding any existing partial file.
+    /// Always restart from scratch, discarding any partial download.
     AlwaysRestart,
 }
 
@@ -119,14 +139,87 @@ impl TokenBucket {
     }
 }
 
+// ============================================================================
+// Resume state (<file>.kget)
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ChunkState {
+    start: u64,
+    /// Exclusive end offset
+    end: u64,
+    /// Bytes already written starting at `start`
+    done: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ResumeState {
+    version: u32,
+    url: String,
+    total_size: u64,
+    etag: Option<String>,
+    last_modified: Option<String>,
+    chunks: Vec<ChunkState>,
+}
+
+impl ResumeState {
+    fn load(path: &Path) -> Option<Self> {
+        let bytes = std::fs::read(path).ok()?;
+        serde_json::from_slice(&bytes).ok()
+    }
+
+    /// Atomic write: temporary file + rename, never a half-written JSON.
+    fn save(&self, path: &Path) -> std::io::Result<()> {
+        let json = serde_json::to_vec(self).map_err(std::io::Error::other)?;
+        crate::config::write_atomic(path, &json, false)
+    }
+
+    /// The state is reused only if the remote resource is the same.
+    fn matches(&self, url: &str, remote: &RemoteInfo) -> bool {
+        self.version == STATE_VERSION
+            && self.url == url
+            && Some(self.total_size) == remote.size
+            && (self.etag.is_none() || self.etag == remote.etag)
+            && (self.last_modified.is_none() || self.last_modified == remote.last_modified)
+            && self.chunks.iter().all(|c| c.start + c.done <= c.end)
+    }
+
+    fn done_bytes(&self) -> u64 {
+        self.chunks.iter().map(|c| c.done).sum()
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct RemoteInfo {
+    size: Option<u64>,
+    accepts_ranges: bool,
+    etag: Option<String>,
+    last_modified: Option<String>,
+}
+
+impl RemoteInfo {
+    /// Validator for `If-Range` (weak ETags are not allowed there).
+    fn if_range(&self) -> Option<&str> {
+        self.etag
+            .as_deref()
+            .filter(|e| !e.starts_with("W/"))
+            .or(self.last_modified.as_deref())
+    }
+}
+
+enum ChunkError {
+    Transient(String),
+    Fatal(BoxError),
+}
+
 /// High-performance downloader with parallel connections and resume support.
 ///
 /// `AdvancedDownloader` is the recommended way to download large files. It provides:
 ///
 /// - **Parallel chunk downloads**: Splits files into segments downloaded simultaneously
-/// - **Automatic resume**: Detects existing partial files and resumes from last position
+/// - **Safe resume**: `<file>.part` + `<file>.kget` state, validated against the server
 /// - **Server compatibility**: Falls back to single-stream if server doesn't support ranges
-/// - **ISO optimization**: Disables compression for binary files to prevent corruption
+/// - **Integrity**: every chunk must be complete; size and SHA-256 are always checked
 /// - **Progress tracking**: Real-time callbacks for UI integration
 /// - **Cancellation support**: Stop downloads gracefully via atomic cancel token
 ///
@@ -141,9 +234,10 @@ impl TokenBucket {
 ///     false,  // quiet_mode
 ///     ProxyConfig::default(),
 ///     Optimizer::new(),
-/// );
+/// )?;
 ///
-/// downloader.download().expect("Download failed");
+/// downloader.download()?;
+/// # Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 /// ```
 ///
 /// # With Progress Tracking
@@ -157,7 +251,7 @@ impl TokenBucket {
 ///     true, // quiet mode (no stdout)
 ///     ProxyConfig::default(),
 ///     Optimizer::new(),
-/// );
+/// )?;
 ///
 /// dl.set_progress_callback(|p| {
 ///     // p is 0.0 to 1.0
@@ -166,26 +260,29 @@ impl TokenBucket {
 ///
 /// dl.set_status_callback(|msg| println!("{}", msg));
 ///
-/// dl.download().unwrap();
+/// dl.download()?;
 ///
 /// fn update_ui_progress(p: f32) {
 ///     // Update your UI here
 /// }
+/// # Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 /// ```
 pub struct AdvancedDownloader {
     client: Client,
     url: String,
     output_path: String,
     quiet_mode: bool,
-    #[allow(dead_code)]
     proxy: ProxyConfig,
     optimizer: Optimizer,
     progress_callback: Option<Arc<dyn Fn(f32) + Send + Sync>>,
+    byte_progress_callback: Option<crate::ByteProgressCallback>,
     status_callback: Option<Arc<dyn Fn(String) + Send + Sync>>,
     cancel_token: Arc<AtomicBool>,
     expected_sha256: Option<String>,
     extra_headers: Vec<(String, String)>,
     resume_policy: ResumePolicy,
+    max_retries: u32,
+    timeout_secs: u64,
 }
 
 impl AdvancedDownloader {
@@ -199,6 +296,10 @@ impl AdvancedDownloader {
     /// * `proxy_config` - Proxy settings (use `ProxyConfig::default()` for direct connection)
     /// * `optimizer` - Optimizer for connection settings
     ///
+    /// # Errors
+    ///
+    /// Fails when the proxy is enabled but invalid.
+    ///
     /// # Example
     ///
     /// ```rust,no_run
@@ -210,7 +311,8 @@ impl AdvancedDownloader {
     ///     false,
     ///     ProxyConfig::default(),
     ///     Optimizer::new(),
-    /// );
+    /// )?;
+    /// # Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     /// ```
     pub fn new(
         url: String,
@@ -218,39 +320,8 @@ impl AdvancedDownloader {
         quiet_mode: bool,
         proxy_config: ProxyConfig,
         optimizer: Optimizer,
-    ) -> Result<Self, Box<dyn Error + Send + Sync>> {
-        let _is_iso = url.to_lowercase().ends_with(".iso");
-
-        let mut client_builder = Client::builder()
-            .timeout(std::time::Duration::from_secs(300))
-            .connect_timeout(std::time::Duration::from_secs(20))
-            .user_agent(concat!("KGet/", env!("CARGO_PKG_VERSION")))
-            .no_gzip()
-            .no_deflate();
-
-        if proxy_config.enabled {
-            if let Some(proxy_url) = &proxy_config.url {
-                let proxy = match proxy_config.proxy_type {
-                    crate::config::ProxyType::Http => reqwest::Proxy::http(proxy_url),
-                    crate::config::ProxyType::Https => reqwest::Proxy::https(proxy_url),
-                    crate::config::ProxyType::Socks5 => reqwest::Proxy::all(proxy_url),
-                };
-
-                if let Ok(mut proxy) = proxy {
-                    if let (Some(username), Some(password)) =
-                        (&proxy_config.username, &proxy_config.password)
-                    {
-                        proxy = proxy.basic_auth(username, password);
-                    }
-                    client_builder = client_builder.proxy(proxy);
-                }
-            }
-        }
-
-        let client = client_builder
-            .build()
-            .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
-
+    ) -> Result<Self, BoxError> {
+        let client = http::build_client(&proxy_config, &ClientOptions::default())?;
         Ok(Self {
             client,
             url,
@@ -259,18 +330,22 @@ impl AdvancedDownloader {
             proxy: proxy_config,
             optimizer,
             progress_callback: None,
+            byte_progress_callback: None,
             status_callback: None,
             cancel_token: Arc::new(AtomicBool::new(false)),
             expected_sha256: None,
             extra_headers: Vec::new(),
             resume_policy: ResumePolicy::default(),
+            max_retries: http::DEFAULT_RETRIES,
+            timeout_secs: http::DEFAULT_TIMEOUT_SECS,
         })
     }
 
     /// Set a custom cancellation token for graceful download interruption.
     ///
-    /// When the token is set to `true`, the download will stop at the next
-    /// checkpoint and return an error.
+    /// When the token is set to `true`, the download stops at the next
+    /// checkpoint, the resume state is saved and an error is returned. Running
+    /// the same download again continues where it stopped.
     ///
     /// # Example
     ///
@@ -282,11 +357,12 @@ impl AdvancedDownloader {
     /// let cancel = Arc::new(AtomicBool::new(false));
     /// let mut dl = AdvancedDownloader::new(/* ... */
     /// #    "".to_string(), "".to_string(), false, ProxyConfig::default(), Optimizer::new()
-    /// );
+    /// )?;
     /// dl.set_cancel_token(cancel.clone());
     ///
     /// // In another thread:
     /// // cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    /// # Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     /// ```
     pub fn set_cancel_token(&mut self, token: Arc<AtomicBool>) {
         self.cancel_token = token;
@@ -299,19 +375,29 @@ impl AdvancedDownloader {
 
     /// Set a callback for progress updates.
     ///
-    /// The callback receives a value from 0.0 (start) to 1.0 (complete).
+    /// The callback receives a value from 0.0 (start) to 1.0 (complete), about
+    /// five times per second.
     ///
     /// # Example
     ///
     /// ```rust,no_run
     /// # use kget::{AdvancedDownloader, ProxyConfig, Optimizer};
-    /// # let mut dl = AdvancedDownloader::new("".to_string(), "".to_string(), false, ProxyConfig::default(), Optimizer::new());
+    /// # let mut dl = AdvancedDownloader::new("".to_string(), "".to_string(), false, ProxyConfig::default(), Optimizer::new())?;
     /// dl.set_progress_callback(|progress| {
     ///     println!("Downloaded: {:.1}%", progress * 100.0);
     /// });
+    /// # Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     /// ```
     pub fn set_progress_callback(&mut self, callback: impl Fn(f32) + Send + Sync + 'static) {
         self.progress_callback = Some(Arc::new(callback));
+    }
+
+    /// Set a callback receiving `(bytes_downloaded, total_bytes)`.
+    pub fn set_byte_progress_callback(
+        &mut self,
+        callback: impl Fn(u64, Option<u64>) + Send + Sync + 'static,
+    ) {
+        self.byte_progress_callback = Some(Arc::new(callback));
     }
 
     /// Set a callback for status messages.
@@ -322,16 +408,17 @@ impl AdvancedDownloader {
     ///
     /// ```rust,no_run
     /// # use kget::{AdvancedDownloader, ProxyConfig, Optimizer};
-    /// # let mut dl = AdvancedDownloader::new("".to_string(), "".to_string(), false, ProxyConfig::default(), Optimizer::new());
+    /// # let mut dl = AdvancedDownloader::new("".to_string(), "".to_string(), false, ProxyConfig::default(), Optimizer::new())?;
     /// dl.set_status_callback(|msg| {
     ///     println!("Download status: {}", msg);
     /// });
+    /// # Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     /// ```
     pub fn set_status_callback(&mut self, callback: impl Fn(String) + Send + Sync + 'static) {
         self.status_callback = Some(Arc::new(callback));
     }
 
-    /// Set an expected SHA-256 hash for automatic verification after download.
+    /// Set an expected SHA-256 hash; the download fails if the file doesn't match.
     pub fn set_expected_sha256(&mut self, expected_sha256: impl Into<String>) {
         self.expected_sha256 = Some(expected_sha256.into());
     }
@@ -341,25 +428,28 @@ impl AdvancedDownloader {
         self.extra_headers = headers;
     }
 
-    /// Set how the downloader handles interactive prompts.
-    ///
-    /// Library and automation callers must set [`ResumePolicy::AlwaysResume`] to
-    /// avoid blocking on stdin.
+    /// Set how the downloader handles resume state and interactive prompts.
     pub fn set_resume_policy(&mut self, policy: ResumePolicy) {
         self.resume_policy = policy;
     }
 
-    /// Apply `self.extra_headers` to a request builder.
-    fn apply_headers(&self, mut req: reqwest::blocking::RequestBuilder) -> reqwest::blocking::RequestBuilder {
-        for (name, value) in &self.extra_headers {
-            if let (Ok(n), Ok(v)) = (
-                reqwest::header::HeaderName::from_bytes(name.as_bytes()),
-                reqwest::header::HeaderValue::from_str(value),
-            ) {
-                req = req.header(n, v);
-            }
-        }
-        req
+    /// Maximum consecutive failed attempts per chunk without progress (default 3).
+    pub fn set_retries(&mut self, retries: u32) {
+        self.max_retries = retries.max(1);
+    }
+
+    /// Connect / per-read timeout in seconds (default 60, 0 = no read timeout).
+    pub fn set_timeout_secs(&mut self, secs: u64) -> Result<(), BoxError> {
+        self.timeout_secs = secs;
+        self.client = http::build_client(&self.proxy, &ClientOptions::with_timeout_secs(secs))?;
+        Ok(())
+    }
+
+    fn apply_headers(
+        &self,
+        req: reqwest::blocking::RequestBuilder,
+    ) -> reqwest::blocking::RequestBuilder {
+        http::apply_headers(req, &self.extra_headers)
     }
 
     fn send_status(&self, msg: &str) {
@@ -371,547 +461,571 @@ impl AdvancedDownloader {
         }
     }
 
+    fn log(&self, msg: &str) {
+        if !self.quiet_mode {
+            println!("{}", msg);
+        }
+    }
+
+    fn part_path(&self) -> PathBuf {
+        crate::download::part_path_for(Path::new(&self.output_path))
+    }
+
+    fn state_path(&self) -> PathBuf {
+        let p = Path::new(&self.output_path);
+        let mut name = p
+            .file_name()
+            .map(|n| n.to_os_string())
+            .unwrap_or_else(|| "download".into());
+        name.push(".kget");
+        p.with_file_name(name)
+    }
+
     /// Start the download.
     ///
     /// This method:
-    /// 1. Checks for existing partial file (resume support)
-    /// 2. Queries server for file size and range support
-    /// 3. Downloads using parallel connections if supported
-    /// 4. Falls back to single-stream if server doesn't support ranges
-    ///
-    /// # Returns
-    ///
-    /// Returns `Ok(())` on successful download, or an error if the download fails.
+    /// 1. Queries the server for size, range support, `ETag` and `Last-Modified`
+    /// 2. Reuses a compatible `.part`/`.kget` state, or starts fresh
+    /// 3. Downloads the missing chunks in parallel, retrying each from its exact offset
+    /// 4. Falls back to a single stream if the server doesn't support ranges
+    /// 5. Verifies size (and SHA-256), then renames `.part` to the final name
     ///
     /// # Errors
     ///
-    /// - Network connection failures
-    /// - Existing file larger than remote (corrupted state)
-    /// - Cancellation via cancel token
-    /// - Disk I/O errors
-    pub fn download(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
+    /// - Network failures after the retries are exhausted (state is kept for resume)
+    /// - HTTP error status (a boxed [`KgetError::Http`] / [`KgetError::NotFound`])
+    /// - Cancellation via the cancel token ([`KgetError::Cancelled`])
+    /// - Size or checksum mismatch, disk I/O errors
+    pub fn download(&self) -> Result<(), BoxError> {
         let is_iso = self.url.to_lowercase().ends_with(".iso");
-        if !self.quiet_mode {
-            println!("Starting advanced download for: {}", self.url);
-            if is_iso {
-                println!(
-                    "Warning: ISO mode active. Disabling optimizations that could corrupt binary data."
-                );
-            }
+        self.log(&format!("Starting advanced download for: {}", self.url));
+        if is_iso {
+            self.log("ISO mode active: data is written byte-for-byte.");
         }
 
-        // Verify if the output path is valid
-        let existing_size = if Path::new(&self.output_path).exists() {
-            let size = std::fs::metadata(&self.output_path)?.len();
-            if !self.quiet_mode {
-                println!("Existing file found with size: {} bytes", size);
-            }
-            Some(size)
-        } else {
-            if !self.quiet_mode {
-                println!("Output file does not exist, starting fresh download");
-            }
-            None
+        if let Some(parent) = Path::new(&self.output_path)
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        self.log("Querying server for file size and range support...");
+        let remote = self.probe_remote()?;
+        self.log(&format!(
+            "Total file size: {}",
+            remote
+                .size
+                .map(|s| format!("{s} bytes"))
+                .unwrap_or_else(|| "unknown".into())
+        ));
+        self.log(&format!(
+            "Server supports range requests: {}",
+            remote.accepts_ranges
+        ));
+
+        let Some(total_size) = remote.size.filter(|_| remote.accepts_ranges) else {
+            self.log("Range requests not supported, falling back to single-threaded download");
+            return self.download_single_stream(is_iso);
         };
 
-        // Get the total file size and range support
-        if !self.quiet_mode {
-            println!("Querying server for file size and range support...");
-        }
-        let (total_size, supports_range) = self.get_file_size_and_range()?;
-        if !self.quiet_mode {
-            println!("Total file size: {} bytes", total_size);
-            println!("Server supports range requests: {}", supports_range);
-        }
-
-        if let Some(size) = existing_size {
-            if size > total_size {
-                return Err("Existing file is larger than remote; aborting".into());
+        let part = self.part_path();
+        let state_path = self.state_path();
+        let state = match ResumeState::load(&state_path) {
+            Some(s)
+                if self.resume_policy != ResumePolicy::AlwaysRestart
+                    && part.exists()
+                    && s.matches(&self.url, &remote) =>
+            {
+                self.send_status(&format!(
+                    "Resuming previous download ({} of {} bytes already done)",
+                    s.done_bytes(),
+                    total_size
+                ));
+                s
             }
-            if !self.quiet_mode {
-                println!("Resuming download from byte: {}", size);
-            }
-        }
-
-        // AlwaysRestart: discard any existing partial file and start fresh.
-        let existing_size = if self.resume_policy == ResumePolicy::AlwaysRestart {
-            None
-        } else {
-            existing_size
-        };
-
-        // Create a progress bar if not quiet or if we have a callback
-        let progress = if !self.quiet_mode || self.progress_callback.is_some() {
-            let bar = ProgressBar::new(total_size);
-            if let Some(size) = existing_size {
-                bar.set_position(size);
-            }
-            if self.quiet_mode {
-                bar.set_draw_target(indicatif::ProgressDrawTarget::hidden());
-            } else {
-                bar.set_style(ProgressStyle::with_template(
-                    "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})"
-                ).unwrap().progress_chars("#>-"));
-            }
-            Some(Arc::new(Mutex::new(bar)))
-        } else {
-            None
-        };
-
-        // Create or open the output file and preallocate
-        if !self.quiet_mode {
-            println!("Preparing output file: {}", self.output_path);
-        }
-        let file = if existing_size.is_some() {
-            File::options()
-                .read(true)
-                .write(true)
-                .open(&self.output_path)?
-        } else {
-            File::create(&self.output_path)?
-        };
-
-        // If range not supported, do a single download (no preallocation required)
-        if !supports_range {
-            if !self.quiet_mode {
-                println!("Range requests not supported, falling back to single-threaded download");
-            }
-            self.download_whole(&file, existing_size.unwrap_or(0), progress.clone())?;
-            if let Some(ref bar) = progress {
-                bar.lock()
-                    .expect("Progress bar mutex was poisoned")
-                    .finish_with_message("Download completed");
-            }
-            if !self.quiet_mode {
-                println!("Single-threaded download completed");
-            }
-            return Ok(());
-        }
-
-        // Range supported: preallocate file so parallel chunk writes land at the right offsets.
-        file.set_len(total_size)?;
-        if !self.quiet_mode {
-            println!("File preallocated to {} bytes", total_size);
-        }
-
-        // Calculate chunks for parallel download
-        if !self.quiet_mode {
-            println!("Calculating download chunks...");
-        }
-        let chunks = self.calculate_chunks(total_size, existing_size)?;
-        if !self.quiet_mode {
-            println!("Download will be split into {} chunks", chunks.len());
-        }
-
-        // Build a global token bucket so the aggregate rate across all threads stays at the limit.
-        let throttle_bucket = self.optimizer.speed_limit.map(|limit| {
-            Arc::new(Mutex::new(TokenBucket::new(limit)))
-        });
-
-        // Download parallel chunks
-        if !self.quiet_mode {
-            println!("Starting parallel chunk downloads...");
-        }
-        self.download_chunks_parallel(
-            chunks,
-            &file,
-            progress.clone(),
-            total_size,
-            existing_size.unwrap_or(0),
-            throttle_bucket,
-        )?;
-
-        if let Some(ref bar) = progress {
-            bar.lock()
-                .expect("Progress bar mutex was poisoned")
-                .finish_with_message("Download completed");
-        }
-
-        // Verify download integrity
-        if !self.quiet_mode || self.status_callback.is_some() {
-            if is_iso || self.expected_sha256.is_some() {
-                let should_verify = if self.status_callback.is_some()
-                    || self.expected_sha256.is_some()
-                {
-                    true
-                } else {
-                    match self.resume_policy {
-                        ResumePolicy::Ask => {
-                            println!(
-                                "\nThis is an ISO file. Would you like to verify its integrity? (y/N)"
-                            );
-                            let mut input = String::new();
-                            std::io::stdin().read_line(&mut input).is_ok()
-                                && input.trim().to_lowercase() == "y"
-                        }
-                        ResumePolicy::AlwaysResume => true,
-                        ResumePolicy::AlwaysRestart => false,
-                    }
-                };
-
-                if should_verify {
-                    self.verify_integrity(total_size)?;
+            _ => {
+                if self.resume_policy != ResumePolicy::AlwaysRestart && state_path.exists() {
+                    self.log(
+                        "Previous partial download does not match the remote file; restarting",
+                    );
                 }
-            } else {
-                let metadata = std::fs::metadata(&self.output_path)?;
-                if metadata.len() != total_size {
-                    return Err(format!(
-                        "File size mismatch: expected {} bytes, got {} bytes",
-                        total_size,
-                        metadata.len()
-                    )
-                    .into());
+                crate::download::check_disk_space(&part, total_size)?;
+                let f = File::create(&part)?;
+                // Preallocation is safe: the state file says what is missing.
+                f.set_len(total_size)?;
+                ResumeState {
+                    version: STATE_VERSION,
+                    url: self.url.clone(),
+                    total_size,
+                    etag: remote.etag.clone(),
+                    last_modified: remote.last_modified.clone(),
+                    chunks: self
+                        .calculate_chunks(total_size)
+                        .into_iter()
+                        .map(|(start, end)| ChunkState {
+                            start,
+                            end,
+                            done: 0,
+                        })
+                        .collect(),
                 }
             }
-            self.send_status("Advanced download completed successfully!");
+        };
+        state.save(&state_path)?;
+
+        let file = File::options().read(true).write(true).open(&part)?;
+        if file.metadata()?.len() != total_size {
+            file.set_len(total_size)?;
         }
 
+        let result = self.download_chunks_parallel(&file, state, &state_path, &remote);
+        match result {
+            Ok(()) => {}
+            Err(e) => {
+                if matches!(e.downcast_ref::<KgetError>(), Some(KgetError::Cancelled)) {
+                    self.log("Download paused; run the same command again to resume.");
+                }
+                return Err(e);
+            }
+        }
+        file.sync_all()?;
+        drop(file);
+
+        self.finish(&part, total_size, is_iso)?;
+        let _ = std::fs::remove_file(&state_path);
         Ok(())
     }
 
-    fn get_file_size_and_range(&self) -> Result<(u64, bool), Box<dyn Error + Send + Sync>> {
-        let head_response = self.apply_headers(self.client.head(&self.url)).send();
-        let Ok(response) = head_response else {
-            return self.get_file_size_with_range_probe();
+    /// Server without range support (or unknown size): one stream, still via `.part`.
+    fn download_single_stream(&self, is_iso: bool) -> Result<(), BoxError> {
+        let _ = std::fs::remove_file(self.state_path());
+        let progress_cb = self.progress_callback.clone();
+        let byte_cb = self.byte_progress_callback.clone();
+        let options = DownloadOptions {
+            quiet_mode: self.quiet_mode,
+            output_path: Some(self.output_path.clone()),
+            verify_iso: is_iso && self.should_verify_iso(),
+            expected_sha256: self.expected_sha256.clone(),
+            extra_headers: self.extra_headers.clone(),
+            resume: false,
+            retries: self.max_retries,
+            timeout_secs: self.timeout_secs,
+            cancel: Some(self.cancel_token.clone()),
+            progress_callback: Some(Arc::new(move |bytes, total| {
+                if let (Some(cb), Some(t)) = (&progress_cb, total) {
+                    cb((bytes as f64 / t.max(1) as f64) as f32);
+                }
+                if let Some(cb) = &byte_cb {
+                    cb(bytes, total);
+                }
+            })),
+            ..Default::default()
         };
+        let status_cb = self.status_callback.clone();
+        let cb = move |msg: String| {
+            if let Some(cb) = &status_cb
+                && !msg.starts_with("PROGRESS:")
+            {
+                cb(msg);
+            }
+        };
+        crate::download::download_to_path(
+            &self.url,
+            self.proxy.clone(),
+            self.optimizer.clone(),
+            options,
+            Some(&cb),
+        )?;
+        self.send_status("Advanced download completed successfully!");
+        Ok(())
+    }
 
-        if !response.status().is_success() {
-            return self.get_file_size_with_range_probe();
+    /// Whether to compute the SHA-256 of an ISO when no expected hash was given.
+    fn should_verify_iso(&self) -> bool {
+        if self.expected_sha256.is_some() {
+            return true;
         }
-
-        let content_length = response
-            .headers()
-            .get(reqwest::header::CONTENT_LENGTH)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.parse::<u64>().ok());
-
-        let accepts_range = response
-            .headers()
-            .get(reqwest::header::ACCEPT_RANGES)
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.eq_ignore_ascii_case("bytes"))
-            .unwrap_or(false);
-
-        if let Some(content_length) = content_length {
-            Ok((content_length, accepts_range))
-        } else {
-            self.get_file_size_with_range_probe()
+        match self.resume_policy {
+            ResumePolicy::AlwaysResume => true,
+            ResumePolicy::AlwaysRestart => false,
+            ResumePolicy::Ask => {
+                if self.status_callback.is_some() {
+                    return true;
+                }
+                if self.quiet_mode || !std::io::stdin().is_terminal() {
+                    return false;
+                }
+                println!("\nThis is an ISO file. Would you like to verify its integrity? (y/N)");
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input).is_ok()
+                    && input.trim().eq_ignore_ascii_case("y")
+            }
         }
     }
 
-    fn get_file_size_with_range_probe(&self) -> Result<(u64, bool), Box<dyn Error + Send + Sync>> {
+    /// Check the size, verify the hash, and move `.part` to the destination.
+    fn finish(&self, part: &Path, expected: u64, is_iso: bool) -> Result<(), BoxError> {
+        let len = std::fs::metadata(part)?.len();
+        if len != expected {
+            return Err(
+                format!("File size mismatch: expected {expected} bytes, got {len} bytes").into(),
+            );
+        }
+        self.send_status(&format!("File size verified: {len} bytes"));
+
+        if self.expected_sha256.is_some() || (is_iso && self.should_verify_iso()) {
+            self.send_status("Calculating SHA256 hash...");
+            let status_cb = self.status_callback.clone();
+            let cb = move |msg: String| {
+                if let Some(cb) = &status_cb {
+                    cb(msg);
+                }
+            };
+            if let Err(e) = crate::download::verify_file_sha256(
+                part,
+                self.expected_sha256.as_deref(),
+                Some(&cb),
+            ) {
+                let _ = std::fs::remove_file(part);
+                let _ = std::fs::remove_file(self.state_path());
+                return Err(e);
+            }
+            self.send_status("Integrity check passed - file is not corrupted");
+        }
+
+        std::fs::rename(part, &self.output_path)?;
+        self.send_status("Advanced download completed successfully!");
+        Ok(())
+    }
+
+    fn probe_remote(&self) -> Result<RemoteInfo, BoxError> {
+        let header = |resp: &reqwest::blocking::Response, name: reqwest::header::HeaderName| {
+            resp.headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+        };
+
+        if let Ok(response) = self.apply_headers(self.client.head(&self.url)).send()
+            && response.status().is_success()
+        {
+            let size = response.content_length().filter(|l| *l > 0).or_else(|| {
+                header(&response, reqwest::header::CONTENT_LENGTH).and_then(|s| s.parse().ok())
+            });
+            let accepts_ranges = header(&response, reqwest::header::ACCEPT_RANGES)
+                .is_some_and(|s| s.eq_ignore_ascii_case("bytes"));
+            if size.is_some() && accepts_ranges {
+                return Ok(RemoteInfo {
+                    size,
+                    accepts_ranges,
+                    etag: header(&response, reqwest::header::ETAG),
+                    last_modified: header(&response, reqwest::header::LAST_MODIFIED),
+                });
+            }
+        }
+
+        // HEAD failed or was inconclusive: probe with a 1-byte range request.
         let response = self
             .apply_headers(self.client.get(&self.url))
             .header(reqwest::header::RANGE, "bytes=0-0")
             .send()?;
-
-        if response.status() == reqwest::StatusCode::PARTIAL_CONTENT {
-            if let Some(total) = response
-                .headers()
-                .get(reqwest::header::CONTENT_RANGE)
-                .and_then(|v| v.to_str().ok())
-                .and_then(parse_content_range_total)
-            {
-                return Ok((total, true));
-            }
+        let status = response.status();
+        if status == reqwest::StatusCode::PARTIAL_CONTENT {
+            let total = header(&response, reqwest::header::CONTENT_RANGE)
+                .as_deref()
+                .and_then(parse_content_range_total);
+            return Ok(RemoteInfo {
+                size: total,
+                accepts_ranges: total.is_some(),
+                etag: header(&response, reqwest::header::ETAG),
+                last_modified: header(&response, reqwest::header::LAST_MODIFIED),
+            });
         }
-
-        if response.status().is_success() {
-            if let Some(total) = response
-                .headers()
-                .get(reqwest::header::CONTENT_LENGTH)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse::<u64>().ok())
-            {
-                return Ok((total, false));
-            }
+        if status.is_success() {
+            return Ok(RemoteInfo {
+                size: response.content_length(),
+                ..Default::default()
+            });
         }
-
-        Err("Could not determine file size".into())
+        Err(Box::new(KgetError::from_status(status.as_u16(), &self.url)))
     }
 
-    fn calculate_chunks(
-        &self,
-        total_size: u64,
-        existing_size: Option<u64>,
-    ) -> Result<Vec<(u64, u64)>, Box<dyn Error + Send + Sync>> {
+    fn calculate_chunks(&self, total_size: u64) -> Vec<(u64, u64)> {
+        let parallelism = self.optimizer.max_connections().max(1) as u64;
+        // Keep workers fed without overwhelming servers.
+        let target_chunks = parallelism.saturating_mul(2).max(2);
+        let chunk_size = (total_size / target_chunks).clamp(MIN_CHUNK_SIZE, MAX_CHUNK_SIZE);
+
         let mut chunks = Vec::new();
-        let start_from = existing_size.unwrap_or(0);
-
-        let configured_parallelism = self.optimizer.max_connections() as u64;
-        let runtime_parallelism = rayon::current_num_threads() as u64;
-        let parallelism = configured_parallelism.min(runtime_parallelism).max(1);
-        let target_chunks = parallelism.saturating_mul(2).max(2); // Keep workers fed without overwhelming servers.
-        let chunk_size = ((total_size / target_chunks).max(MIN_CHUNK_SIZE)).min(64 * 1024 * 1024);
-
-        let mut start = start_from;
+        let mut start = 0;
         while start < total_size {
             let end = (start + chunk_size).min(total_size);
             chunks.push((start, end));
             start = end;
         }
-
-        Ok(chunks)
-    }
-
-    fn download_whole(
-        &self,
-        file: &File,
-        offset: u64,
-        progress: Option<Arc<Mutex<ProgressBar>>>,
-    ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let response = self.apply_headers(self.client.get(&self.url)).send()?;
-        if offset > 0 {
-            // Resume not possible without range; warn
-            return Err("Server does not support range; cannot resume partial file".into());
-        }
-
-        let mut reader = BufReader::new(response);
-        let mut f = file.try_clone()?;
-        f.seek(SeekFrom::Start(0))?;
-
-        struct ProgressWriter<'a, W> {
-            inner: W,
-            progress: Option<Arc<Mutex<ProgressBar>>>,
-            callback: Option<&'a Arc<dyn Fn(f32) + Send + Sync>>,
-        }
-
-        impl<'a, W: Write> Write for ProgressWriter<'a, W> {
-            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                let n = self.inner.write(buf)?;
-                if let Some(ref bar) = self.progress {
-                    let guard = bar.lock().expect("Progress bar mutex was poisoned");
-                    guard.inc(n as u64);
-                    if let Some(cb) = self.callback {
-                        let pos = guard.position();
-                        let len = guard.length().unwrap_or(1);
-                        drop(guard);
-                        (cb)(pos as f32 / len as f32);
-                    }
-                }
-                Ok(n)
-            }
-
-            fn flush(&mut self) -> std::io::Result<()> {
-                self.inner.flush()
-            }
-        }
-
-        let mut writer = ProgressWriter {
-            inner: f,
-            progress,
-            callback: self.progress_callback.as_ref(),
-        };
-        std::io::copy(&mut reader, &mut writer)?;
-
-        Ok(())
+        chunks
     }
 
     fn download_chunks_parallel(
         &self,
-        chunks: Vec<(u64, u64)>,
         file: &File,
-        progress: Option<Arc<Mutex<ProgressBar>>>,
-        total_size: u64,
-        initial_downloaded: u64,
-        throttle_bucket: Option<Arc<Mutex<TokenBucket>>>,
-    ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let file = Arc::new(file);
-        let client = Arc::new(self.client.clone());
-        let url = Arc::new(self.url.clone());
-        let progress_callback = self.progress_callback.clone();
-        let cancel_token = self.cancel_token.clone();
-        let extra_headers = Arc::new(self.extra_headers.clone());
+        state: ResumeState,
+        state_path: &Path,
+        remote: &RemoteInfo,
+    ) -> Result<(), BoxError> {
+        let total_size = state.total_size;
+        let chunks: Vec<(u64, u64)> = state.chunks.iter().map(|c| (c.start, c.end)).collect();
+        let done: Vec<AtomicU64> = state
+            .chunks
+            .iter()
+            .map(|c| AtomicU64::new(c.done))
+            .collect();
+        let pending: Vec<usize> = state
+            .chunks
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.start + c.done < c.end)
+            .map(|(i, _)| i)
+            .collect();
+        let initial: u64 = state.done_bytes();
+        let downloaded = AtomicU64::new(initial);
+        let finished = AtomicBool::new(false);
 
-        // Shared progress counter for pipe-friendly output
-        let downloaded_bytes = Arc::new(AtomicU64::new(initial_downloaded));
-        let last_print_time = Arc::new(Mutex::new(Instant::now()));
-        let quiet_mode = self.quiet_mode;
+        let snapshot = || ResumeState {
+            chunks: state
+                .chunks
+                .iter()
+                .zip(&done)
+                .map(|(c, d)| ChunkState {
+                    start: c.start,
+                    end: c.end,
+                    done: d.load(Ordering::Relaxed),
+                })
+                .collect(),
+            ..state.clone()
+        };
 
-        chunks.par_iter().try_for_each(|&(start, end)| {
-            // Check for cancellation before starting chunk
-            if cancel_token.load(Ordering::Relaxed) {
-                return Err("Download cancelled".into());
-            }
-
-            let range = format!("bytes={}-{}", start, end - 1);
-            let range_header = reqwest::header::HeaderValue::from_str(&range)
-                .map_err(|e| format!("Invalid range header {}: {}", range, e))?;
-
-            for retry in 0..=MAX_RETRIES {
-                // Check for cancellation on each retry
-                if cancel_token.load(Ordering::Relaxed) {
-                    return Err("Download cancelled".into());
-                }
-
-                let mut request = client.get(url.as_str());
-                for (name, value) in extra_headers.as_ref() {
-                    if let (Ok(n), Ok(v)) = (
-                        reqwest::header::HeaderName::from_bytes(name.as_bytes()),
-                        reqwest::header::HeaderValue::from_str(value),
-                    ) {
-                        request = request.header(n, v);
-                    }
-                }
-                let request = request.header(reqwest::header::RANGE, range_header.clone());
-
-                match request.send() {
-                    Ok(mut response) => {
-                        let status = response.status();
-                        if status == reqwest::StatusCode::PARTIAL_CONTENT {
-                            // Use FileExt to write at specific offset without seeking shared cursor
-                            // This prevents race conditions when multiple threads write to the same file
-
-                            let mut current_pos = start;
-                            let mut buffer = [0u8; 16384];
-
-                            while current_pos < end {
-                                // Check for cancellation periodically during download
-                                if cancel_token.load(Ordering::Relaxed) {
-                                    return Err("Download cancelled".into());
-                                }
-
-                                let limit = (end - current_pos).min(buffer.len() as u64);
-                                let n = response.read(&mut buffer[..limit as usize])?;
-                                if n == 0 {
-                                    break;
-                                }
-
-                                #[cfg(target_family = "unix")]
-                                file.write_at(&buffer[..n], current_pos)?;
-
-                                #[cfg(target_family = "windows")]
-                                file.seek_write(&buffer[..n], current_pos)?;
-
-                                current_pos += n as u64;
-
-                                // Update shared progress counter
-                                let new_downloaded = downloaded_bytes
-                                    .fetch_add(n as u64, Ordering::Relaxed)
-                                    + n as u64;
-
-                                // Print progress periodically (every 200ms) for pipe-friendly output
-                                {
-                                    let mut last_time = last_print_time.lock().expect("Timer mutex was poisoned");
-                                    if !quiet_mode && last_time.elapsed() >= Duration::from_millis(200) {
-                                let percent = (new_downloaded as f64 / total_size.max(1) as f64
-                                            * 100.0)
-                                            .min(100.0);
-                                        // PROGRESS: format that Swift can parse
-                                        println!(
-                                            "PROGRESS: {:.1}% ({}/{})",
-                                            percent, new_downloaded, total_size
-                                        );
-                                        *last_time = Instant::now();
-                                    }
-                                }
-
-                                if let Some(ref bucket) = throttle_bucket {
-                                    let sleep_dur = {
-                                        let mut guard = bucket
-                                            .lock()
-                                            .expect("throttle bucket poisoned");
-                                        guard.consume(n as u64)
-                                    };
-                                    if let Some(dur) = sleep_dur {
-                                        std::thread::sleep(dur);
-                                    }
-                                }
-
-                                if let Some(ref bar) = progress {
-                                    let guard = bar.lock().expect("Progress bar mutex was poisoned");
-                                    guard.inc(n as u64);
-                                    if let Some(ref cb) = progress_callback {
-                                        let pos = guard.position();
-                                        let len = guard.length().unwrap_or(1);
-                                        drop(guard);
-                                        (cb)(pos as f32 / len as f32);
-                                    }
-                                }
-                            }
-
-                            return Ok::<(), Box<dyn Error + Send + Sync>>(());
-                        } else if status == reqwest::StatusCode::OK {
-                            return Err(format!(
-                                "Server ignored range request for chunk {}-{}; refusing to write mismatched data",
-                                start, end
-                            )
-                            .into());
-                        } else if status.as_u16() == 416 {
-                            if retry == MAX_RETRIES {
-                                return Err(format!(
-                                    "Failed to download chunk {}-{}: HTTP {}",
-                                    start, end, status
-                                )
-                                .into());
-                            }
-                            std::thread::sleep(Duration::from_millis(250 * (retry as u64 + 1)));
-                        }
-                    }
-                    Err(e) => {
-                        if retry == MAX_RETRIES {
-                            return Err(format!(
-                                "Failed to download chunk {}-{}: {}",
-                                start, end, e
-                            )
-                            .into());
-                        }
-                        std::thread::sleep(Duration::from_millis(250 * (retry as u64 + 1)));
-                    }
-                }
-            }
-            Err(format!("Failed to download chunk {}-{} after retries", start, end).into())
-        })?;
-
-        Ok(())
-    }
-
-    fn verify_integrity(&self, expected_size: u64) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let metadata = std::fs::metadata(&self.output_path)?;
-        let actual_size = metadata.len();
-
-        if actual_size != expected_size {
-            return Err(format!(
-                "File size mismatch: expected {} bytes, got {} bytes",
-                expected_size, actual_size
-            )
-            .into());
-        }
-
-        self.send_status(&format!("File size verified: {} bytes", actual_size));
-
-        // Calculate SHA256 hash for corruption check
-        self.send_status("Calculating SHA256 hash...");
-
-        let mut file = File::open(&self.output_path)?;
-        let mut hasher = Sha256::new();
-        let mut buffer = [0; 8192];
-        loop {
-            let n = file.read(&mut buffer)?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buffer[..n]);
-        }
-        let hash = hasher.finalize();
-        let hash_hex = hex::encode(hash);
-
-        self.send_status(&format!("SHA256 hash: {}", hash_hex));
-        if let Some(expected_sha256) = &self.expected_sha256 {
-            let expected_sha256 = expected_sha256.trim().to_ascii_lowercase();
-            if hash_hex != expected_sha256 {
-                return Err(format!(
-                    "SHA256 mismatch: expected {}, got {}",
-                    expected_sha256, hash_hex
+        let bar = ProgressBar::new(total_size);
+        bar.set_position(initial);
+        if self.quiet_mode {
+            bar.set_draw_target(indicatif::ProgressDrawTarget::hidden());
+        } else {
+            bar.set_style(
+                ProgressStyle::with_template(
+                    "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})",
                 )
-                .into());
-            }
-            self.send_status("SHA256 matches expected hash.");
+                .unwrap()
+                .progress_chars("#>-"),
+            );
         }
-        self.send_status("Integrity check passed - file is not corrupted");
 
+        let throttle_bucket = self
+            .optimizer
+            .speed_limit
+            .map(|limit| Mutex::new(TokenBucket::new(limit)));
+
+        let threads = self.optimizer.max_connections().min(pending.len()).max(1);
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .thread_name(|i| format!("kget-chunk-{i}"))
+            .build()?;
+        self.log(&format!(
+            "Downloading {} of {} chunks with {} connection(s)",
+            pending.len(),
+            chunks.len(),
+            threads
+        ));
+
+        let report = |bytes: u64| {
+            bar.set_position(bytes);
+            if let Some(cb) = &self.progress_callback {
+                cb((bytes as f64 / total_size.max(1) as f64) as f32);
+            }
+            if let Some(cb) = &self.byte_progress_callback {
+                cb(bytes, Some(total_size));
+            }
+        };
+
+        let result = std::thread::scope(|scope| {
+            // One ticker thread updates progress (UI/callbacks every 200 ms) and
+            // persists the resume state every second.
+            scope.spawn(|| {
+                let mut last_save = Instant::now();
+                let mut last_print = Instant::now();
+                while !finished.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(200));
+                    let bytes = downloaded.load(Ordering::Relaxed);
+                    report(bytes);
+                    if !self.quiet_mode && last_print.elapsed() >= Duration::from_millis(500) {
+                        let percent = (bytes as f64 / total_size.max(1) as f64 * 100.0).min(100.0);
+                        // Line-oriented format parsed by the macOS app
+                        bar.suspend(|| println!("PROGRESS: {percent:.1}% ({bytes}/{total_size})"));
+                        last_print = Instant::now();
+                    }
+                    if last_save.elapsed() >= Duration::from_secs(1) {
+                        let _ = snapshot().save(state_path);
+                        last_save = Instant::now();
+                    }
+                }
+            });
+
+            let r = pool.install(|| {
+                pending.par_iter().try_for_each(|&idx| {
+                    self.fetch_chunk(
+                        file,
+                        chunks[idx],
+                        &done[idx],
+                        &downloaded,
+                        remote,
+                        throttle_bucket.as_ref(),
+                    )
+                })
+            });
+            finished.store(true, Ordering::Relaxed);
+            r
+        });
+
+        // Always persist the final state so an interrupted run can resume.
+        let final_state = snapshot();
+        let _ = final_state.save(state_path);
+        let bytes = downloaded.load(Ordering::Relaxed);
+        report(bytes);
+
+        match result {
+            Ok(()) => {
+                if final_state.chunks.iter().any(|c| c.start + c.done < c.end) {
+                    bar.abandon();
+                    return Err("Download incomplete; run again to resume".into());
+                }
+                bar.finish_with_message("Download completed");
+                Ok(())
+            }
+            Err(e) => {
+                bar.abandon();
+                Err(e)
+            }
+        }
+    }
+
+    /// Download one chunk, resuming from the last written byte on every retry.
+    fn fetch_chunk(
+        &self,
+        file: &File,
+        (chunk_start, end): (u64, u64),
+        done: &AtomicU64,
+        downloaded: &AtomicU64,
+        remote: &RemoteInfo,
+        throttle: Option<&Mutex<TokenBucket>>,
+    ) -> Result<(), BoxError> {
+        let mut pos = chunk_start + done.load(Ordering::Relaxed);
+        let mut failures = 0u32;
+
+        while pos < end {
+            if self.is_cancelled() {
+                return Err(Box::new(KgetError::Cancelled));
+            }
+
+            let attempt: Result<(), ChunkError> = (|| {
+                let mut req = self
+                    .apply_headers(self.client.get(&self.url))
+                    .header(reqwest::header::RANGE, format!("bytes={}-{}", pos, end - 1));
+                // If-Range: if the file changed on the server it answers 200 instead of 206
+                if let Some(v) = remote.if_range() {
+                    req = req.header(reqwest::header::IF_RANGE, v);
+                }
+                let mut resp = req
+                    .send()
+                    .map_err(|e| ChunkError::Transient(e.to_string()))?;
+                let status = resp.status();
+                if status == reqwest::StatusCode::OK {
+                    let _ = std::fs::remove_file(self.state_path());
+                    return Err(ChunkError::Fatal(
+                        "Server ignored the range request or the remote file changed; restart the download"
+                            .into(),
+                    ));
+                }
+                if http::is_transient_status(status.as_u16()) {
+                    if let Some(delay) = http::retry_after(&resp) {
+                        std::thread::sleep(delay);
+                    }
+                    return Err(ChunkError::Transient(format!("HTTP {status}")));
+                }
+                if status != reqwest::StatusCode::PARTIAL_CONTENT {
+                    return Err(ChunkError::Fatal(Box::new(KgetError::from_status(
+                        status.as_u16(),
+                        &self.url,
+                    ))));
+                }
+
+                let mut buf = vec![0u8; READ_BUF];
+                while pos < end {
+                    if self.is_cancelled() {
+                        return Err(ChunkError::Fatal(Box::new(KgetError::Cancelled)));
+                    }
+                    let want = ((end - pos) as usize).min(buf.len());
+                    let n = resp
+                        .read(&mut buf[..want])
+                        .map_err(|e| ChunkError::Transient(e.to_string()))?;
+                    if n == 0 {
+                        return Err(ChunkError::Transient(format!(
+                            "connection closed early at byte {pos} (chunk ends at {end})"
+                        )));
+                    }
+                    write_all_at(file, &buf[..n], pos)
+                        .map_err(|e| ChunkError::Fatal(Box::new(KgetError::Io(e))))?;
+                    pos += n as u64;
+                    done.fetch_add(n as u64, Ordering::Relaxed);
+                    downloaded.fetch_add(n as u64, Ordering::Relaxed);
+                    // Progress was made: reset the failure counter.
+                    failures = 0;
+
+                    if let Some(bucket) = throttle {
+                        let sleep_dur = bucket
+                            .lock()
+                            .expect("throttle bucket poisoned")
+                            .consume(n as u64);
+                        if let Some(dur) = sleep_dur {
+                            std::thread::sleep(dur);
+                        }
+                    }
+                }
+                Ok(())
+            })();
+
+            match attempt {
+                Ok(()) => {}
+                Err(ChunkError::Fatal(e)) => return Err(e),
+                Err(ChunkError::Transient(msg)) => {
+                    failures += 1;
+                    if failures >= self.max_retries {
+                        return Err(format!(
+                            "Chunk {chunk_start}-{end} failed after {failures} attempts: {msg}"
+                        )
+                        .into());
+                    }
+                    std::thread::sleep(http::backoff_delay(failures));
+                }
+            }
+        }
         Ok(())
     }
+}
+
+/// `write_at`/`seek_write` may write fewer bytes than requested; write everything.
+fn write_all_at(file: &File, mut buf: &[u8], mut offset: u64) -> std::io::Result<()> {
+    while !buf.is_empty() {
+        #[cfg(target_family = "unix")]
+        let n = file.write_at(buf, offset)?;
+        #[cfg(target_family = "windows")]
+        let n = file.seek_write(buf, offset)?;
+        if n == 0 {
+            return Err(std::io::ErrorKind::WriteZero.into());
+        }
+        buf = &buf[n..];
+        offset += n as u64;
+    }
+    Ok(())
 }
 
 fn parse_content_range_total(value: &str) -> Option<u64> {
@@ -919,6 +1033,5 @@ fn parse_content_range_total(value: &str) -> Option<u64> {
     if total == "*" {
         return None;
     }
-    total.parse::<u64>().ok()
+    total.trim().parse::<u64>().ok()
 }
-

@@ -10,13 +10,13 @@ de descargas, proxy y verificación de checksum multi-algoritmo.
 
 ```toml
 [dependencies]
-Kget = "1.7.0"
+Kget = "1.7.1"
 
 # Opcional: cliente torrent nativo
-Kget = { version = "1.7.0", features = ["torrent-native"] }
+Kget = { version = "1.7.1", features = ["torrent-native"] }
 
 # Opcional: API async
-Kget = { version = "1.7.0", features = ["async"] }
+Kget = { version = "1.7.1", features = ["async"] }
 ```
 
 ## Quick Start — API Builder (recomendada)

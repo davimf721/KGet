@@ -7,6 +7,40 @@ Todos los cambios notables en este proyecto serán documentados en este archivo.
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 y este proyecto se adhiere al [Versionado Semántico](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.1] - 2026-10-18
+
+### Corregido
+- **El modo turbo podía generar archivos corruptos en silencio:** reanudar una descarga paralela interrumpida
+  trataba el archivo preasignado como completo y los fragmentos cortados por el servidor se aceptaban como completos.
+  Ahora las descargas usan `<archivo>.part` + un estado `<archivo>.kget` validado contra el servidor; cada fragmento
+  debe estar completo y los reintentos continúan desde el byte exacto.
+- **Las flags de la CLI se guardaban para siempre en `config.json`.** Ahora solo valen para la ejecución actual;
+  usa `--save-config` para guardarlas (la contraseña del proxy nunca se guarda).
+- **El proxy HTTP no cubría descargas HTTPS y SOCKS5 no funcionaba;** los proxies inválidos se ignoraban.
+- **La app de macOS no encontraba yt-dlp instalado con Homebrew** al abrirse desde el Dock/Finder, y marcaba los vídeos descargados como fallidos.
+- yt-dlp podía bloquearse con muchos avisos; ahora se muestra su mensaje de error.
+- `--sha256` se ignoraba en modo silencioso/biblioteca y cuando el servidor no admitía Range.
+- La descarga simple ya no deja un archivo truncado con el nombre final; HTTP 429/5xx respetan `Retry-After`.
+- Las respuestas brotli se descomprimían, alterando el archivo guardado.
+- `cargo test`, el ejemplo de la biblioteca y 10 doctests no compilaban; los tests ya no modifican la configuración real.
+- El historial podía borrarse o perder entradas; las credenciales de las URLs ya no se guardan.
+- Un `config.json` antiguo o parcial ya no impide iniciar KGet.
+- FTP/SFTP/WebDAV/Metalink/torrent se detectan por el esquema; FTP y SFTP tienen timeouts y reanudación.
+- Se leen manifiestos Metalink 3.x y se verifican SHA-512/MD5.
+- Modo batch con concurrencia limitada (`-j`) y nombres únicos.
+- GUI egui: las descargas simultáneas ya no comparten progreso ni cancelación.
+- macOS: la Share Extension ya no corta URLs con `&`; se acepta `webdav://`; se encuentra el `kget` de Homebrew en Apple Silicon.
+
+### Añadido
+- `-c/--continue`, `--no-clobber`, `--retries`, `--timeout`, `-j/--jobs`, `--save-config`, `--doctor`, `--checksum`, `--checksum-url`.
+- `KGET_YTDLP_PATH` y campo "yt-dlp path" en la app de macOS; Pausar/Reanudar en la app.
+- Protocolo JSONL versionado (`"v":1`) para todos los protocolos.
+- Archivos `.torrent` (locales y URLs) con el cliente nativo.
+- CI en GitHub Actions y workflow de release (binarios, crates.io, Homebrew).
+
+### Eliminado / Obsoleto
+- Código de caché/compresión sin uso (obsoleto); `--no-cache` oculto; dependencias sin uso eliminadas.
+
 ## [1.7.0] - 2026-05-24
 
 ### Añadido

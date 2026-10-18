@@ -155,10 +155,10 @@ async fn test_mock_server_json_response() {
     // Test JSON response body parsing
     Mock::given(method("GET"))
         .and(path("/data.json"))
-        .respond_with(ResponseTemplate::new(200).set_body_string(format!(
-            r#"{{"name": "KGet", "version": "{}"}}"#,
-            version
-        )))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(format!(r#"{{"name": "KGet", "version": "{}"}}"#, version)),
+        )
         .mount(&mock_server)
         .await;
 
@@ -318,7 +318,7 @@ async fn test_download_server_error_retries_and_fails() {
                 output_path: Some("/tmp/kget_flaky_test.txt".to_string()),
                 verify_iso: false,
                 expected_sha256: None,
-                extra_headers: Vec::new(),
+                ..Default::default()
             },
             None,
         )
@@ -327,7 +327,11 @@ async fn test_download_server_error_retries_and_fails() {
     .unwrap();
     assert!(result.is_err(), "503 should eventually fail");
     let msg = result.unwrap_err().to_string();
-    assert!(msg.contains("503") || msg.contains("after"), "unexpected error: {}", msg);
+    assert!(
+        msg.contains("503") || msg.contains("after"),
+        "unexpected error: {}",
+        msg
+    );
 }
 
 #[tokio::test]
@@ -353,7 +357,7 @@ async fn test_download_client_error_fails_immediately() {
                 output_path: Some("/tmp/kget_missing_test.txt".to_string()),
                 verify_iso: false,
                 expected_sha256: None,
-                extra_headers: Vec::new(),
+                ..Default::default()
             },
             None,
         )
@@ -424,7 +428,7 @@ async fn test_simple_download_writes_expected_file() {
                 output_path: Some(output_path_str),
                 verify_iso: false,
                 expected_sha256: None,
-                extra_headers: Vec::new(),
+                ..Default::default()
             },
             None,
         )
@@ -471,7 +475,7 @@ async fn test_simple_download_verifies_expected_sha256() {
                 output_path: Some(output_path_str),
                 verify_iso: false,
                 expected_sha256: Some(expected_hash),
-                extra_headers: Vec::new(),
+                ..Default::default()
             },
             None,
         )
@@ -602,7 +606,7 @@ async fn test_advanced_download_rejects_range_ignored_by_server() {
     })
     .await
     .unwrap();
-    assert!(err.contains("ignored range request"));
+    assert!(err.contains("ignored the range request"));
 }
 
 // ============================================================================

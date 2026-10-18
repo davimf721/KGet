@@ -23,7 +23,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 /// * `quiet_mode` - If true, returns a hidden progress bar (no output)
 /// * `msg` - Message to display above the progress bar
 /// * `length` - Total size in bytes (None for indeterminate spinner)
-/// * `is_parallel` - If true, shows chunk information for parallel downloads
+/// * `is_parallel` - Kept for API compatibility (no visual difference)
 ///
 /// # Returns
 ///
@@ -60,12 +60,11 @@ pub fn create_progress_bar(
 
     bar.set_message(msg);
 
-    if let Some(_) = length {
-        let template = if is_parallel {
-            "{msg}\n{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({percent}%) eta: {eta} speed: {binary_bytes_per_sec}\nChunks: {chunks} active"
-        } else {
-            "{msg}\n{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({percent}%) eta: {eta} speed: {binary_bytes_per_sec}"
-        };
+    if length.is_some() {
+        // `is_parallel` used to add a "Chunks:" line built from a key indicatif
+        // does not provide; both modes now share the same template.
+        let _ = is_parallel;
+        let template = "{msg}\n{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({percent}%) eta: {eta} speed: {binary_bytes_per_sec}";
 
         bar.set_style(
             ProgressStyle::default_bar()
@@ -82,4 +81,48 @@ pub fn create_progress_bar(
     }
 
     bar
+}
+
+/// Rate limiter for progress notifications.
+///
+/// Use it so callbacks, `PROGRESS:` lines and JSONL events fire at most every
+/// `ms` milliseconds (and always at 100%), instead of once per buffer.
+#[derive(Debug, Clone)]
+pub struct Throttle {
+    last: Option<std::time::Instant>,
+    every: std::time::Duration,
+    last_pct: f64,
+}
+
+impl Throttle {
+    /// Create a limiter that fires at most every `ms` milliseconds.
+    pub fn new(ms: u64) -> Self {
+        Self {
+            last: None,
+            every: std::time::Duration::from_millis(ms),
+            last_pct: -1.0,
+        }
+    }
+
+    /// `true` when the interval has elapsed and the percentage moved at least
+    /// 0.1 point, or when 100% is reached for the first time.
+    pub fn ready(&mut self, pct: f64) -> bool {
+        let elapsed = self.last.is_none_or(|t| t.elapsed() >= self.every);
+        let finished = pct >= 100.0 && self.last_pct < 100.0;
+        let ok = finished || (elapsed && (pct - self.last_pct).abs() >= 0.1);
+        if ok {
+            self.last = Some(std::time::Instant::now());
+            self.last_pct = pct;
+        }
+        ok
+    }
+
+    /// Time-only variant for transfers whose total size is unknown.
+    pub fn tick(&mut self) -> bool {
+        let ok = self.last.is_none_or(|t| t.elapsed() >= self.every);
+        if ok {
+            self.last = Some(std::time::Instant::now());
+        }
+        ok
+    }
 }

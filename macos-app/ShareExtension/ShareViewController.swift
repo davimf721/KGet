@@ -59,8 +59,13 @@ class ShareViewController: NSViewController {
     /// Encodes `urlString` as a query param in a `kget://download?url=…` URL
     /// and asks NSWorkspace to open it, which activates the main app.
     private func openInKGet(_ urlString: String) {
+        // .urlQueryAllowed keeps "&", "=", "+" and "?", which would split the
+        // original URL into several query items: encode them too.
+        var allowed = CharacterSet.urlQueryAllowed
+        allowed.remove(charactersIn: "&=+?#")
         guard
-            let encoded = urlString.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+            let encoded = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+                .addingPercentEncoding(withAllowedCharacters: allowed),
             let kgetURL = URL(string: "kget://download?url=\(encoded)")
         else {
             complete()

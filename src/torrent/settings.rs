@@ -75,37 +75,37 @@ impl TransmissionSettings {
         let mut s = Self::default();
 
         // Compatibilidade (URL completa)
-        if let Ok(v) = std::env::var("KGET_TRANSMISSION_URL") {
-            if !v.trim().is_empty() {
-                s.apply_url(&v, "/transmission/rpc", false);
-            }
+        if let Ok(v) = std::env::var("KGET_TRANSMISSION_URL")
+            && !v.trim().is_empty()
+        {
+            s.apply_url(&v, "/transmission/rpc", false);
         }
-        if let Ok(v) = std::env::var("KGET_TRANSMISSION_WEB") {
-            if !v.trim().is_empty() {
-                s.apply_url(&v, "/transmission/web/", true);
-            }
+        if let Ok(v) = std::env::var("KGET_TRANSMISSION_WEB")
+            && !v.trim().is_empty()
+        {
+            s.apply_url(&v, "/transmission/web/", true);
         }
 
         // Preferir vars novas quando existirem
-        if let Ok(v) = std::env::var("KGET_TRANSMISSION_HOST") {
-            if !v.trim().is_empty() {
-                s.host = v;
-            }
+        if let Ok(v) = std::env::var("KGET_TRANSMISSION_HOST")
+            && !v.trim().is_empty()
+        {
+            s.host = v;
         }
-        if let Ok(v) = std::env::var("KGET_TRANSMISSION_PORT") {
-            if let Ok(p) = v.parse::<u16>() {
-                s.port = p;
-            }
+        if let Ok(v) = std::env::var("KGET_TRANSMISSION_PORT")
+            && let Ok(p) = v.parse::<u16>()
+        {
+            s.port = p;
         }
-        if let Ok(v) = std::env::var("KGET_TRANSMISSION_RPC_PATH") {
-            if !v.trim().is_empty() {
-                s.rpc_path = v;
-            }
+        if let Ok(v) = std::env::var("KGET_TRANSMISSION_RPC_PATH")
+            && !v.trim().is_empty()
+        {
+            s.rpc_path = v;
         }
-        if let Ok(v) = std::env::var("KGET_TRANSMISSION_WEB_PATH") {
-            if !v.trim().is_empty() {
-                s.web_path = v;
-            }
+        if let Ok(v) = std::env::var("KGET_TRANSMISSION_WEB_PATH")
+            && !v.trim().is_empty()
+        {
+            s.web_path = v;
         }
 
         s.username = std::env::var("KGET_TRANSMISSION_USER")

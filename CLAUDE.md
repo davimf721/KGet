@@ -47,6 +47,7 @@ cargo test                                      # all tests
 cargo test --lib --test unit_tests             # unit tests only
 cargo test --test cli_tests                    # CLI integration tests
 cargo test --test mock_server_tests            # wiremock HTTP tests
+cargo test --test resume_tests                 # .part/.kget resume, truncation, retry, proxy regressions
 cargo test --test torrent_tests                # torrent tests
 cargo test --test torrent_tests --features torrent-native
 cargo check --features gui                     # verify GUI compiles

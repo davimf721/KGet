@@ -9,9 +9,20 @@
 //!
 //! # Authentication Order
 //!
-//! 1. Password embedded in URL (`sftp://user:pass@host/path`)
+//! 1. Password embedded in URL (`sftp://user:pass@host/path`, percent-encoded)
 //! 2. SSH agent (if running)
-//! 3. Default key files (`~/.ssh/id_ed25519`, `~/.ssh/id_rsa`, `~/.ssh/id_ecdsa`)
+//! 3. The configured key (`sftp.key_path` in `config.json`)
+//! 4. Default key files (`~/.ssh/id_ed25519`, `~/.ssh/id_rsa`, `~/.ssh/id_ecdsa`)
+//!
+//! # Paths
+//!
+//! `sftp://host/abs/path` is absolute; `sftp://host/~/file` is relative to the
+//! user's home directory. Percent-encoded characters (`%20`) are decoded.
+//!
+//! # Host keys
+//!
+//! Like OpenSSH's `StrictHostKeyChecking=accept-new`: a known key must match,
+//! and the key of a new host is added to `~/.ssh/known_hosts`.
 //!
 //! # Example
 //!
@@ -40,11 +51,15 @@
 //! downloader.download().unwrap();
 //! ```
 
+use crate::ByteProgressCallback;
 use crate::config::ProxyConfig;
 use crate::optimization::Optimizer;
-use crate::progress::create_progress_bar;
+use crate::progress::{Throttle, create_progress_bar};
 use std::error::Error;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::net::ToSocketAddrs;
+use std::path::PathBuf;
+use std::time::Duration;
 use url::Url;
 
 /// SFTP file downloader using SSH.
@@ -63,6 +78,9 @@ pub struct SftpDownloader {
     proxy: ProxyConfig,
     #[allow(dead_code)]
     optimizer: Optimizer,
+    key_path: Option<PathBuf>,
+    resume: bool,
+    progress_callback: Option<ByteProgressCallback>,
 }
 
 impl SftpDownloader {
@@ -88,7 +106,30 @@ impl SftpDownloader {
             quiet,
             proxy,
             optimizer,
+            key_path: None,
+            resume: true,
+            progress_callback: None,
         }
+    }
+
+    /// Private key tried before the default `~/.ssh/id_*` files.
+    pub fn with_key_path(mut self, key_path: Option<String>) -> Self {
+        self.key_path = key_path
+            .filter(|k| !k.trim().is_empty())
+            .map(|k| PathBuf::from(crate::utils::expand_tilde(k.trim())));
+        self
+    }
+
+    /// Continue an existing `<file>.part` (default `true`).
+    pub fn with_resume(mut self, resume: bool) -> Self {
+        self.resume = resume;
+        self
+    }
+
+    /// Structured progress callback `(bytes, total)`.
+    pub fn with_progress_callback(mut self, cb: ByteProgressCallback) -> Self {
+        self.progress_callback = Some(cb);
+        self
     }
 
     /// Download the file via SFTP.
@@ -104,7 +145,14 @@ impl SftpDownloader {
             .host_str()
             .ok_or("SFTP URL is missing a host (expected sftp://user@host/path)")?;
         let port = parsed.port().unwrap_or(22);
-        let remote_path = parsed.path();
+        let decoded_path = urlencoding::decode(parsed.path())?.into_owned();
+        // "/~/file" is relative to the home directory (SFTP resolves relative
+        // paths from there).
+        let remote_path = decoded_path
+            .strip_prefix("/~/")
+            .unwrap_or(&decoded_path)
+            .to_string();
+        let remote_path = remote_path.as_str();
 
         if remote_path.is_empty() || remote_path == "/" {
             return Err(
@@ -117,18 +165,24 @@ impl SftpDownloader {
                 .or_else(|_| std::env::var("USERNAME"))
                 .unwrap_or_else(|_| "anonymous".to_string())
         } else {
-            parsed.username().to_string()
+            urlencoding::decode(parsed.username())?.into_owned()
         };
 
         if !self.quiet {
             println!("Connecting to {}:{} ...", host, port);
         }
 
-        let tcp = std::net::TcpStream::connect((host, port))
+        let addr = (host, port)
+            .to_socket_addrs()
+            .map_err(|e| format!("Cannot resolve {}: {}", host, e))?
+            .next()
+            .ok_or_else(|| format!("Cannot resolve {}", host))?;
+        let tcp = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(20))
             .map_err(|e| format!("Cannot connect to {}:{} — {}", host, port, e))?;
 
         let mut sess =
             ssh2::Session::new().map_err(|e| format!("SSH session init failed: {}", e))?;
+        sess.set_timeout(60_000);
         sess.set_tcp_stream(tcp);
         sess.handshake()
             .map_err(|e| format!("SSH handshake with {}:{} failed: {}", host, port, e))?;
@@ -138,7 +192,8 @@ impl SftpDownloader {
 
         // Authenticate: password from URL → SSH agent → default key files
         if let Some(password) = parsed.password() {
-            sess.userauth_password(&username, password)
+            let password = urlencoding::decode(password)?.into_owned();
+            sess.userauth_password(&username, &password)
                 .map_err(|e| format!("Password authentication for '{}' failed: {}", username, e))?;
         } else {
             self.try_key_auth(&sess, &username)?;
@@ -179,10 +234,40 @@ impl SftpDownloader {
             .open(remote)
             .map_err(|e| format!("Cannot open remote file '{}': {}", remote_path, e))?;
 
-        let mut dest = std::fs::File::create(&self.output)
-            .map_err(|e| format!("Cannot create local file '{}': {}", self.output, e))?;
+        let final_path = PathBuf::from(&self.output);
+        if let Some(parent) = final_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent)?;
+        }
+        let part = crate::download::part_path_for(&final_path);
+        let mut offset = if self.resume {
+            std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0)
+        } else {
+            0
+        };
+        if file_size.is_some_and(|s| offset > s) {
+            offset = 0;
+        }
+        if offset > 0 {
+            remote_file
+                .seek(SeekFrom::Start(offset))
+                .map_err(|e| format!("SFTP seek error: {}", e))?;
+            if !self.quiet {
+                println!("Resuming at byte {}", offset);
+            }
+        }
 
-        let mut buffer = [0u8; 32768];
+        let mut dest = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .append(offset > 0)
+            .truncate(offset == 0)
+            .open(&part)
+            .map_err(|e| format!("Cannot create local file '{}': {}", part.display(), e))?;
+
+        progress.set_position(offset);
+        let mut downloaded = offset;
+        let mut throttle = Throttle::new(200);
+        let mut buffer = vec![0u8; 64 * 1024];
         loop {
             let n = remote_file
                 .read(&mut buffer)
@@ -191,8 +276,32 @@ impl SftpDownloader {
                 break;
             }
             dest.write_all(&buffer[..n])
-                .map_err(|e| format!("Write error to '{}': {}", self.output, e))?;
-            progress.inc(n as u64);
+                .map_err(|e| format!("Write error to '{}': {}", part.display(), e))?;
+            downloaded += n as u64;
+            progress.set_position(downloaded);
+            if let Some(cb) = &self.progress_callback {
+                let pct = file_size
+                    .map(|s| downloaded as f64 / s.max(1) as f64 * 100.0)
+                    .unwrap_or(0.0);
+                if throttle.ready(pct) {
+                    cb(downloaded, file_size);
+                }
+            }
+        }
+        dest.flush()?;
+        drop(dest);
+
+        if let Some(expected) = file_size
+            && downloaded != expected
+        {
+            return Err(format!(
+                "Incomplete SFTP download: {downloaded} of {expected} bytes; run again to resume"
+            )
+            .into());
+        }
+        std::fs::rename(&part, &final_path)?;
+        if let Some(cb) = &self.progress_callback {
+            cb(downloaded, Some(downloaded));
         }
 
         progress.finish_with_message("Download complete");
@@ -208,7 +317,7 @@ impl SftpDownloader {
     ///
     /// Behaviour mirrors OpenSSH's `StrictHostKeyChecking=accept-new`:
     /// - **Match** in known_hosts → proceed silently.
-    /// - **Not found** in known_hosts → warn and continue (first connection).
+    /// - **Not found** in known_hosts → add the key to `~/.ssh/known_hosts` and continue.
     /// - **Mismatch** → hard error (possible MITM attack).
     fn check_host_key(
         &self,
@@ -216,7 +325,7 @@ impl SftpDownloader {
         host: &str,
         port: u16,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let (key_bytes, _key_type) = sess
+        let (key_bytes, key_type) = sess
             .host_key()
             .ok_or("Server did not provide a host key — connection refused")?;
 
@@ -251,16 +360,38 @@ impl SftpDownloader {
         match known_hosts.check(&check_host, key_bytes) {
             ssh2::CheckResult::Match => {}
             ssh2::CheckResult::NotFound => {
-                eprintln!(
-                    "Warning: The host '{}' is not in your known_hosts file ({}).\n\
-                     Connecting anyway. To suppress this warning, add the host key:\n\
-                     ssh-keyscan -p {} {} >> {}",
-                    host,
-                    known_hosts_path.display(),
-                    port,
-                    host,
-                    known_hosts_path.display()
-                );
+                let format = match key_type {
+                    ssh2::HostKeyType::Rsa => ssh2::KnownHostKeyFormat::SshRsa,
+                    ssh2::HostKeyType::Dss => ssh2::KnownHostKeyFormat::SshDss,
+                    ssh2::HostKeyType::Ecdsa256 => ssh2::KnownHostKeyFormat::Ecdsa256,
+                    ssh2::HostKeyType::Ecdsa384 => ssh2::KnownHostKeyFormat::Ecdsa384,
+                    ssh2::HostKeyType::Ecdsa521 => ssh2::KnownHostKeyFormat::Ecdsa521,
+                    ssh2::HostKeyType::Ed25519 => ssh2::KnownHostKeyFormat::Ed25519,
+                    ssh2::HostKeyType::Unknown => ssh2::KnownHostKeyFormat::Unknown,
+                };
+                let saved = known_hosts
+                    .add(&check_host, key_bytes, "added by kget", format)
+                    .and_then(|_| {
+                        if let Some(dir) = known_hosts_path.parent() {
+                            let _ = std::fs::create_dir_all(dir);
+                        }
+                        known_hosts.write_file(&known_hosts_path, ssh2::KnownHostFileKind::OpenSSH)
+                    });
+                if !self.quiet {
+                    match saved {
+                        Ok(()) => eprintln!(
+                            "Warning: permanently added '{}' to the list of known hosts ({}).",
+                            check_host,
+                            known_hosts_path.display()
+                        ),
+                        Err(e) => eprintln!(
+                            "Warning: host '{}' is not in {} and could not be added ({}); connecting anyway.",
+                            check_host,
+                            known_hosts_path.display(),
+                            e
+                        ),
+                    }
+                }
             }
             ssh2::CheckResult::Mismatch => {
                 return Err(format!(
@@ -292,39 +423,35 @@ impl SftpDownloader {
         username: &str,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         // 1. SSH agent
-        if let Ok(mut agent) = sess.agent() {
-            if agent.connect().is_ok() && agent.list_identities().is_ok() {
-                if let Ok(identities) = agent.identities() {
-                    for identity in &identities {
-                        if agent.userauth(username, identity).is_ok() && sess.authenticated() {
-                            return Ok(());
-                        }
-                    }
+        if let Ok(mut agent) = sess.agent()
+            && agent.connect().is_ok()
+            && agent.list_identities().is_ok()
+            && let Ok(identities) = agent.identities()
+        {
+            for identity in &identities {
+                if agent.userauth(username, identity).is_ok() && sess.authenticated() {
+                    return Ok(());
                 }
             }
         }
 
-        // 2. Default key files
-        let home = match dirs::home_dir() {
-            Some(h) => h,
-            None => return Ok(()), // Let caller handle the unauthenticated state
-        };
+        // 2. Configured key, then default key files
+        let home = dirs::home_dir().unwrap_or_default();
 
-        let key_candidates = [
+        let key_candidates = self.key_path.iter().cloned().chain([
             home.join(".ssh/id_ed25519"),
             home.join(".ssh/id_rsa"),
             home.join(".ssh/id_ecdsa"),
-        ];
+        ]);
 
-        for key_path in &key_candidates {
-            if key_path.exists() {
-                if sess
-                    .userauth_pubkey_file(username, None, key_path, None)
+        for key_path in key_candidates {
+            if key_path.exists()
+                && sess
+                    .userauth_pubkey_file(username, None, &key_path, None)
                     .is_ok()
-                    && sess.authenticated()
-                {
-                    return Ok(());
-                }
+                && sess.authenticated()
+            {
+                return Ok(());
             }
         }
 

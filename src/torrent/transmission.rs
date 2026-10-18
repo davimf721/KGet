@@ -14,8 +14,8 @@ use transmission_rpc::{
 use crate::config::ProxyConfig;
 use crate::optimization::Optimizer;
 use crate::progress::create_progress_bar;
-use crate::torrent::TorrentCallbacks;
 use crate::torrent::settings::TransmissionSettings;
+use crate::torrent::{TorrentCallbacks, TorrentOutcome};
 use crate::utils::print;
 
 pub struct TorrentDownloader {
@@ -111,7 +111,7 @@ impl TorrentDownloader {
         (s.rpc_url(), auth, s.web_url())
     }
 
-    pub async fn download(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
+    pub async fn download(&self) -> Result<TorrentOutcome, Box<dyn Error + Send + Sync>> {
         let (transmission_url, auth, transmission_web_url): (String, Option<BasicAuth>, String) =
             Self::transmission_settings();
 
@@ -130,9 +130,15 @@ impl TorrentDownloader {
 
         self.emit_status(format!("Adding torrent: {}", self.url));
 
+        // The daemon resolves relative paths from its own working directory.
+        let _ = std::fs::create_dir_all(&self.output);
+        let download_dir = std::fs::canonicalize(&self.output)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| self.output.clone());
+
         let args = TorrentAddArgs {
             filename: Some(self.url.clone()),
-            download_dir: Some(self.output.clone()),
+            download_dir: Some(download_dir),
             paused: Some(false),
             peer_limit: Some(self.optimizer.get_peer_limit() as i64),
             ..Default::default()
@@ -148,7 +154,7 @@ impl TorrentDownloader {
                 self.emit_status(msg);
 
                 Self::open_url_system(&self.url)?;
-                return Ok(());
+                return Ok(TorrentOutcome::HandedOff);
             }
         };
 
@@ -170,18 +176,32 @@ impl TorrentDownloader {
             }
         };
 
-        let _ = Self::open_url_system(&transmission_web_url);
+        // Opening the web UI is opt-in.
+        if std::env::var("KGET_TRANSMISSION_OPEN_WEB").is_ok_and(|v| v == "1") {
+            let _ = Self::open_url_system(&transmission_web_url);
+        }
 
         let progress =
             create_progress_bar(self.quiet, "Downloading torrent".to_string(), None, false);
 
+        // Fail only when there is no progress at all for this long.
+        let stall_limit = std::env::var("KGET_TRANSMISSION_STALL_MINUTES")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(30);
+        let stall_limit = Duration::from_secs(stall_limit.max(1) * 60);
+        let mut last_percent = -1.0f32;
+        let mut last_change = std::time::Instant::now();
         let mut attempt_count = 0u32;
-        let max_attempts = 1800u32;
 
         loop {
-            if attempt_count >= max_attempts {
-                progress.finish_with_message("Download timeout or stalled.");
-                return Err("Download timeout after 30 minutes or torrent stalled".into());
+            if last_change.elapsed() >= stall_limit {
+                progress.finish_with_message("Download stalled.");
+                return Err(format!(
+                    "Torrent made no progress for {} minutes",
+                    stall_limit.as_secs() / 60
+                )
+                .into());
             }
 
             let torrent_info = client
@@ -204,6 +224,10 @@ impl TorrentDownloader {
             };
 
             let percent_done = t.percent_done.unwrap_or(0.0).clamp(0.0, 1.0);
+            if percent_done > last_percent {
+                last_percent = percent_done;
+                last_change = std::time::Instant::now();
+            }
             self.emit_progress(percent_done);
             progress.set_position((percent_done * 100.0) as u64);
 
@@ -216,22 +240,19 @@ impl TorrentDownloader {
                     speed_kb
                 );
                 progress.set_message(msg.clone());
-                if attempt_count % 2 == 0 {
+                if attempt_count.is_multiple_of(2) {
                     self.emit_status(msg);
                 }
             }
 
-            if let Some(error_code) = t.error {
-                if (error_code as i32) != 0 {
-                    let error_message =
-                        t.error_string.as_deref().unwrap_or("Unknown torrent error");
-                    progress.abandon_with_message(format!("Torrent error: {}", error_message));
-                    return Err(format!(
-                        "Torrent error (code {:?}): {}",
-                        error_code, error_message
-                    )
-                    .into());
-                }
+            if let Some(error_code) = t.error
+                && (error_code as i32) != 0
+            {
+                let error_message = t.error_string.as_deref().unwrap_or("Unknown torrent error");
+                progress.abandon_with_message(format!("Torrent error: {}", error_message));
+                return Err(
+                    format!("Torrent error (code {:?}): {}", error_code, error_message).into(),
+                );
             }
 
             if percent_done >= 1.0 {
@@ -239,14 +260,13 @@ impl TorrentDownloader {
                 break;
             }
 
-            if let Some(status) = t.status {
-                if matches!(status, TorrentStatus::Stopped)
-                    && attempt_count > 5
-                    && percent_done < 1.0
-                {
-                    progress.abandon_with_message("Torrent stopped and not progressing.");
-                    return Err("Torrent stopped and not progressing.".into());
-                }
+            if let Some(status) = t.status
+                && matches!(status, TorrentStatus::Stopped)
+                && attempt_count > 5
+                && percent_done < 1.0
+            {
+                progress.abandon_with_message("Torrent stopped and not progressing.");
+                return Err("Torrent stopped and not progressing.".into());
             }
 
             attempt_count += 1;
@@ -255,7 +275,7 @@ impl TorrentDownloader {
 
         progress.finish_with_message("Torrent completed successfully!");
         self.emit_status("Torrent completed successfully!".to_string());
-        Ok(())
+        Ok(TorrentOutcome::Downloaded)
     }
 }
 
@@ -266,7 +286,7 @@ pub fn download_via_transmission(
     proxy: ProxyConfig,
     optimizer: Optimizer,
     cb: TorrentCallbacks,
-) -> Result<(), Box<dyn Error + Send + Sync>> {
+) -> Result<TorrentOutcome, Box<dyn Error + Send + Sync>> {
     let mut d = TorrentDownloader::new(
         magnet.to_string(),
         output_dir.to_string(),

@@ -35,15 +35,18 @@
 
 use crate::DownloadOptions;
 use crate::advanced_download::AdvancedDownloader;
+use crate::advanced_download::ResumePolicy;
 use crate::checksum::{ChecksumAlgorithm, compute_checksum, parse_sidecar};
 use crate::config::{Config, ProxyConfig, ProxyType};
-use crate::download::download as http_download;
+use crate::download::download_to_path as http_download;
 use crate::error::KgetError;
 use crate::events::DownloadEvent;
+use crate::http::ClientOptions;
 use crate::optimization::Optimizer;
 use crate::utils;
+use std::collections::HashSet;
 use std::io::{Cursor, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread;
@@ -87,7 +90,8 @@ pub struct RetryConfig {
     /// Delay strategy between retries.
     pub backoff: Backoff,
     /// HTTP status codes that should trigger a retry.
-    /// Non-HTTP errors (IO, cancel) always abort immediately.
+    /// Other HTTP errors (404, 403, …), checksum mismatches, I/O errors and
+    /// cancellation abort immediately; network errors are always retried.
     pub retry_on_status: Vec<u16>,
 }
 
@@ -95,7 +99,10 @@ impl Default for RetryConfig {
     fn default() -> Self {
         RetryConfig {
             max_attempts: 3,
-            backoff: Backoff::Exponential { base_ms: 500, max_ms: 30_000 },
+            backoff: Backoff::Exponential {
+                base_ms: 500,
+                max_ms: 30_000,
+            },
             retry_on_status: vec![408, 429, 500, 502, 503, 504],
         }
     }
@@ -314,7 +321,7 @@ impl DownloadBuilder {
         let start = Instant::now();
 
         // 2. Execute the download (with retry).
-        self.run_with_retry(&output_path, proxy.clone(), optimizer.clone())?;
+        let output_path = self.run_with_retry(&output_path, proxy, optimizer, None)?;
 
         let duration = start.elapsed();
 
@@ -325,11 +332,7 @@ impl DownloadBuilder {
         let bytes_downloaded = std::fs::metadata(&output_path)
             .map(|m| m.len())
             .unwrap_or(0);
-        let avg_speed_bps = if duration.as_secs() > 0 {
-            bytes_downloaded / duration.as_secs()
-        } else {
-            bytes_downloaded
-        };
+        let avg_speed_bps = avg_speed(bytes_downloaded, duration);
 
         Ok(DownloadResult {
             path: output_path,
@@ -352,18 +355,11 @@ impl DownloadBuilder {
         if let Some((s, e)) = self.range {
             req = req.header("Range", format!("bytes={s}-{e}"));
         }
-        req = apply_headers(req, &self.headers);
+        req = crate::http::apply_headers(req, &self.headers);
 
         let resp = req.send()?;
-        if !resp.status().is_success() && resp.status().as_u16() != 206 {
-            if resp.status().as_u16() == 404 {
-                return Err(KgetError::NotFound(self.url.clone()));
-            }
-            return Err(KgetError::Network(format!(
-                "HTTP {} for {}",
-                resp.status(),
-                self.url
-            )));
+        if !resp.status().is_success() {
+            return Err(KgetError::from_status(resp.status().as_u16(), &self.url));
         }
         Ok(resp.bytes()?.to_vec())
     }
@@ -389,11 +385,11 @@ impl DownloadBuilder {
         let (tx, rx) = mpsc::channel::<DownloadEvent>();
         let handle = thread::spawn(move || {
             // Resolve sidecar
-            if let Some(sidecar_url) = self.verify_from.take() {
-                if let Err(e) = self.apply_sidecar(&sidecar_url) {
-                    let _ = tx.send(DownloadEvent::Error(e.to_string()));
-                    return Err(e);
-                }
+            if let Some(sidecar_url) = self.verify_from.take()
+                && let Err(e) = self.apply_sidecar(&sidecar_url)
+            {
+                let _ = tx.send(DownloadEvent::Error(e.to_string()));
+                return Err(e);
             }
 
             let output_path = self.resolve_output();
@@ -401,14 +397,10 @@ impl DownloadBuilder {
             let optimizer = self.make_optimizer();
             let start = Instant::now();
 
-            let tx_progress = tx.clone();
-            let tx_status = tx.clone();
-
-            let result =
-                self.run_with_events(&output_path, proxy, optimizer, tx_progress, tx_status);
+            let result = self.run_with_retry(&output_path, proxy, optimizer, Some(&tx));
 
             match result {
-                Ok(()) => {
+                Ok(output_path) => {
                     let duration = start.elapsed();
                     let checksums = match self.verify_and_collect(Path::new(&output_path)) {
                         Ok(c) => c,
@@ -420,11 +412,6 @@ impl DownloadBuilder {
                     let bytes_downloaded = std::fs::metadata(&output_path)
                         .map(|m| m.len())
                         .unwrap_or(0);
-                    let avg_speed_bps = if duration.as_secs() > 0 {
-                        bytes_downloaded / duration.as_secs()
-                    } else {
-                        bytes_downloaded
-                    };
                     let _ = tx.send(DownloadEvent::Completed {
                         path: output_path.clone(),
                         sha256: checksums.sha256.clone(),
@@ -432,7 +419,7 @@ impl DownloadBuilder {
                     Ok(DownloadResult {
                         path: output_path,
                         bytes_downloaded,
-                        avg_speed_bps,
+                        avg_speed_bps: avg_speed(bytes_downloaded, duration),
                         duration,
                         connections_used: self.connections,
                         checksums,
@@ -464,49 +451,68 @@ impl DownloadBuilder {
     /// `self.checksums` so the post-download verification uses it.
     fn apply_sidecar(&mut self, sidecar_url: &str) -> Result<(), KgetError> {
         let client = self.make_blocking_client()?;
-        let text = client
-            .get(sidecar_url)
-            .send()
-            .map_err(KgetError::from)?
-            .text()
-            .map_err(KgetError::from)?;
+        let resp = client.get(sidecar_url).send().map_err(KgetError::from)?;
+        if !resp.status().is_success() {
+            return Err(KgetError::SidecarError(format!(
+                "HTTP {} fetching {sidecar_url}",
+                resp.status()
+            )));
+        }
+        let text = resp.text().map_err(KgetError::from)?;
 
         let filename = utils::get_filename_from_url_or_default(&self.url, "file");
         match parse_sidecar(&text, &filename) {
             Some((ChecksumAlgorithm::Sha256, h)) => self.checksums.sha256 = Some(h),
             Some((ChecksumAlgorithm::Sha512, h)) => self.checksums.sha512 = Some(h),
-            Some((ChecksumAlgorithm::Sha1, h))   => self.checksums.sha1   = Some(h),
-            Some((ChecksumAlgorithm::Md5, h))     => self.checksums.md5    = Some(h),
-            Some((ChecksumAlgorithm::Blake3, h))  => self.checksums.blake3 = Some(h),
-            None => return Err(KgetError::SidecarError(format!(
-                "No entry for '{}' found in sidecar file", filename
-            ))),
+            Some((ChecksumAlgorithm::Sha1, h)) => self.checksums.sha1 = Some(h),
+            Some((ChecksumAlgorithm::Md5, h)) => self.checksums.md5 = Some(h),
+            Some((ChecksumAlgorithm::Blake3, h)) => self.checksums.blake3 = Some(h),
+            None => {
+                return Err(KgetError::SidecarError(format!(
+                    "No entry for '{}' found in sidecar file",
+                    filename
+                )));
+            }
         }
         Ok(())
     }
 
     /// Run the download, retrying on transient failures per `self.retry`.
+    ///
+    /// Later attempts continue the `.part` file written by earlier ones.
+    /// Returns the final path of the saved file.
     fn run_with_retry(
         &self,
         output_path: &str,
         proxy: ProxyConfig,
         optimizer: Optimizer,
-    ) -> Result<(), KgetError> {
+        events: Option<&mpsc::Sender<DownloadEvent>>,
+    ) -> Result<String, KgetError> {
         let mut attempt = 0u32;
         loop {
-            let result = self.run_once(output_path, proxy.clone(), optimizer.clone());
+            let result = self.run_once(
+                output_path,
+                proxy.clone(),
+                optimizer.clone(),
+                attempt,
+                events,
+            );
             match result {
-                Ok(()) => return Ok(()),
+                Ok(path) => return Ok(path),
                 Err(e) => {
                     attempt += 1;
-                    if attempt >= self.retry.max_attempts {
-                        return Err(e);
-                    }
-                    // Don't retry unrecoverable errors
-                    if matches!(e, KgetError::Cancelled | KgetError::NotFound(_) | KgetError::ChecksumMismatch { .. }) {
+                    if attempt >= self.retry.max_attempts.max(1)
+                        || !e.is_retryable(&self.retry.retry_on_status)
+                    {
                         return Err(e);
                     }
                     let delay = self.retry.backoff.delay(attempt - 1);
+                    if let Some(tx) = events {
+                        let _ = tx.send(DownloadEvent::Status(format!(
+                            "Attempt {}/{} failed: {e}. Retrying in {:?}…",
+                            attempt, self.retry.max_attempts, delay
+                        )));
+                    }
                     if !self.quiet {
                         eprintln!(
                             "Attempt {}/{} failed: {e}. Retrying in {:?}…",
@@ -519,103 +525,89 @@ impl DownloadBuilder {
         }
     }
 
-    /// One attempt at the underlying download.
+    /// One attempt at the underlying download; forwards progress to `events`.
     fn run_once(
         &self,
         output_path: &str,
         proxy: ProxyConfig,
         optimizer: Optimizer,
-    ) -> Result<(), KgetError> {
+        attempt: u32,
+        events: Option<&mpsc::Sender<DownloadEvent>>,
+    ) -> Result<String, KgetError> {
         // Range request: bypass the normal downloaders, use reqwest directly.
         if let Some((range_start, range_end)) = self.range {
-            return self.download_range(output_path, range_start, range_end);
+            self.download_range(output_path, range_start, range_end)?;
+            return Ok(output_path.to_string());
         }
 
-        if self.connections > 1 {
-            let mut dl = AdvancedDownloader::new(
-                self.url.clone(),
-                output_path.to_string(),
-                self.quiet,
-                proxy,
-                optimizer,
-            )
-            .map_err(KgetError::from)?;
-            dl.set_extra_headers(self.headers.clone());
-            if let Some(h) = &self.checksums.sha256 {
-                dl.set_expected_sha256(h.clone());
-            }
-            dl.download().map_err(KgetError::from)
-        } else {
-            let options = DownloadOptions {
-                quiet_mode: self.quiet,
-                output_path: Some(output_path.to_string()),
-                verify_iso: false,
-                expected_sha256: self.checksums.sha256.clone(),
-                extra_headers: self.headers.clone(),
-            };
-            http_download(&self.url, proxy, optimizer, options, None).map_err(KgetError::from)
-        }
-    }
-
-    /// Like `run_once` but hooks AdvancedDownloader callbacks to the event sender.
-    fn run_with_events(
-        &self,
-        output_path: &str,
-        proxy: ProxyConfig,
-        optimizer: Optimizer,
-        tx_progress: mpsc::Sender<DownloadEvent>,
-        tx_status: mpsc::Sender<DownloadEvent>,
-    ) -> Result<(), KgetError> {
-        if let Some((range_start, range_end)) = self.range {
-            return self.download_range(output_path, range_start, range_end);
-        }
-
-        if self.connections > 1 {
-            let mut dl = AdvancedDownloader::new(
-                self.url.clone(),
-                output_path.to_string(),
-                self.quiet,
-                proxy,
-                optimizer,
-            )
-            .map_err(KgetError::from)?;
-            dl.set_extra_headers(self.headers.clone());
-            if let Some(h) = &self.checksums.sha256 {
-                dl.set_expected_sha256(h.clone());
-            }
-            dl.set_progress_callback(move |p| {
-                let _ = tx_progress.send(DownloadEvent::Progress {
-                    percent: p as f64 * 100.0,
-                    speed_bps: 0,
-                    eta_secs: None,
+        let progress_tx = events.cloned();
+        let meter = Arc::new(std::sync::Mutex::new(crate::events::SpeedMeter::new()));
+        let on_bytes = move |bytes: u64, total: Option<u64>| {
+            if let Some(tx) = &progress_tx
+                && let crate::events::JsonEvent::Progress {
+                    percent,
+                    speed_bps,
+                    eta_secs,
+                    ..
+                } = meter
+                    .lock()
+                    .expect("speed meter poisoned")
+                    .progress(bytes, total)
+            {
+                let _ = tx.send(DownloadEvent::Progress {
+                    percent: percent.unwrap_or(0.0),
+                    speed_bps,
+                    eta_secs,
                 });
-            });
-            dl.set_status_callback(move |msg| {
-                let _ = tx_status.send(DownloadEvent::Status(msg));
-            });
-            dl.download().map_err(KgetError::from)
+            }
+        };
+
+        if self.connections > 1 {
+            let mut dl = AdvancedDownloader::new(
+                self.url.clone(),
+                output_path.to_string(),
+                self.quiet,
+                proxy,
+                optimizer,
+            )
+            .map_err(KgetError::from)?;
+            dl.set_extra_headers(self.headers.clone());
+            dl.set_resume_policy(ResumePolicy::AlwaysResume);
+            if let Some(h) = &self.checksums.sha256 {
+                dl.set_expected_sha256(h.clone());
+            }
+            if events.is_some() {
+                dl.set_byte_progress_callback(on_bytes);
+            }
+            if let Some(tx) = events.cloned() {
+                dl.set_status_callback(move |msg| {
+                    let _ = tx.send(DownloadEvent::Status(msg));
+                });
+            }
+            dl.download().map_err(KgetError::from)?;
+            Ok(output_path.to_string())
         } else {
             let options = DownloadOptions {
                 quiet_mode: self.quiet,
                 output_path: Some(output_path.to_string()),
-                verify_iso: false,
                 expected_sha256: self.checksums.sha256.clone(),
                 extra_headers: self.headers.clone(),
+                resume: attempt > 0,
+                progress_callback: events
+                    .map(|_| Arc::new(on_bytes) as crate::ByteProgressCallback),
+                ..Default::default()
             };
+            let status_tx = events.cloned();
             let status_cb = move |msg: String| {
-                // Parse PROGRESS: lines if present
-                if let Some(pct) = extract_percent(&msg) {
-                    let _ = tx_progress.send(DownloadEvent::Progress {
-                        percent: pct,
-                        speed_bps: 0,
-                        eta_secs: None,
-                    });
-                } else {
-                    let _ = tx_status.send(DownloadEvent::Status(msg));
+                if let Some(tx) = &status_tx
+                    && !msg.starts_with("PROGRESS:")
+                {
+                    let _ = tx.send(DownloadEvent::Status(msg));
                 }
             };
-            http_download(&self.url, proxy, optimizer, options, Some(&status_cb))
-                .map_err(KgetError::from)
+            let path = http_download(&self.url, proxy, optimizer, options, Some(&status_cb))
+                .map_err(KgetError::from)?;
+            Ok(path.to_string_lossy().into_owned())
         }
     }
 
@@ -625,20 +617,19 @@ impl DownloadBuilder {
         let mut req = client
             .get(&self.url)
             .header("Range", format!("bytes={start}-{end}"));
-        req = apply_headers(req, &self.headers);
+        req = crate::http::apply_headers(req, &self.headers);
 
         let resp = req.send()?;
-        if !resp.status().is_success() && resp.status().as_u16() != 206 {
-            return Err(KgetError::Network(format!(
-                "HTTP {} for range request on {}",
-                resp.status(),
-                self.url
-            )));
+        if !resp.status().is_success() {
+            return Err(KgetError::from_status(resp.status().as_u16(), &self.url));
         }
         let bytes = resp.bytes()?;
 
         // Create parent directory if needed
-        if let Some(parent) = Path::new(output_path).parent() {
+        if let Some(parent) = Path::new(output_path)
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+        {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::write(output_path, &bytes)?;
@@ -672,8 +663,8 @@ impl DownloadBuilder {
 
         check!(sha256, ChecksumAlgorithm::Sha256);
         check!(sha512, ChecksumAlgorithm::Sha512);
-        check!(sha1,   ChecksumAlgorithm::Sha1);
-        check!(md5,    ChecksumAlgorithm::Md5);
+        check!(sha1, ChecksumAlgorithm::Sha1);
+        check!(md5, ChecksumAlgorithm::Md5);
         check!(blake3, ChecksumAlgorithm::Blake3);
 
         Ok(computed)
@@ -687,13 +678,7 @@ impl DownloadBuilder {
         match &self.proxy_url {
             None => ProxyConfig::default(),
             Some(url) => {
-                let proxy_type = if url.starts_with("socks5://") {
-                    ProxyType::Socks5
-                } else if url.starts_with("https://") {
-                    ProxyType::Https
-                } else {
-                    ProxyType::Http
-                };
+                let proxy_type = ProxyType::from_url(url);
                 ProxyConfig {
                     enabled: true,
                     url: Some(url.clone()),
@@ -713,17 +698,7 @@ impl DownloadBuilder {
     }
 
     fn make_blocking_client(&self) -> Result<reqwest::blocking::Client, KgetError> {
-        let mut b = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(60));
-        if let Some(url) = &self.proxy_url {
-            let mut proxy = reqwest::Proxy::all(url.as_str())
-                .map_err(|e| KgetError::Protocol(e.to_string()))?;
-            if let (Some(u), Some(p)) = (&self.proxy_user, &self.proxy_pass) {
-                proxy = proxy.basic_auth(u, p);
-            }
-            b = b.proxy(proxy);
-        }
-        b.build().map_err(|e| KgetError::Protocol(e.to_string()))
+        crate::http::build_client(&self.make_proxy(), &ClientOptions::default())
     }
 }
 
@@ -833,26 +808,22 @@ impl BatchBuilder {
             .expect("failed to build rayon thread pool");
 
         let output_dir = Arc::new(self.output_dir.clone());
-        let proxy_url  = Arc::new(self.proxy_url.clone());
+        let proxy_url = Arc::new(self.proxy_url.clone());
         let proxy_user = Arc::new(self.proxy_user.clone());
         let proxy_pass = Arc::new(self.proxy_pass.clone());
-        let headers    = Arc::new(self.headers.clone());
-        let retry      = Arc::new(self.retry.clone());
+        let headers = Arc::new(self.headers.clone());
+        let retry = Arc::new(self.retry.clone());
         let speed_limit = self.speed_limit;
-        let quiet       = self.quiet;
+        let quiet = self.quiet;
+
+        let output_paths = reserve_batch_paths(&self.urls, &output_dir);
 
         pool.install(|| {
             self.urls
                 .par_iter()
-                .map(|url| {
-                    let filename =
-                        utils::get_filename_from_url_or_default(url, "download");
-                    let output_path = format!(
-                        "{}/{}",
-                        output_dir.trim_end_matches('/'),
-                        filename
-                    );
-
+                .zip(output_paths.par_iter())
+                .map(|(url, output_path)| {
+                    let output_path = output_path.to_string_lossy().into_owned();
                     let mut b = DownloadBuilder::new(url)
                         .output(&output_path)
                         .quiet(quiet)
@@ -863,8 +834,7 @@ impl BatchBuilder {
                     }
                     if let Some(pu) = proxy_url.as_ref() {
                         b = b.proxy(pu.clone());
-                        if let (Some(user), Some(pass)) =
-                            (proxy_user.as_ref(), proxy_pass.as_ref())
+                        if let (Some(user), Some(pass)) = (proxy_user.as_ref(), proxy_pass.as_ref())
                         {
                             b = b.proxy_auth(user.clone(), pass.clone());
                         }
@@ -873,7 +843,10 @@ impl BatchBuilder {
                         b = b.header(k.clone(), v.clone());
                     }
 
-                    BatchResult { url: url.clone(), result: b.download() }
+                    BatchResult {
+                        url: url.clone(),
+                        result: b.download(),
+                    }
                 })
                 .collect()
         })
@@ -891,43 +864,61 @@ impl BatchBuilder {
 
         let semaphore = StdArc::new(Semaphore::new(self.concurrency));
         let mut join_handles = Vec::new();
+        let output_paths = reserve_batch_paths(&self.urls, &self.output_dir);
 
-        for url in self.urls.iter().cloned() {
-            let sem   = semaphore.clone();
-            let od    = self.output_dir.clone();
-            let pu    = self.proxy_url.clone();
+        for (url, output_path) in self.urls.iter().cloned().zip(output_paths) {
+            let sem = semaphore.clone();
+            let od = self.output_dir.clone();
+            let pu = self.proxy_url.clone();
             let puser = self.proxy_user.clone();
             let ppass = self.proxy_pass.clone();
-            let hdrs  = self.headers.clone();
+            let hdrs = self.headers.clone();
             let retry = self.retry.clone();
-            let sl    = self.speed_limit;
+            let sl = self.speed_limit;
             let quiet = self.quiet;
 
             let permit = sem.acquire_owned().await.unwrap();
+            let _ = od;
+            let url_for_panic = url.clone();
             let h = spawn_blocking(move || {
                 let _permit = permit;
-                let filename = utils::get_filename_from_url_or_default(&url, "download");
-                let output_path = format!("{}/{}", od.trim_end_matches('/'), filename);
+                let output_path = output_path.to_string_lossy().into_owned();
 
                 let mut b = DownloadBuilder::new(&url)
                     .output(&output_path)
                     .quiet(quiet)
                     .retry(retry);
-                if let Some(lim) = sl { b = b.speed_limit(lim); }
-                if let Some(ref p) = pu { b = b.proxy(p.clone()); }
+                if let Some(lim) = sl {
+                    b = b.speed_limit(lim);
+                }
+                if let Some(ref p) = pu {
+                    b = b.proxy(p.clone());
+                }
                 if let (Some(u), Some(p)) = (puser, ppass) {
                     b = b.proxy_auth(u, p);
                 }
-                for (k, v) in hdrs { b = b.header(k, v); }
+                for (k, v) in hdrs {
+                    b = b.header(k, v);
+                }
 
-                BatchResult { url, result: b.download() }
+                BatchResult {
+                    url,
+                    result: b.download(),
+                }
             });
-            join_handles.push(h);
+            join_handles.push((url_for_panic, h));
         }
 
         let mut results = Vec::new();
-        for h in join_handles {
-            if let Ok(r) = h.await { results.push(r); }
+        for (url, h) in join_handles {
+            match h.await {
+                Ok(r) => results.push(r),
+                // Keep results aligned with the input URLs.
+                Err(e) => results.push(BatchResult {
+                    url,
+                    result: Err(KgetError::Other(format!("download task panicked: {e}"))),
+                }),
+            }
         }
         results
     }
@@ -937,23 +928,20 @@ impl BatchBuilder {
 // Free-function helpers
 // ════════════════════════════════════════════════════════════════════════════
 
-fn apply_headers(
-    mut req: reqwest::blocking::RequestBuilder,
-    headers: &[(String, String)],
-) -> reqwest::blocking::RequestBuilder {
-    for (name, value) in headers {
-        if let (Ok(n), Ok(v)) = (
-            reqwest::header::HeaderName::from_bytes(name.as_bytes()),
-            reqwest::header::HeaderValue::from_str(value),
-        ) {
-            req = req.header(n, v);
-        }
-    }
-    req
+/// Average speed in bytes/second, using fractional seconds.
+fn avg_speed(bytes: u64, duration: Duration) -> u64 {
+    let secs = duration.as_secs_f64().max(0.001);
+    (bytes as f64 / secs) as u64
 }
 
-fn extract_percent(msg: &str) -> Option<f64> {
-    let (_, after) = msg.split_once("PROGRESS:")?;
-    let s = after.split('%').next()?.trim();
-    s.parse::<f64>().ok()
+/// One unique destination per URL inside `dir` (`file (1).zip` on collisions).
+fn reserve_batch_paths(urls: &[String], dir: &str) -> Vec<PathBuf> {
+    let dir = PathBuf::from(utils::expand_tilde(dir));
+    let mut taken = HashSet::new();
+    urls.iter()
+        .map(|url| {
+            let name = utils::get_filename_from_url_or_default(url, "download");
+            utils::unique_path(&dir, &name, &mut taken)
+        })
+        .collect()
 }

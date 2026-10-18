@@ -1,49 +1,22 @@
-//! Download optimization through compression and caching.
+//! Download tuning: speed limit and parallel connection count.
 //!
-//! This module provides the [`Optimizer`] struct for configuring and applying
-//! optimizations to downloads:
-//!
-//! - **Compression**: Automatic compression/decompression using Gzip, LZ4, or Brotli
-//! - **Caching**: Store downloaded files locally to avoid redundant downloads
-//! - **Speed limiting**: Control bandwidth usage
+//! The cache and compression helpers that used to live here were never wired
+//! into any download path; since 1.7.1 they are deprecated no-ops kept only for
+//! API compatibility.
 //!
 //! # Example
 //!
 //! ```rust
 //! use kget::Optimizer;
 //!
-//! // Create with default settings
 //! let optimizer = Optimizer::new();
-//!
-//! // Check if compression is enabled
-//! if optimizer.is_compression_enabled() {
-//!     println!("Compression active");
-//! }
+//! assert_eq!(optimizer.max_connections(), 4);
 //! ```
 
 use crate::config::OptimizationConfig;
-use flate2::write::{GzDecoder, GzEncoder};
-use lz4::block::{CompressionMode, compress};
 use std::error::Error;
-use std::fs::{self, File};
-use std::io::{Read, Write};
-use std::path::PathBuf;
 
-/// Download optimizer for compression, caching, and speed limiting.
-///
-/// The `Optimizer` manages download performance features:
-///
-/// - **Compression**: Reduces storage size using configurable algorithms
-/// - **Caching**: Stores files locally to avoid re-downloading
-/// - **Speed limits**: Controls maximum download speed
-///
-/// # Compression Levels
-///
-/// | Level | Algorithm | Speed    | Ratio    |
-/// |-------|-----------|----------|----------|
-/// | 1-3   | Gzip      | Fast     | Moderate |
-/// | 4-6   | LZ4       | Balanced | Good     |
-/// | 7-9   | Brotli    | Slow     | Best     |
+/// Download tuning shared by all downloaders: speed limit and connection count.
 ///
 /// # Example
 ///
@@ -57,7 +30,7 @@ use std::path::PathBuf;
 /// // Or with defaults
 /// let optimizer = Optimizer::new();
 /// ```
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Optimizer {
     config: OptimizationConfig,
     /// Speed limit in bytes per second (None = unlimited)
@@ -66,148 +39,48 @@ pub struct Optimizer {
 
 impl Optimizer {
     /// Create a new `Optimizer` with the provided configuration.
-    ///
-    /// # Arguments
-    ///
-    /// * `config` - Optimization configuration settings
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use kget::{Optimizer, Config};
-    ///
-    /// let config = Config::default();
-    /// let optimizer = Optimizer::from_config(config.optimization);
-    /// ```
     pub fn from_config(config: OptimizationConfig) -> Self {
-        let speed_limit = config.speed_limit;
+        let speed_limit = config.speed_limit.filter(|l| *l > 0);
         Self {
             config,
             speed_limit,
         }
     }
 
-    /// Compress data using the configured algorithm.
-    ///
-    /// The algorithm is selected based on `compression_level`:
-    /// - Levels 1-3: Gzip (fast)
-    /// - Levels 4-6: LZ4 (balanced)
-    /// - Levels 7-9: Brotli (high compression)
-    ///
-    /// Returns the original data unchanged if compression is disabled.
+    /// Deprecated: compression was never applied to downloads. Returns `data` unchanged.
+    #[deprecated(
+        since = "1.7.1",
+        note = "compression was never applied to downloads; this is a no-op"
+    )]
     pub fn compress(&self, data: &[u8]) -> Result<Vec<u8>, Box<dyn Error>> {
-        if !self.config.compression {
-            return Ok(data.to_vec());
-        }
-        let compressed = match self.config.compression_level {
-            1..=3 => {
-                let mut encoder = GzEncoder::new(Vec::new(), flate2::Compression::fast());
-                encoder.write_all(data)?;
-                encoder.finish()?
-            }
-            4..=6 => compress(data, Some(CompressionMode::FAST(0)), true)?,
-            7..=9 => {
-                let mut encoder = brotli::CompressorWriter::new(
-                    Vec::new(),
-                    self.config.compression_level as usize,
-                    4096,
-                    22,
-                );
-                encoder.write_all(data)?;
-                encoder.into_inner()
-            }
-            _ => return Ok(data.to_vec()),
-        };
-        Ok(compressed)
+        Ok(data.to_vec())
     }
 
-    /// Decompress data using the appropriate algorithm based on the file header
-    ///
-    /// Supports Gzip, Brotli, and LZ4
+    /// Deprecated: returns `data` unchanged.
+    #[deprecated(
+        since = "1.7.1",
+        note = "compression was never applied to downloads; this is a no-op"
+    )]
     pub fn decompress(&self, data: &[u8]) -> Result<Vec<u8>, Box<dyn Error>> {
-        if !self.config.compression {
-            return Ok(data.to_vec());
-        }
-        let mut decompressed = Vec::new();
-        if data.starts_with(&[0x1f, 0x8b]) {
-            let mut decoder = GzDecoder::new(Vec::new());
-            decoder.write_all(data)?;
-            decompressed = decoder.finish()?;
-        } else if data.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
-            let mut decoder = brotli::Decompressor::new(data, 4096);
-            decoder.read_to_end(&mut decompressed)?;
-        } else {
-            let mut decoder = lz4::Decoder::new(data)?;
-            decoder.read_to_end(&mut decompressed)?;
-        }
-        Ok(decompressed)
+        Ok(data.to_vec())
     }
 
-    /// Retrieve a file from the cache if it exists.
-    ///
-    /// # Arguments
-    ///
-    /// * `url` - The URL that was used to download the file
-    ///
-    /// # Returns
-    ///
-    /// - `Ok(Some(data))` if the file exists in cache
-    /// - `Ok(None)` if caching is disabled or file doesn't exist
-    /// - `Err` on I/O errors
-    pub fn get_cached_file(&self, url: &str) -> Result<Option<Vec<u8>>, Box<dyn Error>> {
-        if !self.config.cache_enabled {
-            return Ok(None);
-        }
-
-        let _cache_dir = self.config.cache_dir.as_str();
-        let cache_path = self.get_cache_path(url)?;
-        if cache_path.exists() {
-            let mut file = File::open(cache_path)?;
-            let mut contents = Vec::new();
-            file.read_to_end(&mut contents)?;
-            return Ok(Some(contents));
-        }
+    /// Deprecated: the download cache was never used. Always returns `Ok(None)`.
+    #[deprecated(
+        since = "1.7.1",
+        note = "the download cache was never used; this is a no-op"
+    )]
+    pub fn get_cached_file(&self, _url: &str) -> Result<Option<Vec<u8>>, Box<dyn Error>> {
         Ok(None)
     }
 
-    /// Store a file in the cache.
-    ///
-    /// Does nothing if caching is disabled.
-    pub fn cache_file(&self, url: &str, data: &[u8]) -> Result<(), Box<dyn Error>> {
-        if !self.config.cache_enabled {
-            return Ok(());
-        }
-        let cache_path = self.get_cache_path(url)?;
-        if let Some(parent) = cache_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let mut file = File::create(cache_path)?;
-        file.write_all(data)?;
+    /// Deprecated: does nothing.
+    #[deprecated(
+        since = "1.7.1",
+        note = "the download cache was never used; this is a no-op"
+    )]
+    pub fn cache_file(&self, _url: &str, _data: &[u8]) -> Result<(), Box<dyn Error>> {
         Ok(())
-    }
-
-    /// Generate the cache file path for a URL using a simple hash.
-    fn get_cache_path(&self, url: &str) -> Result<PathBuf, Box<dyn Error>> {
-        let mut cache_dir = PathBuf::from(if self.config.cache_dir.is_empty() {
-            "~/.cache/kget".to_string()
-        } else {
-            self.config.cache_dir.clone()
-        });
-
-        if cache_dir.starts_with("~") {
-            if let Some(home) = dirs::home_dir() {
-                cache_dir = home.join(cache_dir.strip_prefix("~").unwrap());
-            }
-        }
-
-        // Simple hash function to generate a unique filename
-        let mut hash = 0u64;
-        for byte in url.bytes() {
-            hash = hash.wrapping_mul(31).wrapping_add(byte as u64);
-        }
-
-        cache_dir.push(format!("{:x}", hash));
-        Ok(cache_dir)
     }
 
     /// Get the peer connection limit for torrent downloads.
@@ -220,14 +93,13 @@ impl Optimizer {
         self.config.max_connections.clamp(1, 32)
     }
 
-    /// Check if compression is enabled.
+    /// Deprecated: always `false` since 1.7.1.
+    #[deprecated(since = "1.7.1", note = "compression is no longer supported")]
     pub fn is_compression_enabled(&self) -> bool {
-        self.config.compression
+        false
     }
 
     /// Create a new `Optimizer` with default settings.
-    ///
-    /// Equivalent to `Optimizer::default()`.
     pub fn new() -> Self {
         Self::default()
     }
@@ -240,22 +112,8 @@ impl Optimizer {
 }
 
 impl Default for Optimizer {
-    /// Create an `Optimizer` with sensible defaults:
-    /// - Compression enabled at level 6 (LZ4)
-    /// - Caching enabled in ~/.cache/kget
-    /// - No speed limit
-    /// - 4 max connections
+    /// No speed limit, 4 connections.
     fn default() -> Self {
-        Self {
-            config: OptimizationConfig {
-                compression: true,
-                compression_level: 6,
-                cache_enabled: true,
-                cache_dir: "~/.cache/kget".to_string(),
-                speed_limit: None,
-                max_connections: 4,
-            },
-            speed_limit: None,
-        }
+        Self::from_config(OptimizationConfig::default())
     }
 }

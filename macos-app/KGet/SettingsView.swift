@@ -18,6 +18,7 @@ struct SettingsView: View {
     @State private var verifyISOIntegrity: Bool = true
     @State private var autoExtract: Bool = false
     @State private var videoQuality: String = "best"
+    @State private var ytdlpPath: String = ""
     private let videoQualities = ["best", "1080p", "720p", "480p", "360p", "audio"]
 
     var body: some View {
@@ -40,6 +41,7 @@ struct SettingsView: View {
             speedLimit          = downloadManager.speedLimitKBPerSecond
             autoExtract         = downloadManager.autoExtract
             videoQuality        = downloadManager.videoQuality
+            ytdlpPath           = downloadManager.ytdlpPath
         }
         .onChange(of: verifyISOIntegrity)   { v in downloadManager.verifyISOIntegrity = v;      downloadManager.saveSettings() }
         .onChange(of: showNotifications)    { v in downloadManager.showNotifications = v;        downloadManager.saveSettings() }
@@ -47,6 +49,7 @@ struct SettingsView: View {
         .onChange(of: speedLimit)           { v in downloadManager.speedLimitKBPerSecond = v;   downloadManager.saveSettings() }
         .onChange(of: autoExtract)          { v in downloadManager.autoExtract = v;             downloadManager.saveSettings() }
         .onChange(of: videoQuality)         { v in downloadManager.videoQuality = v;            downloadManager.saveSettings() }
+        .onChange(of: ytdlpPath)            { v in downloadManager.ytdlpPath = v;               downloadManager.saveSettings() }
     }
 
     // MARK: - General Tab
@@ -144,6 +147,40 @@ struct SettingsView: View {
                         .labelsHidden()
                         .frame(width: 140)
                         .pickerStyle(.menu)
+                    }
+                    GlassRow(icon: "terminal.fill", iconColor: .gray, title: "yt-dlp path",
+                             subtitle: "Leave empty to auto-detect (Homebrew, MacPorts, pipx)") {
+                        HStack {
+                            TextField("/opt/homebrew/bin/yt-dlp", text: $ytdlpPath)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 170)
+                            Button("Choose…") {
+                                let panel = NSOpenPanel()
+                                panel.canChooseFiles = true
+                                panel.canChooseDirectories = false
+                                panel.allowsMultipleSelection = false
+                                if panel.runModal() == .OK, let url = panel.url { ytdlpPath = url.path }
+                            }
+                        }
+                    }
+                }
+
+                // Diagnostics section
+                GlassSection(header: "Diagnostics") {
+                    GlassRow(icon: "stethoscope", iconColor: .teal, title: "Environment check",
+                             subtitle: "Runs kget --doctor: paths, yt-dlp, tools, features") {
+                        Button("Run") { downloadManager.runDiagnostics() }
+                    }
+                    if !downloadManager.diagnostics.isEmpty {
+                        ScrollView {
+                            Text(downloadManager.diagnostics)
+                                .font(.system(.caption, design: .monospaced))
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .frame(height: 140)
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, 8)
                     }
                 }
 

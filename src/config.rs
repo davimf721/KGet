@@ -8,9 +8,15 @@
 //! - Linux: `~/.config/kget/config.json`
 //! - Windows: `%APPDATA%\kget\config.json`
 //!
+//! Set the `KGET_CONFIG_DIR` environment variable to use a different directory
+//! (useful for tests, portable installs and sandboxed frontends).
+//!
+//! Missing fields in an existing `config.json` fall back to their defaults, and a
+//! corrupt file is backed up to `config.json.bak` instead of preventing startup.
+//!
 //! # Example
 //!
-//! ```rust
+//! ```rust,no_run
 //! use kget::Config;
 //!
 //! // Load existing config or create default
@@ -22,7 +28,6 @@
 //! config.save().unwrap();
 //! ```
 
-use dirs::config_dir;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
@@ -46,6 +51,7 @@ use std::path::PathBuf;
 /// };
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ProxyConfig {
     /// Whether to use the proxy for downloads
     pub enabled: bool,
@@ -60,14 +66,41 @@ pub struct ProxyConfig {
 }
 
 /// Supported proxy protocol types.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// The type describes how KGet talks **to the proxy**; every type is used for
+/// both `http://` and `https://` downloads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProxyType {
-    /// HTTP proxy (for HTTP downloads)
+    /// Proxy that speaks plain HTTP (`http://proxy:3128`)
     Http,
-    /// HTTPS proxy (for HTTPS downloads)
+    /// Proxy reached over TLS (`https://proxy:443`)
     Https,
-    /// SOCKS5 proxy (works with all protocols)
+    /// SOCKS5 proxy (`socks5://host:1080`); DNS is resolved by the proxy
     Socks5,
+}
+
+impl ProxyType {
+    /// Parse a proxy type name (`http`, `https`, `socks5`, `socks5h`, `socks`).
+    /// Unknown values map to [`ProxyType::Http`].
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "https" => ProxyType::Https,
+            "socks5" | "socks5h" | "socks" => ProxyType::Socks5,
+            _ => ProxyType::Http,
+        }
+    }
+
+    /// Infer the proxy type from the scheme of a proxy URL.
+    pub fn from_url(url: &str) -> Self {
+        let lower = url.trim().to_ascii_lowercase();
+        if lower.starts_with("socks") {
+            ProxyType::Socks5
+        } else if lower.starts_with("https://") {
+            ProxyType::Https
+        } else {
+            ProxyType::Http
+        }
+    }
 }
 
 impl Default for ProxyConfig {
@@ -85,24 +118,38 @@ impl Default for ProxyConfig {
 
 /// Configuration for download optimization features.
 ///
-/// Controls compression, caching, speed limiting, and parallel connections.
+/// Controls speed limiting and parallel connections.
+///
+/// `compression`, `compression_level`, `cache_enabled` and `cache_dir` are kept
+/// only so existing `config.json` files keep loading; they have no effect.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct OptimizationConfig {
-    /// Enable automatic compression for cached downloads
+    /// Unused since 1.7.1 (kept for config compatibility)
     pub compression: bool,
-    /// Compression level (1-9). Affects algorithm selection:
-    /// - 1-3: Gzip (fast)
-    /// - 4-6: LZ4 (balanced)
-    /// - 7-9: Brotli (high compression)
+    /// Unused since 1.7.1 (kept for config compatibility)
     pub compression_level: u8,
-    /// Enable download caching
+    /// Unused since 1.7.1 (kept for config compatibility)
     pub cache_enabled: bool,
-    /// Directory for cached files (default: ~/.cache/kget)
+    /// Unused since 1.7.1 (kept for config compatibility)
     pub cache_dir: String,
     /// Speed limit in bytes per second (None = unlimited)
     pub speed_limit: Option<u64>,
     /// Maximum parallel connections per download (1-32)
     pub max_connections: usize,
+}
+
+impl Default for OptimizationConfig {
+    fn default() -> Self {
+        Self {
+            compression: false,
+            compression_level: 6,
+            cache_enabled: false,
+            cache_dir: "~/.cache/kget".to_string(),
+            speed_limit: None,
+            max_connections: 4,
+        }
+    }
 }
 
 // Function to provide the default value for max_peer_connections
@@ -131,6 +178,7 @@ fn default_torrent_max_upload_slots() -> u32 {
 /// config.torrent.max_peers = 100;
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct TorrentConfig {
     /// Enable torrent download support
     pub enabled: bool,
@@ -145,15 +193,29 @@ pub struct TorrentConfig {
     /// Enable DHT (Distributed Hash Table) for peer discovery
     pub dht_enabled: bool,
     /// Maximum peer connections per torrent
-    #[serde(default = "default_torrent_max_peer_connections")]
     pub max_peer_connections: u32,
     /// Maximum upload slots per torrent
-    #[serde(default = "default_torrent_max_upload_slots")]
     pub max_upload_slots: u32,
+}
+
+impl Default for TorrentConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            download_dir: None,
+            max_peers: 50,
+            max_seeds: 25,
+            port: None,
+            dht_enabled: true,
+            max_peer_connections: default_torrent_max_peer_connections(),
+            max_upload_slots: default_torrent_max_upload_slots(),
+        }
+    }
 }
 
 /// Configuration for FTP downloads.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct FtpConfig {
     /// Use passive mode for FTP connections (recommended for NAT/firewall)
     pub passive_mode: bool,
@@ -161,13 +223,32 @@ pub struct FtpConfig {
     pub default_port: u16,
 }
 
+impl Default for FtpConfig {
+    fn default() -> Self {
+        Self {
+            passive_mode: true,
+            default_port: 21,
+        }
+    }
+}
+
 /// Configuration for SFTP (SSH File Transfer Protocol) downloads.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SftpConfig {
     /// Default SFTP port (22)
     pub default_port: u16,
     /// Path to SSH private key file for authentication
     pub key_path: Option<String>,
+}
+
+impl Default for SftpConfig {
+    fn default() -> Self {
+        Self {
+            default_port: 22,
+            key_path: None,
+        }
+    }
 }
 
 /// Main configuration structure containing all KGet settings.
@@ -177,7 +258,7 @@ pub struct SftpConfig {
 ///
 /// # Loading Configuration
 ///
-/// ```rust
+/// ```rust,no_run
 /// use kget::Config;
 ///
 /// // Load from file or use defaults
@@ -194,7 +275,8 @@ pub struct SftpConfig {
 /// config.optimization.max_connections = 16;
 /// config.save().expect("Failed to save config");
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Config {
     /// Proxy server settings
     pub proxy: ProxyConfig,
@@ -206,100 +288,93 @@ pub struct Config {
     pub ftp: FtpConfig,
     /// SFTP protocol configuration
     pub sftp: SftpConfig,
+    /// Explicit path to the yt-dlp binary (the `KGET_YTDLP_PATH` env var wins)
+    pub ytdlp_path: Option<String>,
+}
+
+/// Directory holding `config.json` and `history.json`.
+///
+/// Honours `KGET_CONFIG_DIR`; otherwise `<OS config dir>/kget`.
+pub fn config_dir() -> Result<PathBuf, io::Error> {
+    if let Some(dir) = std::env::var_os("KGET_CONFIG_DIR").filter(|d| !d.is_empty()) {
+        return Ok(PathBuf::from(dir));
+    }
+    dirs::config_dir()
+        .map(|d| d.join("kget"))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Not able to find config directory"))
+}
+
+/// Write `contents` to `path` atomically (temporary file + rename).
+pub(crate) fn write_atomic(
+    path: &std::path::Path,
+    contents: &[u8],
+    private: bool,
+) -> io::Result<()> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)?;
+    }
+    let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
+    tmp_name.push(format!(".{}.tmp", std::process::id()));
+    let tmp = path.with_file_name(tmp_name);
+    fs::write(&tmp, contents)?;
+    #[cfg(unix)]
+    if private {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(not(unix))]
+    let _ = private;
+    fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = fs::remove_file(&tmp);
+    })
 }
 
 impl Config {
     /// Load configuration from the standard config file location.
     ///
-    /// If the config file doesn't exist, returns `Config::default()`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the config file exists but cannot be read or parsed.
+    /// Returns `Config::default()` if the file doesn't exist. Missing fields use
+    /// their defaults. A file that cannot be parsed is copied to
+    /// `config.json.bak`, a warning is printed to stderr, and defaults are used.
     pub fn load() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let config_path = Self::get_config_path()?;
-
-        if !config_path.exists() {
-            // If the config file does not exist, return default config
+        let config_path = Self::path()?;
+        let Ok(config_str) = fs::read_to_string(&config_path) else {
+            return Ok(Self::default());
+        };
+        if config_str.trim().is_empty() {
             return Ok(Self::default());
         }
-
-        let config_str = fs::read_to_string(config_path)?;
-        // The error occurs here if the existing JSON file does not have the field.
-        let config: Config = serde_json::from_str(&config_str)?;
-
-        Ok(config)
+        match serde_json::from_str(&config_str) {
+            Ok(config) => Ok(config),
+            Err(e) => {
+                let backup = config_path.with_extension("json.bak");
+                let _ = fs::copy(&config_path, &backup);
+                eprintln!(
+                    "Warning: invalid config {} ({e}); using defaults. Backup: {}",
+                    config_path.display(),
+                    backup.display()
+                );
+                Ok(Self::default())
+            }
+        }
     }
 
     /// Save the current configuration to the standard config file location.
     ///
-    /// Creates the config directory if it doesn't exist.
+    /// The write is atomic and, on Unix, the file is only readable by the owner
+    /// (it may contain proxy credentials).
     ///
     /// # Errors
     ///
     /// Returns an error if the config file cannot be written.
     pub fn save(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let config_path = Self::get_config_path()?;
-
-        // Create config directory if it doesn't exist
-        if let Some(parent) = config_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
+        let config_path = Self::path()?;
         let config_str = serde_json::to_string_pretty(self)?;
-        fs::write(config_path, config_str)?;
-
+        write_atomic(&config_path, config_str.as_bytes(), true)?;
         Ok(())
     }
 
-    fn get_config_path() -> Result<PathBuf, io::Error> {
-        let mut path = config_dir().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotFound, "Not able to find config directory")
-        })?;
-
-        path.push("kget");
-        path.push("config.json");
-
-        Ok(path)
-    }
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            proxy: ProxyConfig {
-                enabled: false,
-                url: None,
-                username: None,
-                password: None,
-                proxy_type: ProxyType::Http,
-            },
-            optimization: OptimizationConfig {
-                compression: true,
-                compression_level: 6,
-                cache_enabled: true,
-                cache_dir: "~/.cache/kget".to_string(),
-                speed_limit: None,
-                max_connections: 4,
-            },
-            torrent: TorrentConfig {
-                enabled: false,
-                download_dir: None,
-                max_peers: 50,
-                max_seeds: 25,
-                port: None,
-                dht_enabled: true,
-                max_peer_connections: default_torrent_max_peer_connections(),
-                max_upload_slots: default_torrent_max_upload_slots(),
-            },
-            ftp: FtpConfig {
-                passive_mode: true,
-                default_port: 21,
-            },
-            sftp: SftpConfig {
-                default_port: 22,
-                key_path: None,
-            },
-        }
+    /// Full path of `config.json` (see [`config_dir`]).
+    pub fn path() -> Result<PathBuf, io::Error> {
+        Ok(config_dir()?.join("config.json"))
     }
 }

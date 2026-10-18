@@ -12,13 +12,13 @@ verification.
 
 ```toml
 [dependencies]
-Kget = "1.7.0"
+Kget = "1.7.1"
 
 # Optional: built-in torrent client
-Kget = { version = "1.7.0", features = ["torrent-native"] }
+Kget = { version = "1.7.1", features = ["torrent-native"] }
 
 # Optional: async API
-Kget = { version = "1.7.0", features = ["async"] }
+Kget = { version = "1.7.1", features = ["async"] }
 ```
 
 Inside this repository, examples can use:
@@ -202,8 +202,9 @@ kget::builder("https://example.com/file.zip")
 # Ok::<(), kget::KgetError>(())
 ```
 
-Default: 3 attempts, exponential backoff starting at 500 ms, retries 5xx and
-connection errors only. 4xx responses fail immediately.
+Default: 3 attempts, exponential backoff starting at 500 ms, retries the
+statuses in `retry_on_status` (408, 429, 5xx) and connection errors. Other HTTP
+errors (404, 403, …) fail immediately. Later attempts continue the partial file.
 
 ## ResumePolicy
 
@@ -379,21 +380,25 @@ Auto-detected from URL scheme — `kget::is_webdav_url(url)` is re-exported from
 ## yt-dlp Integration
 
 ```rust,no_run
-use kget::ytdlp::{download_video, VideoQuality, is_video_url};
+use kget::ytdlp::{download_video, is_video_url, VideoEvent, VideoQuality};
 
-if is_video_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ") {
-    download_video(
-        "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-        VideoQuality::Quality720p,
-        "./downloads",
-        None,  // optional status callback
-    )?;
+let url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+if is_video_url(url) {
+    let saved = download_video(url, "./downloads", &VideoQuality::P720, |ev| match ev {
+        VideoEvent::Progress(p) => println!("{:.1}% {} ETA {}", p.percent, p.speed, p.eta),
+        VideoEvent::Saved(path) => println!("saved {path}"),
+        VideoEvent::Log(_) => {}
+    })?;
+    println!("final file: {saved}");
 }
 # Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 ```
 
-`VideoQuality` variants: `Best`, `Quality1080p`, `Quality720p`, `Quality480p`,
-`Quality360p`, `Audio`. Requires `yt-dlp` (or `youtube-dl`) installed on PATH.
+`VideoQuality` variants: `Best`, `P1080`, `P720`, `P480`, `P360`, `AudioOnly`
+(`-x --audio-format m4a`), `Custom(format)`; `VideoQuality::parse("720p")`.
+yt-dlp is found via `KGET_YTDLP_PATH`, `ytdlp_path` in `config.json`, `PATH`,
+then `/opt/homebrew/bin`, `/usr/local/bin`, `/opt/local/bin`, `~/.local/bin`.
+Use `download_video_with_cancel` to stop it with an `AtomicBool`.
 
 ## Magnet Links
 
@@ -463,24 +468,26 @@ if is_metalink("release.meta4") {
 ```rust,no_run
 use kget::queue::{DownloadHistory, EntryStatus, HistoryEntry};
 
-let mut history = DownloadHistory::load();
-
 let entry = HistoryEntry::new(
     "https://example.com/file.iso",
     "/home/user/Downloads",
     Some("expected_sha256_hex"),
 );
-history.record(entry, EntryStatus::Completed, None);
-history.save()?;
+// Atomic and safe with several kget processes writing at once
+DownloadHistory::append(entry, EntryStatus::Completed, None)?;
 
-for e in history.recent(10) {
+for e in DownloadHistory::load().recent(10) {
     println!("{} {} {}", e.created_at_display(), e.status, e.filename);
 }
 
-history.clear_completed();
-history.save()?;
+// Read-modify-write under the history lock
+DownloadHistory::update(|entries| entries.retain(|e| e.status == EntryStatus::Failed))?;
 # Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 ```
+
+User names and passwords are stripped from stored URLs, the file keeps the last
+1000 entries, and a corrupt file is moved to `history.json.corrupt`.
+Set `KGET_CONFIG_DIR` to store `config.json` and `history.json` elsewhere.
 
 History is stored at:
 - macOS: `~/Library/Application Support/kget/history.json`
@@ -506,13 +513,50 @@ async fn main() -> Result<(), kget::KgetError> {
 Both `.download_async()` and `.download_all_async()` use
 `tokio::task::spawn_blocking` internally and never block the executor.
 
+## Resume, overwrite and cancellation (1.7.1)
+
+Downloads are written to `<file>.part` and renamed only when complete (and
+verified). Turbo downloads also keep a `<file>.kget` state and resume
+automatically when the remote file is unchanged; simple downloads resume with
+`resume: true`.
+
+```rust,no_run
+use kget::{download_to_path, DownloadOptions, Optimizer, OverwritePolicy, ProxyConfig};
+use std::sync::{Arc, atomic::AtomicBool};
+
+let cancel = Arc::new(AtomicBool::new(false));
+let options = DownloadOptions {
+    output_path: Some("./downloads/".to_string()),
+    resume: true,                         // continue ./downloads/<name>.part
+    overwrite: OverwritePolicy::Skip,     // like --no-clobber
+    retries: 5,
+    timeout_secs: 30,
+    cancel: Some(cancel.clone()),         // set to true from another thread
+    progress_callback: Some(Arc::new(|bytes, total| {
+        println!("{bytes} / {total:?}");
+    })),
+    ..Default::default()
+};
+let saved = download_to_path("https://example.com/file.zip",
+    ProxyConfig::default(), Optimizer::new(), options, None)?;
+println!("saved to {}", saved.display());
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+```
+
+HTTP errors are returned as boxed `KgetError::Http { status, url }` /
+`KgetError::NotFound`, so `KgetError::from(err)` lets you match them.
+`kget::protocol::detect(url)` tells which downloader a URL needs, and
+`kget::JsonEvent` is the serializable type behind `kget --jsonl`.
+
 ## Library Guarantees
 
-- Library calls never prompt through `stdin` when `ResumePolicy` is set.
+- Library calls never prompt through `stdin` when `ResumePolicy` is set (and never without a terminal).
 - Progress and status are exposed through callbacks and event channels.
 - Files are streamed to disk instead of loaded fully into memory (except `.download_to_bytes()`).
-- Output filenames are validated: rejects null bytes, path traversal, >255-byte names, and Windows reserved device names.
+- User-given output names are validated (no separators, null bytes, `.`/`..`, Windows reserved names); server-given names are sanitized.
+- Downloaded bytes are never transparently decompressed.
+- A partially downloaded file never carries the final name.
 - SHA256 helpers return errors on expected-hash mismatches; never silently accept corrupt files.
-- Only 5xx and connection errors are retried; 4xx fails immediately.
+- Only 408/429/5xx and connection errors are retried (honouring `Retry-After`); other 4xx fail immediately.
 
 See [examples/lib_usage.rs](examples/lib_usage.rs) for a larger cookbook.

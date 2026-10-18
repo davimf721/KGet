@@ -160,8 +160,8 @@ pub struct DownloadItem {
     pub status: DownloadStatus,
     pub progress: f32,
     pub speed: String,
-    pub speed_raw: f32,           // bytes/s, 0 if unknown
-    pub speed_history: Vec<f32>,  // last 30 speed readings in bytes/s
+    pub speed_raw: f32,          // bytes/s, 0 if unknown
+    pub speed_history: Vec<f32>, // last 30 speed readings in bytes/s
     pub eta: String,
     pub total_size: String,
     pub is_advanced: bool,
@@ -193,7 +193,7 @@ impl DownloadItem {
                 .unwrap_or_else(|| "Torrent Download".to_string())
         } else {
             url.split('/')
-                .last()
+                .next_back()
                 .unwrap_or("download")
                 .split('?')
                 .next()
@@ -241,7 +241,6 @@ pub struct KGetGui {
 
     // Downloads
     downloads: Vec<DownloadItem>,
-    active_download_id: Option<u64>,
     next_download_id: u64,
 
     // UI state
@@ -319,7 +318,6 @@ impl KGetGui {
             expected_sha256: String::new(),
             filter: DownloadFilter::All,
             downloads: Vec::new(),
-            active_download_id: None,
             next_download_id: 1,
             status_text: "Ready".into(),
             validation_error: None,
@@ -344,66 +342,92 @@ impl KGetGui {
 
     fn process_status_updates(&mut self) {
         while let Ok(msg) = self.status_rx.try_recv() {
-            if let Some(id) = self.active_download_id {
-                if let Some(download) = self.downloads.iter_mut().find(|d| d.id == id) {
-                    match msg {
-                        WorkerToGuiMessage::Progress(p) => {
-                            if p > download.progress {
-                                download.progress = p;
-                            }
-                            download.status = DownloadStatus::Downloading;
-                            if let Some(start) = download.start_time {
-                                let elapsed = start.elapsed().as_secs_f32();
-                                if elapsed > 0.5 && p > 0.0 && p < 1.0 {
-                                    let speed = p / elapsed;
-                                    if speed > 0.0 {
-                                        download.eta = Self::format_time((1.0 - p) / speed);
-                                    }
-                                }
-                            }
-                            self.status_text = format!("Downloading: {:.1}%", p * 100.0);
-                        }
-                        WorkerToGuiMessage::StatusUpdate(s) => {
-                            self.status_text = s.clone();
-                            if s.contains("Verifying")
-                                || s.contains("SHA256")
-                                || s.contains("Calculating")
-                            {
-                                download.status = DownloadStatus::Verifying;
-                            }
-                            if let Some(speed_str) = Self::extract_speed(&s) {
-                                download.speed = speed_str.clone();
-                                // Track raw speed for sparkline (push up to 30 samples)
-                                if let Some(bps) = Self::speed_str_to_bps(&speed_str) {
-                                    download.speed_raw = bps;
-                                    download.speed_history.push(bps);
-                                    if download.speed_history.len() > 30 {
-                                        download.speed_history.remove(0);
-                                    }
-                                }
-                            }
-                            if let Some(size_str) = Self::extract_size(&s) {
-                                download.total_size = size_str;
-                            }
-                        }
-                        WorkerToGuiMessage::Completed(s_msg) => {
-                            download.status = DownloadStatus::Completed;
-                            download.progress = 1.0;
-                            self.status_text = "Download completed!".into();
-                            self.active_download_id = None;
-                            Self::send_native_notification("KGet", &download.filename);
-                            if s_msg.contains("SHA256") {
-                                download.sha256 = Some(s_msg.clone());
-                            }
-                        }
-                        WorkerToGuiMessage::Error(err_msg) => {
-                            download.status = DownloadStatus::Failed;
-                            download.error = Some(err_msg.clone());
-                            self.status_text = format!("Error: {err_msg}");
-                            self.active_download_id = None;
-                            Self::send_native_notification("KGet — Download Failed", &err_msg);
+            let id = msg.id();
+            let Some(download) = self.downloads.iter_mut().find(|d| d.id == id) else {
+                continue;
+            };
+            match msg {
+                WorkerToGuiMessage::Progress {
+                    fraction,
+                    total,
+                    speed_bps,
+                    eta_secs,
+                    ..
+                } => {
+                    if fraction > download.progress {
+                        download.progress = fraction;
+                    }
+                    if download.status != DownloadStatus::Verifying {
+                        download.status = DownloadStatus::Downloading;
+                    }
+                    if let Some(t) = total {
+                        download.total_size = format_bytes(t);
+                    }
+                    if speed_bps > 0 {
+                        download.speed = format!("{}/s", format_bytes(speed_bps));
+                        download.speed_raw = speed_bps as f32;
+                        download.speed_history.push(speed_bps as f32);
+                        if download.speed_history.len() > 30 {
+                            download.speed_history.remove(0);
                         }
                     }
+                    if let Some(eta) = eta_secs {
+                        download.eta = Self::format_time(eta as f32);
+                    } else if let Some(start) = download.start_time {
+                        let elapsed = start.elapsed().as_secs_f32();
+                        if elapsed > 0.5 && fraction > 0.0 && fraction < 1.0 {
+                            download.eta =
+                                Self::format_time((1.0 - fraction) / (fraction / elapsed));
+                        }
+                    }
+                    self.status_text = format!("Downloading: {:.1}%", fraction * 100.0);
+                }
+                WorkerToGuiMessage::StatusUpdate { text, .. } => {
+                    if text.contains("Verifying")
+                        || text.contains("SHA256")
+                        || text.contains("Calculating")
+                    {
+                        download.status = DownloadStatus::Verifying;
+                    }
+                    if let Some(hash) = text.strip_prefix("SHA256: ") {
+                        download.sha256 = Some(hash.trim().to_string());
+                    }
+                    if let Some(speed_str) = Self::extract_speed(&text) {
+                        download.speed = speed_str.clone();
+                        if let Some(bps) = Self::speed_str_to_bps(&speed_str) {
+                            download.speed_raw = bps;
+                            download.speed_history.push(bps);
+                            if download.speed_history.len() > 30 {
+                                download.speed_history.remove(0);
+                            }
+                        }
+                    }
+                    if let Some(size_str) = Self::extract_size(&text) {
+                        download.total_size = size_str;
+                    }
+                    self.status_text = text;
+                }
+                WorkerToGuiMessage::Completed { path, .. } => {
+                    download.status = DownloadStatus::Completed;
+                    download.progress = 1.0;
+                    if !path.is_empty() {
+                        download.output_path = path;
+                    }
+                    self.status_text = "Download completed!".into();
+                    Self::send_native_notification("KGet", &download.filename);
+                    self.history_loaded = false;
+                }
+                WorkerToGuiMessage::Error { message, .. } => {
+                    download.status = DownloadStatus::Failed;
+                    download.error = Some(message.clone());
+                    self.status_text = format!("Error: {message}");
+                    Self::send_native_notification("KGet — Download Failed", &message);
+                    self.history_loaded = false;
+                }
+                WorkerToGuiMessage::Cancelled { .. } => {
+                    download.status = DownloadStatus::Cancelled;
+                    self.status_text = "Download cancelled".into();
+                    self.history_loaded = false;
                 }
             }
         }
@@ -447,10 +471,9 @@ impl KGetGui {
     /// Convert a human-readable speed string (e.g. "1.5 MB/s") to bytes/s.
     fn speed_str_to_bps(s: &str) -> Option<f32> {
         let s = s.trim();
-        let (num_str, unit) = if let Some(idx) = s.find(|c: char| c.is_alphabetic()) {
+        let (num_str, unit) = {
+            let idx = s.find(|c: char| c.is_alphabetic())?;
             (&s[..idx], s[idx..].trim())
-        } else {
-            return None;
         };
         let num: f32 = num_str.trim().parse().ok()?;
         let multiplier = match unit {
@@ -498,21 +521,21 @@ impl KGetGui {
         }
         self.last_clipboard_check = Instant::now();
 
-        if let Ok(mut cb) = arboard::Clipboard::new() {
-            if let Ok(text) = cb.get_text() {
-                let text = text.trim().to_string();
-                if text == self.last_clipboard_text {
-                    return;
-                }
-                self.last_clipboard_text = text.clone();
+        if let Ok(mut cb) = arboard::Clipboard::new()
+            && let Ok(text) = cb.get_text()
+        {
+            let text = text.trim().to_string();
+            if text == self.last_clipboard_text {
+                return;
+            }
+            self.last_clipboard_text = text.clone();
 
-                // Check if it looks like a downloadable URL.
-                if Self::is_downloadable_url(&text) {
-                    // Don't show banner if URL is already in the list.
-                    let already_queued = self.downloads.iter().any(|d| d.url == text);
-                    if !already_queued {
-                        self.clipboard_banner = Some(text);
-                    }
+            // Check if it looks like a downloadable URL.
+            if Self::is_downloadable_url(&text) {
+                // Don't show banner if URL is already in the list.
+                let already_queued = self.downloads.iter().any(|d| d.url == text);
+                if !already_queued {
+                    self.clipboard_banner = Some(text);
                 }
             }
         }
@@ -544,11 +567,10 @@ impl KGetGui {
             || url_lower.starts_with("sftp://")
             || url_lower.starts_with("webdav://")
             || url_lower.starts_with("webdavs://")
-            || url_lower.starts_with("magnet:?");
+            || url_lower.starts_with("magnet:?")
+            || url_lower.ends_with(".torrent");
         if !supported {
-            return Err(
-                "Supported: http://, https://, ftp://, sftp://, webdav://, magnet:".into(),
-            );
+            return Err("Supported: http://, https://, ftp://, sftp://, webdav://, magnet:".into());
         }
         if self.output_path.is_empty() {
             return Err("Select a destination folder".into());
@@ -610,7 +632,11 @@ impl KGetGui {
         match self.validate_input() {
             Ok(()) => {
                 self.validation_error = None;
-                let is_magnet = self.url.to_lowercase().starts_with("magnet:?");
+                // Torrents, Metalink and videos save into the folder itself.
+                let is_magnet = matches!(
+                    kget::protocol::detect(&self.url),
+                    kget::Protocol::Torrent | kget::Protocol::Metalink
+                );
                 let expected_sha256 = self.expected_sha256.trim().to_string();
                 let expected_sha256 = if expected_sha256.is_empty() {
                     None
@@ -638,10 +664,10 @@ impl KGetGui {
                 self.downloads.insert(0, download);
                 self.downloads[0].status = DownloadStatus::Downloading;
                 self.downloads[0].start_time = Some(Instant::now());
-                self.active_download_id = Some(id);
                 self.next_download_id += 1;
                 self.download_tx
                     .send(DownloadCommand::Start {
+                        id,
                         url: self.url.clone(),
                         output_path: final_output_path,
                         is_advanced: self.is_advanced,
@@ -663,11 +689,10 @@ impl KGetGui {
 
     fn cancel_download(&mut self, id: u64) {
         if let Some(download) = self.downloads.iter_mut().find(|d| d.id == id) {
-            download.status = DownloadStatus::Cancelled;
-            if self.active_download_id == Some(id) {
-                self.download_tx.send(DownloadCommand::Cancel).ok();
-                self.active_download_id = None;
+            if download.status.is_active() {
+                self.download_tx.send(DownloadCommand::Cancel { id }).ok();
             }
+            download.status = DownloadStatus::Cancelled;
         }
     }
 
@@ -698,11 +723,11 @@ impl KGetGui {
             self.downloads.insert(0, new_download);
             self.downloads[0].status = DownloadStatus::Downloading;
             self.downloads[0].start_time = Some(Instant::now());
-            self.active_download_id = Some(new_id);
             self.next_download_id += 1;
             self.remove_download(id);
             self.download_tx
                 .send(DownloadCommand::Start {
+                    id: new_id,
                     url: download.url,
                     output_path: download.output_path,
                     is_advanced: download.is_advanced,
@@ -781,12 +806,12 @@ impl KGetGui {
         visuals.widgets.active.bg_fill = c.accent;
         visuals.selection.bg_fill =
             egui::Color32::from_rgba_unmultiplied(c.accent.r(), c.accent.g(), c.accent.b(), 50);
-        visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(0.5, c.border);
-        visuals.widgets.inactive.bg_stroke = egui::Stroke::new(0.5, c.border);
-        visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, c.text_secondary);
-        visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, c.text_secondary);
-        visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, c.text_primary);
-        visuals.window_stroke = egui::Stroke::new(0.5, c.border);
+        visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(0.5_f32, c.border);
+        visuals.widgets.inactive.bg_stroke = egui::Stroke::new(0.5_f32, c.border);
+        visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0_f32, c.text_secondary);
+        visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0_f32, c.text_secondary);
+        visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0_f32, c.text_primary);
+        visuals.window_stroke = egui::Stroke::new(0.5_f32, c.border);
         ctx.set_visuals(visuals);
     }
 
@@ -831,7 +856,11 @@ impl KGetGui {
                 painter.rect_filled(accent_bar, 1.5, c.accent);
             }
 
-            let text_color = if is_selected { c.accent } else { c.text_secondary };
+            let text_color = if is_selected {
+                c.accent
+            } else {
+                c.text_secondary
+            };
             painter.text(
                 egui::pos2(rect.min.x + 18.0, rect.center().y),
                 egui::Align2::LEFT_CENTER,
@@ -841,14 +870,22 @@ impl KGetGui {
             );
 
             if count > 0 {
-                let badge_str = if count > 99 { "99+".to_string() } else { count.to_string() };
+                let badge_str = if count > 99 {
+                    "99+".to_string()
+                } else {
+                    count.to_string()
+                };
                 let badge_w = (badge_str.len() as f32 * 7.5 + 10.0).max(20.0);
                 let badge_rect = egui::Rect::from_center_size(
                     egui::pos2(rect.max.x - badge_w / 2.0 - 10.0, rect.center().y),
                     egui::vec2(badge_w, 15.0),
                 );
                 let badge_bg = if is_selected { c.accent } else { c.border };
-                let badge_fg = if is_selected { egui::Color32::WHITE } else { c.text_muted };
+                let badge_fg = if is_selected {
+                    egui::Color32::WHITE
+                } else {
+                    c.text_muted
+                };
                 painter.rect_filled(badge_rect, badge_rect.height() / 2.0, badge_bg);
                 painter.text(
                     badge_rect.center(),
@@ -903,8 +940,7 @@ impl KGetGui {
         ];
         for filter in filters {
             let count = self.count_for_filter(filter);
-            let is_selected =
-                self.sidebar_tab == SidebarTab::Downloads && self.filter == filter;
+            let is_selected = self.sidebar_tab == SidebarTab::Downloads && self.filter == filter;
             if Self::render_sidebar_item(ui, filter.label(), count, is_selected, c) {
                 self.filter = filter;
                 self.sidebar_tab = SidebarTab::Downloads;
@@ -932,7 +968,8 @@ impl KGetGui {
             if !self.history_loaded {
                 let h = DownloadHistory::load();
                 self.history_entries = h.entries().to_vec();
-                self.history_entries.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+                self.history_entries
+                    .sort_by_key(|e| std::cmp::Reverse(e.created_at));
                 self.history_loaded = true;
             }
         }
@@ -952,7 +989,11 @@ impl KGetGui {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.add_space(14.0);
-                let icon = if self.dark_mode { "☀ Light" } else { "☾ Dark" };
+                let icon = if self.dark_mode {
+                    "☀ Light"
+                } else {
+                    "☾ Dark"
+                };
                 if ui
                     .small_button(egui::RichText::new(icon).color(c.text_muted))
                     .clicked()
@@ -984,13 +1025,16 @@ impl KGetGui {
             .fill(c.card)
             .corner_radius(10.0)
             .inner_margin(egui::Margin::symmetric(14, 10))
-            .stroke(egui::Stroke::new(0.5, c.accent))
+            .stroke(egui::Stroke::new(0.5_f32, c.accent))
             .shadow(egui::epaint::Shadow {
                 offset: [0, 2],
                 blur: 8,
                 spread: 0,
                 color: egui::Color32::from_rgba_unmultiplied(
-                    c.accent.r(), c.accent.g(), c.accent.b(), 30,
+                    c.accent.r(),
+                    c.accent.g(),
+                    c.accent.b(),
+                    30,
                 ),
             })
             .show(ui, |ui| {
@@ -1013,7 +1057,9 @@ impl KGetGui {
                         }
                         ui.add_space(4.0);
                         let dl_btn = egui::Button::new(
-                            egui::RichText::new("Download").color(egui::Color32::WHITE).size(12.0),
+                            egui::RichText::new("Download")
+                                .color(egui::Color32::WHITE)
+                                .size(12.0),
                         )
                         .fill(c.accent)
                         .min_size(egui::vec2(80.0, 22.0));
@@ -1025,7 +1071,11 @@ impl KGetGui {
                     });
                 });
                 ui.add_space(2.0);
-                ui.label(egui::RichText::new(&truncated).size(11.0).color(c.text_muted));
+                ui.label(
+                    egui::RichText::new(&truncated)
+                        .size(11.0)
+                        .color(c.text_muted),
+                );
             });
 
         ui.add_space(8.0);
@@ -1042,7 +1092,7 @@ impl KGetGui {
             .fill(c.card)
             .corner_radius(12.0)
             .inner_margin(egui::Margin::same(14))
-            .stroke(egui::Stroke::new(0.5, c.border))
+            .stroke(egui::Stroke::new(0.5_f32, c.border))
             .shadow(egui::epaint::Shadow {
                 offset: [0, 1],
                 blur: 4,
@@ -1072,13 +1122,11 @@ impl KGetGui {
                         .button("Paste")
                         .on_hover_text("Paste from clipboard")
                         .clicked()
+                        && let Ok(mut cb) = arboard::Clipboard::new()
+                        && let Ok(text) = cb.get_text()
                     {
-                        if let Ok(mut cb) = arboard::Clipboard::new() {
-                            if let Ok(text) = cb.get_text() {
-                                self.url = text.trim().to_string();
-                                self.clipboard_banner = None;
-                            }
-                        }
+                        self.url = text.trim().to_string();
+                        self.clipboard_banner = None;
                     }
 
                     let dl_btn = egui::Button::new(
@@ -1099,7 +1147,9 @@ impl KGetGui {
                 // Options row
                 ui.horizontal(|ui| {
                     ui.label(
-                        egui::RichText::new("Save to").size(12.0).color(c.text_muted),
+                        egui::RichText::new("Save to")
+                            .size(12.0)
+                            .color(c.text_muted),
                     );
                     let display = Self::truncate_path(&self.output_path, 36);
                     if ui
@@ -1121,14 +1171,22 @@ impl KGetGui {
                     ui.separator();
                     ui.add_space(6.0);
 
-                    let turbo_color = if self.is_advanced { c.warning } else { c.text_muted };
+                    let turbo_color = if self.is_advanced {
+                        c.warning
+                    } else {
+                        c.text_muted
+                    };
                     ui.checkbox(&mut self.is_advanced, "");
                     ui.label(egui::RichText::new("Turbo").size(12.0).color(turbo_color))
                         .on_hover_text("Multi-connection parallel download");
 
                     ui.add_space(6.0);
 
-                    let verify_color = if self.verify_iso { c.purple } else { c.text_muted };
+                    let verify_color = if self.verify_iso {
+                        c.purple
+                    } else {
+                        c.text_muted
+                    };
                     ui.checkbox(&mut self.verify_iso, "");
                     ui.label(egui::RichText::new("Verify").size(12.0).color(verify_color))
                         .on_hover_text("Calculate SHA256 checksum");
@@ -1170,8 +1228,10 @@ impl KGetGui {
         animation_phase: f32,
     ) {
         let height = 3.0;
-        let (rect, _) =
-            ui.allocate_exact_size(egui::vec2(ui.available_width(), height), egui::Sense::hover());
+        let (rect, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), height),
+            egui::Sense::hover(),
+        );
         let painter = ui.painter_at(rect);
 
         // Track
@@ -1240,10 +1300,7 @@ impl KGetGui {
             .collect();
 
         for w in points.windows(2) {
-            painter.line_segment(
-                [w[0], w[1]],
-                egui::Stroke::new(1.5, color),
-            );
+            painter.line_segment([w[0], w[1]], egui::Stroke::new(1.5_f32, color));
         }
 
         // Gradient fill under the line (translucent)
@@ -1251,7 +1308,11 @@ impl KGetGui {
         let mut fill_pts = points.clone();
         fill_pts.push(egui::pos2(rect.max.x, rect.max.y));
         fill_pts.push(egui::pos2(rect.min.x, rect.max.y));
-        painter.add(egui::Shape::convex_polygon(fill_pts, fill_color, egui::Stroke::NONE));
+        painter.add(egui::Shape::convex_polygon(
+            fill_pts,
+            fill_color,
+            egui::Stroke::NONE,
+        ));
     }
 
     fn render_type_badge(ui: &mut egui::Ui, label: &str, color: egui::Color32) {
@@ -1283,7 +1344,7 @@ impl KGetGui {
             .fill(c.card)
             .corner_radius(10.0)
             .inner_margin(egui::Margin::same(14))
-            .stroke(egui::Stroke::new(0.5, c.border))
+            .stroke(egui::Stroke::new(0.5_f32, c.border))
             .shadow(egui::epaint::Shadow {
                 offset: [0, 1],
                 blur: 6,
@@ -1389,7 +1450,9 @@ impl KGetGui {
                     download.url.clone()
                 };
                 ui.label(
-                    egui::RichText::new(&url_display).size(11.0).color(c.text_muted),
+                    egui::RichText::new(&url_display)
+                        .size(11.0)
+                        .color(c.text_muted),
                 );
 
                 // Active: progress bar + stats + sparkline
@@ -1525,7 +1588,8 @@ impl KGetGui {
                 if ui.small_button("Reload").clicked() {
                     let h = DownloadHistory::load();
                     self.history_entries = h.entries().to_vec();
-                    self.history_entries.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+                    self.history_entries
+                        .sort_by_key(|e| std::cmp::Reverse(e.created_at));
                 }
             });
         });
@@ -1534,7 +1598,11 @@ impl KGetGui {
         if self.history_entries.is_empty() {
             ui.vertical_centered(|ui| {
                 ui.add_space(60.0);
-                ui.label(egui::RichText::new("No history yet").size(16.0).color(c.text_muted));
+                ui.label(
+                    egui::RichText::new("No history yet")
+                        .size(16.0)
+                        .color(c.text_muted),
+                );
                 ui.add_space(6.0);
                 ui.label(
                     egui::RichText::new("Completed downloads will appear here")
@@ -1556,13 +1624,14 @@ impl KGetGui {
                         kget::queue::EntryStatus::Completed => c.success,
                         kget::queue::EntryStatus::Failed => c.error,
                         kget::queue::EntryStatus::Cancelled => c.warning,
+                        kget::queue::EntryStatus::HandedOff => c.text_secondary,
                     };
 
                     egui::Frame::new()
                         .fill(c.card)
                         .corner_radius(10.0)
                         .inner_margin(egui::Margin::same(12))
-                        .stroke(egui::Stroke::new(0.5, c.border))
+                        .stroke(egui::Stroke::new(0.5_f32, c.border))
                         .shadow(egui::epaint::Shadow {
                             offset: [0, 1],
                             blur: 4,
@@ -1585,8 +1654,7 @@ impl KGetGui {
                                 );
 
                                 // Filename
-                                let max_chars =
-                                    ((item_width - 280.0) / 7.5).max(20.0) as usize;
+                                let max_chars = ((item_width - 280.0) / 7.5).max(20.0) as usize;
                                 let display_name = if entry.filename.len() > max_chars {
                                     format!("{}…", &entry.filename[..max_chars])
                                 } else {
@@ -1648,11 +1716,9 @@ impl KGetGui {
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
                                         ui.label(
-                                            egui::RichText::new(
-                                                entry.created_at_display(),
-                                            )
-                                            .size(10.0)
-                                            .color(c.text_muted),
+                                            egui::RichText::new(entry.created_at_display())
+                                                .size(10.0)
+                                                .color(c.text_muted),
                                         );
                                         if let Some(bytes) = entry.bytes_total {
                                             ui.label(
@@ -1706,7 +1772,11 @@ impl KGetGui {
                 ui.add(
                     egui::Image::new(texture)
                         .fit_to_exact_size(egui::vec2(64.0, 64.0))
-                        .tint(egui::Color32::from_white_alpha(if c.is_dark { 55 } else { 100 })),
+                        .tint(egui::Color32::from_white_alpha(if c.is_dark {
+                            55
+                        } else {
+                            100
+                        })),
                 );
             } else {
                 ui.label(egui::RichText::new("↓").size(48.0).color(c.text_muted));
@@ -1756,9 +1826,7 @@ impl KGetGui {
                                         .color(c.text_muted)
                                         .strong(),
                                 );
-                                ui.label(
-                                    egui::RichText::new(label).size(9.0).color(c.text_muted),
-                                );
+                                ui.label(egui::RichText::new(label).size(9.0).color(c.text_muted));
                             });
                         });
                     ui.add_space(6.0);
@@ -1777,14 +1845,14 @@ impl KGetGui {
         painter.rect_filled(
             rect,
             12.0,
-            egui::Color32::from_rgba_unmultiplied(
-                c.accent.r(),
-                c.accent.g(),
-                c.accent.b(),
-                35,
-            ),
+            egui::Color32::from_rgba_unmultiplied(c.accent.r(), c.accent.g(), c.accent.b(), 35),
         );
-        painter.rect_stroke(rect.shrink(4.0), 12.0, egui::Stroke::new(2.0, c.accent), egui::StrokeKind::Middle);
+        painter.rect_stroke(
+            rect.shrink(4.0),
+            12.0,
+            egui::Stroke::new(2.0_f32, c.accent),
+            egui::StrokeKind::Middle,
+        );
         painter.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
@@ -1799,7 +1867,11 @@ impl KGetGui {
     // ========================================================================
 
     fn render_status_bar(&self, ui: &mut egui::Ui, c: &Colors) {
-        let active = self.downloads.iter().filter(|d| d.status.is_active()).count();
+        let active = self
+            .downloads
+            .iter()
+            .filter(|d| d.status.is_active())
+            .count();
         let completed = self
             .downloads
             .iter()
@@ -1817,7 +1889,11 @@ impl KGetGui {
         ui.label(
             egui::RichText::new(format!("{completed} completed"))
                 .size(11.0)
-                .color(if completed > 0 { c.success } else { c.text_muted }),
+                .color(if completed > 0 {
+                    c.success
+                } else {
+                    c.text_muted
+                }),
         );
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1869,25 +1945,24 @@ impl eframe::App for KGetGui {
         ctx.input(|i| {
             for file in &i.raw.dropped_files {
                 // Try bytes (URL dragged from browser)
-                if let Some(ref bytes) = file.bytes {
-                    if let Ok(text) = std::str::from_utf8(bytes) {
-                        let text = text.trim().to_string();
-                        if Self::is_downloadable_url(&text) {
-                            self.url = text;
-                        }
+                if let Some(ref bytes) = file.bytes
+                    && let Ok(text) = std::str::from_utf8(bytes)
+                {
+                    let text = text.trim().to_string();
+                    if Self::is_downloadable_url(&text) {
+                        self.url = text;
                     }
                 }
                 // Try file path (e.g. .webloc / .url shortcut files)
-                if self.url.is_empty() {
-                    if let Some(ref path) = file.path {
-                        if let Ok(content) = std::fs::read_to_string(path) {
-                            for line in content.lines() {
-                                let line = line.trim();
-                                if Self::is_downloadable_url(line) {
-                                    self.url = line.to_string();
-                                    break;
-                                }
-                            }
+                if self.url.is_empty()
+                    && let Some(ref path) = file.path
+                    && let Ok(content) = std::fs::read_to_string(path)
+                {
+                    for line in content.lines() {
+                        let line = line.trim();
+                        if Self::is_downloadable_url(line) {
+                            self.url = line.to_string();
+                            break;
                         }
                     }
                 }
@@ -1901,7 +1976,7 @@ impl eframe::App for KGetGui {
                 egui::Frame::new()
                     .fill(c.card)
                     .inner_margin(egui::Margin::symmetric(16, 7))
-                    .stroke(egui::Stroke::new(0.5, c.border)),
+                    .stroke(egui::Stroke::new(0.5_f32, c.border)),
             )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
@@ -1911,10 +1986,9 @@ impl eframe::App for KGetGui {
                             .downloads
                             .iter()
                             .any(|d| d.status == DownloadStatus::Completed)
+                            && ui.small_button("Clear Completed").clicked()
                         {
-                            if ui.small_button("Clear Completed").clicked() {
-                                self.clear_completed();
-                            }
+                            self.clear_completed();
                         }
                     });
                 });
@@ -1927,7 +2001,7 @@ impl eframe::App for KGetGui {
             .frame(
                 egui::Frame::new()
                     .fill(c.sidebar_bg)
-                    .stroke(egui::Stroke::new(0.5, c.border)),
+                    .stroke(egui::Stroke::new(0.5_f32, c.border)),
             )
             .show(ctx, |ui| {
                 self.render_sidebar(ui, &c);
@@ -1974,9 +2048,7 @@ impl eframe::App for KGetGui {
                                 let mut actions: Vec<(u64, &str)> = Vec::new();
 
                                 for download in &filtered {
-                                    if let Some(act) =
-                                        self.render_download_card(ui, download, &c)
-                                    {
+                                    if let Some(act) = self.render_download_card(ui, download, &c) {
                                         actions.push(act);
                                     }
                                     ui.add_space(8.0);
@@ -2010,10 +2082,9 @@ impl eframe::App for KGetGui {
                                         "copy_sha" => {
                                             if let Some(d) =
                                                 self.downloads.iter().find(|d| d.id == id)
+                                                && let Some(sha) = d.sha256.clone()
                                             {
-                                                if let Some(sha) = d.sha256.clone() {
-                                                    Self::copy_to_clipboard(&sha);
-                                                }
+                                                Self::copy_to_clipboard(&sha);
                                             }
                                         }
                                         "retry" => self.retry_download(id),

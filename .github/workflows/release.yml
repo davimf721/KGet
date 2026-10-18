@@ -1,0 +1,301 @@
+name: Release
+
+# Builds KGet for Linux, macOS and Windows, creates the GitHub release with
+# all binaries + SHA256SUMS, publishes the crate to crates.io and updates the
+# Homebrew tap (davimf721/homebrew-kget).
+#
+# Trigger it by pushing a tag (git tag v1.7.1 && git push origin v1.7.1) or by
+# running it manually from the Actions tab ("Run workflow"), which creates the
+# tag on the selected commit.
+#
+# Secrets (Settings → Secrets and variables → Actions):
+#   CARGO_REGISTRY_TOKEN  crates.io API token (publish-update scope for "Kget")
+#   HOMEBREW_TAP_TOKEN    fine-grained PAT with "Contents: read & write" on
+#                         davimf721/homebrew-kget
+# Jobs whose secret is missing are skipped with a warning.
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v1.7.1); created on the selected commit if missing"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  prepare:
+    name: Validate version
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.v.outputs.tag }}
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        shell: bash
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${TAG#v}"
+          CRATE_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "$VERSION" != "$CRATE_VERSION" ]; then
+            echo "::error::Tag $TAG does not match Cargo.toml version $CRATE_VERSION"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            cross: false
+            features: torrent-native
+          - name: linux-x64-static
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            cross: true
+            features: ""
+          - name: linux-arm64
+            os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            cross: true
+            features: ""
+          - name: macos-arm64
+            os: macos-latest
+            target: aarch64-apple-darwin
+            cross: false
+            features: torrent-native
+          - name: macos-x64
+            os: macos-latest
+            target: x86_64-apple-darwin
+            cross: false
+            features: torrent-native
+          - name: windows-x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            cross: false
+            features: torrent-native
+    runs-on: ${{ matrix.os }}
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Install cross
+        if: matrix.cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+      - name: Build
+        shell: bash
+        run: |
+          FEATURES=()
+          if [ -n "${{ matrix.features }}" ]; then FEATURES=(--features "${{ matrix.features }}"); fi
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --locked --target ${{ matrix.target }} "${FEATURES[@]}"
+          else
+            cargo build --release --locked --target ${{ matrix.target }} "${FEATURES[@]}"
+          fi
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p dist
+          NAME="kget-${VERSION}-${{ matrix.name }}"
+          BIN="target/${{ matrix.target }}/release/kget"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "${BIN}.exe" "dist/${NAME}.exe"
+            mkdir -p "pkg/${NAME}"
+            cp "${BIN}.exe" "pkg/${NAME}/kget.exe"
+            cp README.md LICENSE CHANGELOG.md "pkg/${NAME}/"
+            (cd pkg && 7z a "../dist/${NAME}.zip" "${NAME}" > /dev/null)
+          else
+            cp "$BIN" "dist/${NAME}"
+            chmod +x "dist/${NAME}"
+            mkdir -p "pkg/${NAME}"
+            cp "$BIN" "pkg/${NAME}/kget"
+            cp README.md LICENSE CHANGELOG.md "pkg/${NAME}/"
+            tar -C pkg -czf "dist/${NAME}.tar.gz" "${NAME}"
+          fi
+          ls -la dist
+      - name: Smoke test
+        if: ${{ !matrix.cross && matrix.target != 'x86_64-apple-darwin' }}
+        shell: bash
+        run: |
+          BIN="target/${{ matrix.target }}/release/kget"
+          "$BIN" --version
+          "$BIN" --doctor
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  macos-dmg:
+    name: macOS app (DMG)
+    needs: prepare
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build native app + DMG
+        run: |
+          chmod +x build-native-macos.sh
+          ./build-native-macos.sh
+          ls -la release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-macos-dmg
+          path: release/*.dmg
+          if-no-files-found: error
+
+  github-release:
+    name: GitHub release
+    needs: [prepare, build, macos-dmg]
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ needs.prepare.outputs.tag }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - name: Checksums and release notes
+        shell: bash
+        run: |
+          cd dist
+          sha256sum * > "SHA256SUMS-${VERSION}.txt"
+          cat "SHA256SUMS-${VERSION}.txt"
+          cd ..
+          # Section of CHANGELOG.md for this version
+          awk -v v="$VERSION" '
+            $0 ~ "^## \\[" v "\\]" { on=1; next }
+            on && /^## \[/ { exit }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          {
+            echo
+            echo "## Install"
+            echo
+            echo '**Homebrew (macOS / Linux):**'
+            echo '```bash'
+            echo 'brew tap davimf721/kget'
+            echo 'brew install kget'
+            echo '```'
+            echo
+            echo '**Rust / crates.io:**'
+            echo '```bash'
+            echo "cargo install Kget --version ${VERSION}"
+            echo '```'
+            echo
+            echo '**Binaries:** download the file for your platform below and check it against `SHA256SUMS-'"${VERSION}"'.txt`.'
+            echo '- macOS app: `KGet-'"${VERSION}"'-macOS-Native.dmg`'
+            echo '- macOS CLI: `kget-'"${VERSION}"'-macos-arm64` (Apple Silicon), `kget-'"${VERSION}"'-macos-x64` (Intel)'
+            echo '- Linux CLI: `kget-'"${VERSION}"'-linux-x64`, `-linux-x64-static` (musl), `-linux-arm64`'
+            echo '- Windows CLI: `kget-'"${VERSION}"'-windows-x64.exe` / `.zip`'
+          } >> notes.md
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          target_commitish: ${{ github.sha }}
+          name: KGet ${{ env.VERSION }}
+          body_path: notes.md
+          files: dist/*
+          fail_on_unmatched_files: true
+
+  crates-io:
+    name: Publish to crates.io
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Publish
+        shell: bash
+        run: |
+          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "::warning::CARGO_REGISTRY_TOKEN is not set; skipping crates.io publish"
+            exit 0
+          fi
+          VERSION="${{ needs.prepare.outputs.version }}"
+          if curl -fsS -A "kget-release (github.com/davimf721/KGet)" \
+              "https://crates.io/api/v1/crates/Kget/${VERSION}" > /dev/null 2>&1; then
+            echo "Kget ${VERSION} is already on crates.io"
+            exit 0
+          fi
+          cargo publish --locked
+
+  homebrew:
+    name: Update Homebrew tap
+    needs: [prepare, github-release]
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ needs.prepare.outputs.tag }}
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Update formula
+        shell: bash
+        run: |
+          URL="https://github.com/davimf721/KGet/archive/refs/tags/${TAG}.tar.gz"
+          for i in 1 2 3 4 5; do
+            if curl -fsSL "$URL" -o source.tar.gz; then break; fi
+            sleep 10
+          done
+          SHA=$(sha256sum source.tar.gz | cut -d' ' -f1)
+          sed -i -E "s|refs/tags/v[0-9]+\.[0-9]+\.[0-9]+\.tar\.gz|refs/tags/${TAG}.tar.gz|" Formula/kget.rb
+          sed -i -E "s/sha256 \"[a-f0-9]{64}\"/sha256 \"${SHA}\"/" Formula/kget.rb
+          grep -E "url|sha256" Formula/kget.rb
+      - name: Push to davimf721/homebrew-kget
+        shell: bash
+        run: |
+          if [ -z "$HOMEBREW_TAP_TOKEN" ]; then
+            echo "::warning::HOMEBREW_TAP_TOKEN is not set; skipping the tap update"
+            exit 0
+          fi
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/davimf721/homebrew-kget.git" tap
+          # Keep the formula where the tap already has it (root level by default)
+          if [ -f tap/Formula/kget.rb ]; then
+            cp Formula/kget.rb tap/Formula/kget.rb
+          else
+            cp Formula/kget.rb tap/kget.rb
+          fi
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Tap already up to date"
+            exit 0
+          fi
+          git commit -m "kget ${TAG#v}"
+          git push origin HEAD
+      - name: Formula with checksum
+        uses: actions/upload-artifact@v4
+        with:
+          name: homebrew-formula
+          path: Formula/kget.rb

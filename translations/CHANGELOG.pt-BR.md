@@ -7,6 +7,56 @@ Todas as mudanças notáveis neste projeto serão documentadas neste arquivo.
 O formato é baseado em [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 e este projeto adere ao [Versionamento Semântico](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.1] - 2026-10-18
+
+### Corrigido
+- **O modo turbo podia gerar arquivos corrompidos em silêncio:** retomar um download paralelo interrompido
+  (incluindo Cancelar → Tentar novamente no app macOS e as novas tentativas automáticas do `kget::builder`)
+  tratava o arquivo pré-alocado como completo, e chunks cortados pelo servidor eram aceitos como completos.
+  Agora os downloads usam `<arquivo>.part` + um estado de retomada `<arquivo>.kget` validado contra o servidor
+  (tamanho, `ETag`, `Last-Modified`); todo chunk precisa estar completo e as novas tentativas continuam do byte exato.
+  O número de conexões não é mais limitado pelo número de núcleos da CPU.
+- **Flags da CLI eram gravadas para sempre no `config.json`** (`--proxy`, `--proxy-pass`, `-l`, `--no-cache`, flags de torrent).
+  Agora valem só para a execução atual; use `--save-config` para gravá-las (a senha do proxy nunca é gravada).
+  Se você usou `-l`/`--proxy` antes, rode `kget --save-config` sem elas ou apague o `config.json`.
+- **Proxy HTTP não cobria downloads HTTPS e SOCKS5 não funcionava;** proxies inválidos eram ignorados em silêncio.
+- **O app macOS não encontrava o yt-dlp instalado pelo Homebrew** quando aberto pelo Dock/Finder.
+- **O app macOS marcava vídeos baixados como "Falhou"** e não mostrava progresso do yt-dlp.
+- O yt-dlp podia travar quando escrevia muitos avisos (stderr nunca era lido); a mensagem de erro dele agora aparece.
+- `--sha256` era ignorado no modo quiet/biblioteca e quando o servidor não suportava Range.
+- O download simples não deixa mais um arquivo truncado com o nome final; corpos menores que o `Content-Length`
+  são retomados com `Range`; HTTP 429/5xx respeitam `Retry-After`.
+- Respostas brotli eram descomprimidas, alterando o arquivo salvo.
+- `cargo test`, `examples/lib_usage.rs` e 10 doctests não compilavam.
+- Rodar a suíte de testes alterava a configuração real do usuário (`KGET_CONFIG_DIR` agora é respeitado).
+- O histórico podia ser apagado ou perder entradas com downloads simultâneos; credenciais nas URLs não são mais gravadas.
+- Um `config.json` antigo ou parcial não impede mais o KGet de iniciar; o arquivo é gravado de forma atômica com permissão `0600`.
+- URLs FTP/SFTP/WebDAV/Metalink/torrent são detectadas pelo esquema; caminhos e credenciais com `%xx` são decodificados;
+  FTP funciona sem `SIZE`, tem timeouts e retomada; SFTP tem timeouts, usa `sftp.key_path`, aceita `/~/` e grava hosts novos no `known_hosts`.
+- Manifestos Metalink 3.x agora são lidos; SHA-512/MD5 e `<size>` são verificados; `~` é expandido.
+- Modo batch: concorrência limitada (`-j`), nomes únicos e todas as flags/protocolos respeitados.
+- O `kget::builder` não repete mais 404/403, e a velocidade média é calculada corretamente.
+- A saída JSONL não é mais misturada com texto e tem limite de frequência.
+- O torrent nativo respeita `--torrent-port`, `--no-dht`, pode ser cancelado e o ETA está correto.
+- Transmission: sem o limite de 30 minutos e sem abrir o navegador sem pedir.
+- GUI egui: downloads simultâneos não compartilham mais progresso nem cancelamento.
+- Modo interativo: `~` é expandido, caminhos com espaço entre aspas funcionam, colar uma URL inicia o download.
+- macOS: a Share Extension não corta mais URLs com `&`; `webdav://` é aceito; o `kget` do Homebrew no Apple Silicon
+  é encontrado; corrida de dados corrigida; saída lida por linha; uma URL concluída pode ser baixada de novo.
+
+### Adicionado
+- `-c/--continue`, `--no-clobber`, `--retries`, `--timeout`, `-j/--jobs`, `--batch -` (stdin), `--save-config`, `--doctor`.
+- `--checksum <alg>:<hex>` e `--checksum-url <url>`; arquivos de checksum só com o hash.
+- `KGET_YTDLP_PATH`, `ytdlp_path` no `config.json` e campo "yt-dlp path" + painel de diagnóstico nas configurações do app macOS.
+- Pausar/Retomar no app macOS.
+- Protocolo JSONL versionado (`"v":1`) para todos os protocolos; o app macOS passou a usá-lo.
+- Arquivos `.torrent` (locais e URLs) com o cliente nativo.
+- CI no GitHub Actions (Linux, macOS, Windows) e workflow de release que gera todos os binários, publica no crates.io e atualiza o tap do Homebrew.
+
+### Removido / Obsoleto
+- Código de cache/compressão não utilizado do `Optimizer` (obsoleto, sem efeito); `--no-cache` oculto.
+- Dependências não usadas removidas; `tokio` só é compilado com as features `async`/torrent.
+
 ## [1.7.0] - 2026-05-24
 
 ### Adicionado

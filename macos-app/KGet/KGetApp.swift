@@ -62,8 +62,8 @@ struct KGetApp: App {
             downloadManager.startDownload(url: url.absoluteString)
         } else if url.scheme == "webdav" || url.scheme == "webdavs" {
             downloadManager.startDownload(url: url.absoluteString)
-        } else if url.isFileURL && url.pathExtension == "torrent" {
-            appDelegate.showTorrentFileWarning()
+        } else if url.isFileURL && url.pathExtension.lowercased() == "torrent" {
+            downloadManager.startDownload(url: url.path)
         } else if url.isFileURL {
             downloadManager.startDownload(url: url.path)
         }
@@ -93,25 +93,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     
     func application(_ application: NSApplication, open urls: [URL]) {
         for url in urls {
-            if url.pathExtension == "torrent" {
-                // .torrent files are not supported yet (only magnet links)
-                showTorrentFileWarning()
+            if url.isFileURL && url.pathExtension.lowercased() == "torrent" {
+                // .torrent files are handled by the native torrent client
+                DownloadManager.shared.startDownload(url: url.path)
             } else if url.scheme == "magnet" {
                 // Use KGet's native torrent client for magnet links
                 DownloadManager.shared.startDownload(url: url.absoluteString)
             }
-        }
-    }
-    
-    /// Shows a warning that .torrent files are not supported (only magnet links)
-    func showTorrentFileWarning() {
-        DispatchQueue.main.async {
-            let alert = NSAlert()
-            alert.messageText = "Torrent Files Not Supported"
-            alert.informativeText = "KGet currently supports magnet links only. Please use the magnet link instead of the .torrent file, or use a dedicated BitTorrent client."
-            alert.alertStyle = .informational
-            alert.addButton(withTitle: "OK")
-            alert.runModal()
         }
     }
     

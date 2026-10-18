@@ -56,7 +56,8 @@ mod utils_tests {
     fn test_get_filename_from_url_encoded() {
         let url = "https://example.com/files/my%20document.pdf";
         let filename = get_filename_from_url_or_default(url, "default.pdf");
-        assert_eq!(filename, "my%20document.pdf");
+        // Percent-encoding is decoded since 1.7.1
+        assert_eq!(filename, "my document.pdf");
     }
 
     #[test]
@@ -94,9 +95,9 @@ mod config_tests {
         assert!(config.proxy.password.is_none());
 
         // Optimization defaults
-        assert!(config.optimization.compression);
-        assert_eq!(config.optimization.compression_level, 6);
-        assert!(config.optimization.cache_enabled);
+        // Cache/compression were removed in 1.7.1 (fields kept for compatibility)
+        assert!(!config.optimization.compression);
+        assert!(!config.optimization.cache_enabled);
         assert_eq!(config.optimization.max_connections, 4);
 
         // Torrent defaults
@@ -119,9 +120,9 @@ mod config_tests {
         let socks5 = ProxyType::Socks5;
 
         // Just verify they can be created and cloned
-        let _http_clone = http.clone();
-        let _https_clone = https.clone();
-        let _socks5_clone = socks5.clone();
+        let _http_clone = http;
+        let _https_clone = https;
+        let _socks5_clone = socks5;
     }
 
     #[test]
@@ -379,6 +380,10 @@ mod download_options_tests {
         assert!(options.output_path.is_none());
         assert!(!options.verify_iso);
         assert!(options.expected_sha256.is_none());
+        assert!(!options.resume);
+        assert_eq!(options.overwrite, kget::OverwritePolicy::Overwrite);
+        assert_eq!(options.retries, 3);
+        assert_eq!(options.timeout_secs, 60);
     }
 
     #[test]
@@ -388,7 +393,7 @@ mod download_options_tests {
             output_path: Some("/tmp/download.iso".to_string()),
             verify_iso: true,
             expected_sha256: Some("abc123".to_string()),
-            extra_headers: Vec::new(),
+            ..Default::default()
         };
 
         assert!(options.quiet_mode);
@@ -404,7 +409,7 @@ mod download_options_tests {
             output_path: Some("file.txt".to_string()),
             verify_iso: false,
             expected_sha256: None,
-            extra_headers: Vec::new(),
+            ..Default::default()
         };
 
         let cloned = original.clone();
@@ -474,22 +479,41 @@ mod app_contract_tests {
 
     #[test]
     fn test_worker_message_display_is_stable() {
+        let progress = WorkerToGuiMessage::Progress {
+            id: 7,
+            fraction: 0.42,
+            bytes: 42,
+            total: Some(100),
+            speed_bps: 0,
+            eta_secs: None,
+        };
+        assert_eq!(progress.to_string(), "[7] Progress(0.42)");
+        assert_eq!(progress.id(), 7);
         assert_eq!(
-            WorkerToGuiMessage::Progress(0.42).to_string(),
-            "Progress(0.42)"
+            WorkerToGuiMessage::StatusUpdate {
+                id: 1,
+                text: "Ready".to_string()
+            }
+            .to_string(),
+            "[1] Status: Ready"
         );
         assert_eq!(
-            WorkerToGuiMessage::StatusUpdate("Ready".to_string()).to_string(),
-            "Status: Ready"
+            WorkerToGuiMessage::Completed {
+                id: 2,
+                path: "/tmp/file.bin".to_string()
+            }
+            .to_string(),
+            "[2] Completed: /tmp/file.bin"
         );
         assert_eq!(
-            WorkerToGuiMessage::Completed("/tmp/file.bin".to_string()).to_string(),
-            "Completed: /tmp/file.bin"
+            WorkerToGuiMessage::Error {
+                id: 3,
+                message: "boom".to_string()
+            }
+            .to_string(),
+            "[3] Error: boom"
         );
-        assert_eq!(
-            WorkerToGuiMessage::Error("boom".to_string()).to_string(),
-            "Error: boom"
-        );
+        assert_eq!(WorkerToGuiMessage::Cancelled { id: 4 }.id(), 4);
     }
 }
 
@@ -612,5 +636,139 @@ mod url_edge_cases {
         let url = "file:///home/user/downloads/local_file.txt";
         let filename = get_filename_from_url_or_default(url, "default.txt");
         assert_eq!(filename, "local_file.txt");
+    }
+}
+
+// ============================================================================
+// 1.7.1 additions
+// ============================================================================
+
+mod release_171_tests {
+    use kget::protocol::{Protocol, detect};
+    use kget::utils::{expand_tilde, get_filename_from_url_or_default, sanitize_filename};
+
+    #[test]
+    fn protocol_detect_table() {
+        let table = [
+            ("https://example.com/file.zip", Protocol::Http),
+            ("http://example.com/a?b=c", Protocol::Http),
+            ("ftp://ftp.gnu.org/gnu/hello.tar.gz", Protocol::Ftp),
+            ("FTPS://host/x", Protocol::Ftp),
+            ("sftp://user@host/path", Protocol::Sftp),
+            ("webdav://nas/file", Protocol::WebDav),
+            ("webdavs://nas/file", Protocol::WebDav),
+            ("magnet:?xt=urn:btih:abc", Protocol::Torrent),
+            ("https://host/ubuntu.torrent", Protocol::Torrent),
+            ("/home/me/file.torrent", Protocol::Torrent),
+            ("https://host/ubuntu.meta4", Protocol::Metalink),
+            ("https://www.youtube.com/watch?v=x", Protocol::Video),
+        ];
+        for (url, want) in table {
+            assert_eq!(detect(url), want, "{url}");
+        }
+    }
+
+    #[test]
+    fn filename_sanitize_and_percent_decode() {
+        assert_eq!(
+            get_filename_from_url_or_default("https://x/my%20file.zip", "d"),
+            "my file.zip"
+        );
+        assert_eq!(
+            get_filename_from_url_or_default("https://x/a%2Fb.txt", "d"),
+            "a_b.txt"
+        );
+        assert_eq!(sanitize_filename("v1..2.tar.gz"), "v1..2.tar.gz");
+        assert_eq!(sanitize_filename("con\u{7}trol"), "con_trol");
+        assert_eq!(sanitize_filename("..."), "download");
+        let long = "é".repeat(200);
+        let s = sanitize_filename(&long);
+        assert!(s.len() <= 255 && s.is_char_boundary(s.len()));
+    }
+
+    #[test]
+    fn validate_filename_allows_double_dots_inside_names() {
+        assert!(kget::download::validate_filename("relatório...pdf").is_ok());
+        assert!(kget::download::validate_filename("..").is_err());
+        assert!(kget::download::validate_filename("a/b").is_err());
+    }
+
+    #[test]
+    fn expand_tilde_only_at_start() {
+        assert_eq!(expand_tilde("a/~/b"), "a/~/b");
+        if let Some(home) = dirs::home_dir() {
+            assert_eq!(expand_tilde("~"), home.to_string_lossy());
+        }
+    }
+
+    #[test]
+    fn config_missing_fields_loads_defaults() {
+        let c: kget::Config =
+            serde_json::from_str(r#"{"proxy":{"enabled":true,"url":"http://p:1"},"torrent":{}}"#)
+                .unwrap();
+        assert!(c.proxy.enabled);
+        assert_eq!(c.optimization.max_connections, 4);
+        assert_eq!(c.torrent.max_peer_connections, 50);
+        assert_eq!(c.ftp.default_port, 21);
+    }
+
+    #[test]
+    fn proxy_type_parsing() {
+        use kget::ProxyType;
+        assert_eq!(ProxyType::parse("SOCKS5h"), ProxyType::Socks5);
+        assert_eq!(ProxyType::from_url("socks5://h:1"), ProxyType::Socks5);
+        assert_eq!(ProxyType::from_url("https://h:1"), ProxyType::Https);
+        assert_eq!(ProxyType::from_url("h:1"), ProxyType::Http);
+    }
+
+    #[test]
+    fn kget_error_retry_classification() {
+        use kget::KgetError;
+        let retry = [429u16, 503];
+        assert!(KgetError::from_status(503, "u").is_retryable(&retry));
+        assert!(!KgetError::from_status(403, "u").is_retryable(&retry));
+        assert!(matches!(
+            KgetError::from_status(404, "u"),
+            KgetError::NotFound(_)
+        ));
+        assert_eq!(KgetError::from_status(404, "u").code(), "http_404");
+        let boxed: Box<dyn std::error::Error + Send + Sync> = Box::new(KgetError::Cancelled);
+        assert!(matches!(KgetError::from(boxed), KgetError::Cancelled));
+        // A URL containing "cancel" is not a cancellation.
+        let boxed: Box<dyn std::error::Error + Send + Sync> =
+            "HTTP error for https://x/cancel-policy.pdf".into();
+        assert!(matches!(KgetError::from(boxed), KgetError::Other(_)));
+    }
+
+    #[test]
+    fn jsonl_events_are_versioned() {
+        let line = kget::JsonEvent::Completed.to_line();
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["v"], 1);
+        assert_eq!(v["event"], "completed");
+        let line = kget::JsonEvent::Error {
+            code: "http_404".into(),
+            message: "x".into(),
+            retryable: false,
+        }
+        .to_line();
+        assert!(line.contains("\"code\":\"http_404\""));
+    }
+
+    #[test]
+    fn throttle_limits_rate_but_reports_completion() {
+        let mut t = kget::Throttle::new(10_000);
+        assert!(t.ready(1.0));
+        assert!(!t.ready(50.0));
+        assert!(t.ready(100.0));
+        assert!(!t.ready(100.0));
+    }
+
+    #[test]
+    fn torrent_sources() {
+        use kget::torrent::{is_supported_torrent_source, is_torrent_file};
+        assert!(is_torrent_file("https://x/a.torrent?dl=1"));
+        assert!(is_supported_torrent_source("magnet:?xt=urn:btih:abcdef"));
+        assert!(!is_supported_torrent_source("https://x/a.zip"));
     }
 }

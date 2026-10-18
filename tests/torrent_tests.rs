@@ -506,7 +506,7 @@ mod native_torrent_tests {
     #[test]
     fn test_native_feature_enabled() {
         // This test only compiles when torrent-native feature is enabled
-        assert!(true);
+        const { assert!(cfg!(feature = "torrent-native")) };
     }
 
     #[test]
@@ -532,7 +532,7 @@ mod native_torrent_tests {
             size: u64,
         }
 
-        let files = vec![
+        let files = [
             FileInfo {
                 name: "video.mp4".to_string(),
                 size: 1024 * 1024 * 100,
