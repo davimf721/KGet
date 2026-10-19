@@ -109,6 +109,16 @@ jobs:
         run: |
           FEATURES=()
           if [ -n "${{ matrix.features }}" ]; then FEATURES=(--features "${{ matrix.features }}"); fi
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            # Git Bash's perl lacks modules OpenSSL's Configure needs (ssh2 vendors
+            # OpenSSL); use the runner's Strawberry Perl instead.
+            export OPENSSL_SRC_PERL="C:/Strawberry/perl/bin/perl.exe"
+            if [ ! -f "$OPENSSL_SRC_PERL" ]; then
+              echo "::error::Strawberry Perl not found at $OPENSSL_SRC_PERL"
+              exit 1
+            fi
+            "$OPENSSL_SRC_PERL" -v | head -2
+          fi
           if [ "${{ matrix.cross }}" = "true" ]; then
             cross build --release --locked --target ${{ matrix.target }} "${FEATURES[@]}"
           else
