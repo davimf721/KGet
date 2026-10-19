@@ -7,6 +7,74 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0.html),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.1] - 2026-10-18
+
+### Fixed
+- **Turbo mode could silently produce corrupted files:** resuming an interrupted parallel download
+  (including Cancel → Retry in the macOS app and automatic retries in `kget::builder`) treated the
+  preallocated file as complete, and chunks cut short by the server were accepted as complete.
+  Downloads now use `<file>.part` + a `<file>.kget` resume state validated against the server
+  (size, `ETag`, `Last-Modified`), every chunk must be complete, and retries continue from the exact offset.
+  Connections are no longer capped by the number of CPU cores.
+- **CLI flags were permanently written to `config.json`** (`--proxy`, `--proxy-pass`, `-l`, `--no-cache`, torrent flags).
+  They now apply only to the current run; use `--save-config` to persist them (proxy passwords are never saved).
+  If you used `-l`/`--proxy` before, run `kget --save-config` without them or delete `config.json`.
+- **HTTP proxies did not apply to HTTPS downloads; SOCKS5 proxies did not work;** invalid proxies were silently ignored.
+  All HTTP clients now share one builder (`kget::http`).
+- **macOS app could not find yt-dlp installed via Homebrew** when launched from the Dock/Finder.
+- **macOS app marked finished video downloads as failed** and showed no progress for yt-dlp downloads.
+- yt-dlp could hang when it wrote a lot of warnings (stderr pipe was never drained); its error message is now shown.
+  Audio-only downloads use `-x --audio-format m4a`.
+- `--sha256` was ignored in quiet/library mode and when the server did not support range requests.
+  The ISO verification prompt only appears on a terminal.
+- Simple downloads no longer leave a truncated file with the final name; bodies shorter than
+  `Content-Length` are resumed with `Range`; HTTP 429/5xx honour `Retry-After`; a 404 page is never saved as the file.
+- Brotli responses were transparently decompressed, altering the saved file.
+- `cargo test`, `examples/lib_usage.rs` and 10 doctests did not compile.
+- Running the test suite modified the user's real configuration (`KGET_CONFIG_DIR` is now honoured).
+- History could be wiped or lose entries with concurrent downloads; credentials in URLs are no longer stored.
+- An old or partial `config.json` no longer prevents KGet from starting (missing fields use defaults,
+  a corrupt file is backed up to `config.json.bak`); `config.json` is written atomically with `0600` permissions.
+- FTP/SFTP/WebDAV/Metalink/torrent URLs are detected from the scheme without flags; percent-encoded paths and
+  credentials are decoded; FTP works without `SIZE`, has timeouts and resumes; SFTP has timeouts, uses
+  `sftp.key_path`, supports `/~/` paths and records new host keys in `known_hosts`.
+- Metalink 3.x manifests are now parsed; SHA-512/MD5 hashes and `<size>` are verified; `~` is expanded;
+  a failed mirror no longer leaves partial data for the next one.
+- Batch mode: bounded concurrency (`-j`), unique file names, and every flag/protocol is honoured.
+- `kget::builder` no longer retries 404/403 (`retry_on_status` is used), and average speed is computed correctly.
+- JSONL output is no longer mixed with plain-text lines and is throttled (~5 progress events per second).
+- Native torrent client honours `--torrent-port`, `--no-dht`, can be cancelled, and its ETA is correct.
+  Without a native backend, a torrent opened in the system client is reported as `handed_off`, not "completed".
+- Transmission: no more 30-minute limit (stall detection instead), the web UI opens only with `KGET_TRANSMISSION_OPEN_WEB=1`.
+- egui GUI: simultaneous downloads no longer share progress or cancellation.
+- Interactive mode: `~` is expanded, quoted paths with spaces work, a pasted URL starts a download.
+- Filenames with `..` inside (e.g. `v1..2.tar.gz`) are accepted; server-provided names are sanitized instead of rejected;
+  `%20` in URL file names is decoded.
+- `-H "Name:value"` (without a space) works; `--at` uses the system time zone on every OS (including Windows) and DST.
+- The Windows CLI release binary has a normal console again.
+- macOS: Share Extension no longer truncates URLs containing `&`; `webdav://` is accepted; Apple Silicon
+  Homebrew `kget` is found; data races in the download manager fixed; output is parsed line by line;
+  a finished URL can be downloaded again.
+
+### Added
+- `-c/--continue`, `--no-clobber`, `--retries`, `--timeout`, `-j/--jobs`, `--batch -` (stdin), `--save-config`, `--doctor`.
+- `--checksum <alg>:<hex>` and `--checksum-url <url>`; checksum files that contain only the hash.
+- `KGET_YTDLP_PATH`, `ytdlp_path` in `config.json`, and a "yt-dlp path" field + Diagnostics panel in the macOS settings.
+- Pause/Resume in the macOS app (Ctrl+C semantics: the partial download is kept).
+- Versioned JSONL event protocol (`"v":1`: `started`, `progress`, `status`, `files`, `file_progress`, `verified`,
+  `saved`, `completed`, `error`) for all protocols; the macOS app now uses it.
+- `.torrent` files (local paths and URLs) with the native client; the macOS app opens `.torrent` files.
+- Library: `kget::protocol::detect`, `download_to_path`, `OverwritePolicy`, `DownloadOptions::{resume, overwrite,
+  retries, timeout_secs, cancel, progress_callback}`, `KgetError::Http`, `JsonEvent`, `Throttle`,
+  `utils::{sanitize_filename, expand_tilde}`, `torrent::download_torrent`, per-job IDs in `app::DownloadCommand`.
+- GitHub Actions CI (Linux, macOS, Windows) and a release workflow that builds all binaries, publishes to
+  crates.io and updates the Homebrew tap.
+
+### Removed / Deprecated
+- Unused cache/compression code paths in `Optimizer` (deprecated no-ops); `--no-cache` is hidden.
+- Unused dependencies (`ftp`, `console`, `futures`, `flate2`, `lz4`, `brotli`, `opener`); `tokio` is only
+  compiled for `async`/torrent features.
+
 ## [1.7.0] - 2026-05-24
 
 ### Added

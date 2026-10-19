@@ -5,9 +5,25 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 
+/// Isolated config directory, so tests never touch the developer's real config.
+fn test_config_dir() -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("kget-cli-tests-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
 /// Get the kget command for testing
 fn kget() -> Command {
-    Command::new(assert_cmd::cargo::cargo_bin!("kget"))
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("kget"));
+    cmd.env("KGET_CONFIG_DIR", test_config_dir());
+    cmd
+}
+
+/// kget with its own empty config directory.
+fn kget_in(dir: &std::path::Path) -> Command {
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("kget"));
+    cmd.env("KGET_CONFIG_DIR", dir);
+    cmd
 }
 
 // ============================================================================
@@ -135,12 +151,13 @@ fn test_cli_speed_limit_flag() {
 }
 
 #[test]
-fn test_cli_cache_flags() {
+fn test_cli_cache_flag_is_hidden_but_accepted() {
     kget()
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("--no-cache"));
+        .stdout(predicate::str::contains("--no-cache").not());
+    kget().args(["--no-cache", "--doctor"]).assert().success();
 }
 
 #[test]
@@ -339,4 +356,162 @@ fn test_cli_multiple_help_calls() {
     for handle in handles {
         handle.join().unwrap();
     }
+}
+
+// ============================================================================
+// 1.7.1 regressions
+// ============================================================================
+
+#[test]
+fn cli_flags_do_not_persist_config() {
+    let dir = tempfile::tempdir().unwrap();
+    kget_in(dir.path())
+        .args([
+            "-q",
+            "-l",
+            "100",
+            "--proxy",
+            "http://127.0.0.1:9",
+            "--retries",
+            "1",
+            "--timeout",
+            "2",
+            "http://127.0.0.1:9/file.bin",
+        ])
+        .assert()
+        .failure();
+    assert!(
+        !dir.path().join("config.json").exists(),
+        "CLI flags must not be written to config.json"
+    );
+}
+
+#[test]
+fn save_config_never_stores_proxy_password() {
+    let dir = tempfile::tempdir().unwrap();
+    kget_in(dir.path())
+        .args([
+            "--save-config",
+            "--proxy",
+            "socks5://127.0.0.1:1080",
+            "--proxy-user",
+            "me",
+            "--proxy-pass",
+            "secret",
+            "-l",
+            "2048",
+        ])
+        .assert()
+        .success();
+    let text = std::fs::read_to_string(dir.path().join("config.json")).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(v["proxy"]["password"], serde_json::Value::Null);
+    assert_eq!(v["proxy"]["username"], "me");
+    assert_eq!(v["proxy"]["proxy_type"], "Socks5");
+    assert_eq!(v["optimization"]["speed_limit"], 2048);
+}
+
+#[test]
+fn config_with_missing_fields_still_starts() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("config.json"),
+        r#"{"proxy":{"enabled":false}}"#,
+    )
+    .unwrap();
+    kget_in(dir.path()).arg("--doctor").assert().success();
+}
+
+#[test]
+fn corrupt_config_is_backed_up_not_fatal() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("config.json"), "{not json").unwrap();
+    kget_in(dir.path())
+        .arg("--doctor")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("invalid config"));
+    assert!(dir.path().join("config.json.bak").exists());
+}
+
+#[test]
+fn jsonl_output_is_valid_json_per_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = kget_in(dir.path())
+        .current_dir(dir.path())
+        .args([
+            "--jsonl",
+            "--retries",
+            "1",
+            "--timeout",
+            "2",
+            "http://127.0.0.1:9/x.bin",
+        ])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let mut events = Vec::new();
+    for line in stdout.lines().filter(|l| !l.trim().is_empty()) {
+        let v: serde_json::Value =
+            serde_json::from_str(line).unwrap_or_else(|e| panic!("not JSON: {line:?} ({e})"));
+        assert_eq!(v["v"], 1, "every event carries the protocol version");
+        events.push(v["event"].as_str().unwrap().to_string());
+    }
+    assert_eq!(events.first().map(String::as_str), Some("started"));
+    assert_eq!(events.last().map(String::as_str), Some("error"));
+}
+
+#[test]
+fn doctor_reports_environment() {
+    kget()
+        .arg("--doctor")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("KGet"))
+        .stdout(predicate::str::contains("yt-dlp"))
+        .stdout(predicate::str::contains("Features"));
+}
+
+#[test]
+fn invalid_checksum_spec_is_rejected() {
+    kget()
+        .args(["--checksum", "crc32:zz", "http://127.0.0.1:9/x"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("checksum"));
+}
+
+#[test]
+fn new_flags_are_documented() {
+    kget()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--continue"))
+        .stdout(predicate::str::contains("--no-clobber"))
+        .stdout(predicate::str::contains("--retries"))
+        .stdout(predicate::str::contains("--timeout"))
+        .stdout(predicate::str::contains("--jobs"))
+        .stdout(predicate::str::contains("--save-config"))
+        .stdout(predicate::str::contains("--doctor"));
+}
+
+#[test]
+fn history_redacts_credentials_from_cli_downloads() {
+    let dir = tempfile::tempdir().unwrap();
+    kget_in(dir.path())
+        .current_dir(dir.path())
+        .args([
+            "-q",
+            "--retries",
+            "1",
+            "--timeout",
+            "2",
+            "http://user:hunter2@127.0.0.1:9/x.bin",
+        ])
+        .assert()
+        .failure();
+    let history = std::fs::read_to_string(dir.path().join("history.json")).unwrap();
+    assert!(!history.contains("hunter2"));
+    assert!(history.contains("127.0.0.1"));
 }

@@ -1,8 +1,8 @@
 class Kget < Formula
   desc "Fast, modern download manager and Rust library — HTTP/HTTPS, FTP/SFTP, WebDAV, torrent, yt-dlp"
   homepage "https://github.com/davimf721/KGet"
-  url "https://github.com/davimf721/KGet/archive/refs/tags/v1.7.0.tar.gz"
-  sha256 "98f5c79b2ee640babf9fd6320b08243a1a4ca8e7fa2ea0df181963ccc6857f3f" # updated automatically by release.sh
+  url "https://github.com/davimf721/KGet/archive/refs/tags/v1.7.1.tar.gz"
+  sha256 "98f5c79b2ee640babf9fd6320b08243a1a4ca8e7fa2ea0df181963ccc6857f3f" # updated automatically by the Release workflow
   license "MIT"
   head "https://github.com/davimf721/KGet.git", branch: "main"
 
@@ -39,6 +39,10 @@ class Kget < Formula
         kget https://example.com/file.zip          # basic download
         kget -a https://example.com/large.iso      # turbo (parallel connections)
         kget --interactive                          # interactive REPL
+        kget -c https://example.com/file.zip       # resume an interrupted download
+        kget --doctor                               # check your environment
+
+      Video downloads need yt-dlp:  brew install yt-dlp
 
     EOS
     if build.with?("gui")
@@ -51,6 +55,7 @@ class Kget < Formula
   end
 
   test do
-    assert_match "kget #{version}", shell_output("#{bin}/kget --version")
+    assert_match version.to_s, shell_output("#{bin}/kget --version")
+    assert_match "KGet #{version}", shell_output("#{bin}/kget --doctor")
   end
 end

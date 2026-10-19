@@ -1,7 +1,14 @@
 //! Persistent download history.
 //!
 //! Every download — successful or not — is appended to a JSON file in the
-//! OS config directory so the record survives app restarts.
+//! OS config directory (or `KGET_CONFIG_DIR`) so the record survives app
+//! restarts.
+//!
+//! Writes are atomic and protected by a lock file, so several `kget`
+//! processes running at once (e.g. the macOS app) never lose entries, and a
+//! corrupt file is moved aside to `history.json.corrupt` instead of being
+//! overwritten. Credentials embedded in URLs are never stored. The history
+//! keeps the most recent 1000 entries.
 //!
 //! **File locations**
 //! - macOS:   `~/Library/Application Support/kget/history.json`
@@ -13,25 +20,31 @@
 //! ```rust,no_run
 //! use kget::queue::{DownloadHistory, EntryStatus, HistoryEntry};
 //!
-//! let mut history = DownloadHistory::load();
-//!
-//! let mut entry = HistoryEntry::new(
+//! let entry = HistoryEntry::new(
 //!     "https://example.com/file.iso",
 //!     "/home/user/Downloads",
 //!     None,
 //! );
-//! history.record(entry, EntryStatus::Completed, None);
-//! history.save().unwrap();
+//! // Safe even with other kget processes writing at the same time
+//! DownloadHistory::append(entry, EntryStatus::Completed, None).unwrap();
 //!
+//! let history = DownloadHistory::load();
 //! for e in history.recent(10) {
 //!     println!("{} {} {}", e.created_at_display(), e.status, e.filename);
 //! }
 //! ```
 
 use crate::utils::get_filename_from_url_or_default;
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Maximum number of entries kept in the history file.
+pub const MAX_ENTRIES: usize = 1000;
+
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 // ============================================================================
 // Public types
@@ -44,24 +57,30 @@ pub enum EntryStatus {
     Completed,
     Failed,
     Cancelled,
+    /// Handed to an external application (e.g. the system torrent client);
+    /// KGet did not download the data itself.
+    #[serde(rename = "handed_off")]
+    HandedOff,
 }
 
 impl std::fmt::Display for EntryStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            EntryStatus::Completed => write!(f, "completed"),
-            EntryStatus::Failed => write!(f, "failed"),
-            EntryStatus::Cancelled => write!(f, "cancelled"),
-        }
+        // `pad` honours width/alignment (`{:<12}`)
+        f.pad(match self {
+            EntryStatus::Completed => "completed",
+            EntryStatus::Failed => "failed",
+            EntryStatus::Cancelled => "cancelled",
+            EntryStatus::HandedOff => "handed_off",
+        })
     }
 }
 
 /// A single record in the download history.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct HistoryEntry {
-    /// Short hex identifier derived from the URL and creation time.
+    /// Unique hex identifier (timestamp in nanoseconds + process counter).
     pub id: String,
-    /// Source URL or magnet link.
+    /// Source URL or magnet link (user name and password removed).
     pub url: String,
     /// Filename extracted from the URL or Content-Disposition.
     pub filename: String,
@@ -87,15 +106,22 @@ impl HistoryEntry {
     /// Create a new pending entry.  Call [`DownloadHistory::record`] to
     /// finalise it with a status and optional error once the download is done.
     pub fn new(url: &str, output_dir: &str, expected_sha256: Option<&str>) -> Self {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
         let now = unix_now();
-        let url_hash: u64 = url
-            .bytes()
-            .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
-        let id = format!("{:08x}{:08x}", now as u32, url_hash as u32);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let id = format!(
+            "{:012x}{:04x}",
+            nanos & 0xffff_ffff_ffff,
+            (seq ^ std::process::id() as u64) & 0xffff
+        );
         let filename = get_filename_from_url_or_default(url, "download");
         Self {
             id,
-            url: url.to_string(),
+            url: redact_url(url),
             filename,
             output_dir: output_dir.to_string(),
             status: EntryStatus::Completed,
@@ -105,6 +131,21 @@ impl HistoryEntry {
             created_at: now,
             finished_at: None,
             error: None,
+        }
+    }
+
+    /// Fill `filename`, `output_dir` and `bytes_total` from the saved file.
+    pub fn set_saved_file(&mut self, path: &Path) {
+        if let Some(name) = path.file_name() {
+            self.filename = name.to_string_lossy().into_owned();
+        }
+        if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+            self.output_dir = dir.to_string_lossy().into_owned();
+        }
+        if let Ok(meta) = std::fs::metadata(path)
+            && meta.is_file()
+        {
+            self.bytes_total = Some(meta.len());
         }
     }
 
@@ -134,28 +175,43 @@ impl DownloadHistory {
         Self { entries, path }
     }
 
-    /// Write the current history to disk.
-    pub fn save(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let json = serde_json::to_string_pretty(&self.entries)?;
-        std::fs::write(&self.path, json)?;
-        Ok(())
+    /// Read, modify and write the history file under an exclusive lock.
+    ///
+    /// Safe across processes. A corrupt file is preserved as
+    /// `history.json.corrupt` instead of being overwritten.
+    pub fn update<F: FnOnce(&mut Vec<HistoryEntry>)>(f: F) -> Result<(), BoxError> {
+        let path = history_path();
+        let _lock = lock_history(&path)?;
+        let mut entries = read_or_quarantine(&path);
+        f(&mut entries);
+        write_entries(&path, &mut entries)
+    }
+
+    /// Finalise `entry` and append it to the history file (cross-process safe).
+    pub fn append(
+        mut entry: HistoryEntry,
+        status: EntryStatus,
+        error: Option<String>,
+    ) -> Result<(), BoxError> {
+        finalise(&mut entry, status, error);
+        Self::update(|entries| entries.push(entry))
+    }
+
+    /// Write the current in-memory history to disk (atomically, under the lock).
+    ///
+    /// Prefer [`DownloadHistory::append`] / [`DownloadHistory::update`] when
+    /// other processes may write at the same time.
+    pub fn save(&self) -> Result<(), BoxError> {
+        let _lock = lock_history(&self.path)?;
+        let mut entries = self.entries.clone();
+        write_entries(&self.path, &mut entries)
     }
 
     /// Finalise an entry with a status and optional error message, then
-    /// append (or replace, if the same URL already has an entry) it.
+    /// append it to the in-memory history.
     pub fn record(&mut self, mut entry: HistoryEntry, status: EntryStatus, error: Option<String>) {
-        entry.status = status;
-        entry.finished_at = Some(unix_now());
-        entry.error = error;
-
-        if let Some(pos) = self.entries.iter().position(|e| e.url == entry.url) {
-            self.entries[pos] = entry;
-        } else {
-            self.entries.push(entry);
-        }
+        finalise(&mut entry, status, error);
+        self.entries.push(entry);
     }
 
     /// All history entries in insertion order (oldest first).
@@ -166,11 +222,14 @@ impl DownloadHistory {
     /// Up to `n` most-recent entries, newest first.
     pub fn recent(&self, n: usize) -> Vec<&HistoryEntry> {
         let mut v: Vec<&HistoryEntry> = self.entries.iter().collect();
-        v.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        // Stable sort: entries created in the same second keep append order.
+        v.reverse();
+        v.sort_by_key(|e| std::cmp::Reverse(e.created_at));
         v.into_iter().take(n).collect()
     }
 
-    /// Remove entries whose status is `Completed` or `Cancelled`.
+    /// Remove finished entries (`Completed`, `Cancelled` and `HandedOff`),
+    /// keeping only failures.
     ///
     /// Returns the number of entries removed.
     pub fn clear_completed(&mut self) -> usize {
@@ -198,16 +257,76 @@ impl DownloadHistory {
 // Internal helpers
 // ============================================================================
 
+fn finalise(entry: &mut HistoryEntry, status: EntryStatus, error: Option<String>) {
+    entry.status = status;
+    entry.finished_at = Some(unix_now());
+    entry.error = error;
+}
+
 fn history_path() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("kget")
+    crate::config::config_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
         .join("history.json")
 }
 
-fn try_load(path: &PathBuf) -> Option<Vec<HistoryEntry>> {
+fn lock_history(path: &Path) -> Result<std::fs::File, BoxError> {
+    if let Some(p) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(p)?;
+    }
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path.with_extension("lock"))?;
+    lock.lock_exclusive()?;
+    // Unlocked when the file is dropped.
+    Ok(lock)
+}
+
+fn read_or_quarantine(path: &Path) -> Vec<HistoryEntry> {
+    match std::fs::read_to_string(path) {
+        Ok(s) if !s.trim().is_empty() => match serde_json::from_str(&s) {
+            Ok(v) => v,
+            Err(_) => {
+                let _ = std::fs::rename(path, path.with_extension("json.corrupt"));
+                Vec::new()
+            }
+        },
+        _ => Vec::new(),
+    }
+}
+
+fn write_entries(path: &Path, entries: &mut Vec<HistoryEntry>) -> Result<(), BoxError> {
+    if entries.len() > MAX_ENTRIES {
+        entries.drain(..entries.len() - MAX_ENTRIES);
+    }
+    let json = serde_json::to_vec_pretty(entries)?;
+    crate::config::write_atomic(path, &json, true)?;
+    Ok(())
+}
+
+fn try_load(path: &Path) -> Option<Vec<HistoryEntry>> {
     let content = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&content).ok()
+}
+
+/// Remove the user name and password from a URL before storing it.
+///
+/// ```rust
+/// use kget::queue::redact_url;
+///
+/// assert_eq!(redact_url("sftp://me:secret@host/f"), "sftp://host/f");
+/// assert_eq!(redact_url("https://example.com/a"), "https://example.com/a");
+/// ```
+pub fn redact_url(raw: &str) -> String {
+    match url::Url::parse(raw) {
+        Ok(mut u) if u.password().is_some() || !u.username().is_empty() => {
+            let _ = u.set_password(None);
+            let _ = u.set_username("");
+            u.to_string()
+        }
+        _ => raw.to_string(),
+    }
 }
 
 fn unix_now() -> u64 {

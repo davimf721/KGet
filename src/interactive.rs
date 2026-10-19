@@ -1,16 +1,14 @@
-use kget::DownloadOptions;
-use kget::advanced_download::AdvancedDownloader;
+use crate::{Ctx, Job};
 use kget::config::Config;
-use kget::download::download as http_download;
-use kget::ftp::FtpDownloader;
-use kget::metalink;
-use kget::optimization::Optimizer;
-use kget::queue::{DownloadHistory, EntryStatus, HistoryEntry};
-use kget::sftp::SftpDownloader;
+use kget::protocol::Protocol;
+use kget::queue::DownloadHistory;
 use kget::utils;
+use kget::ytdlp::VideoQuality;
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 use std::error::Error;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ASCII Banner
@@ -34,11 +32,11 @@ struct DownloadArgs {
     output: Option<String>,
     quiet: bool,
     advanced: bool,
-    ftp: bool,
-    sftp: bool,
-    torrent: bool,
-    metalink: bool,
+    forced: Option<Protocol>,
     sha256: Option<String>,
+    headers: Vec<String>,
+    resume: bool,
+    quality: String,
 }
 
 /// Parse flags and URL from the tokens after the `download` command.
@@ -48,11 +46,14 @@ struct DownloadArgs {
 /// -a / --advanced / --turbo     parallel multi-connection download
 /// -o / --output <path>          destination file or directory
 /// -q / --quiet                  suppress progress output
+/// -c / --continue               resume a partial download
+/// -H / --header "Name: value"   extra HTTP header (repeatable)
 /// --sha256 <hash>               verify file hash after download
-/// --ftp                         force FTP protocol
-/// --sftp                        force SFTP protocol
+/// --quality <q>                 yt-dlp quality (best, 1080p, 720p, audio…)
+/// --ftp / --sftp / --webdav     force a protocol
 /// --torrent                     force torrent/magnet handling
 /// --metalink                    treat source as a Metalink manifest
+/// --ytdlp                       route through yt-dlp
 /// ```
 fn parse_download_args(parts: &[&str]) -> Result<DownloadArgs, String> {
     let mut args = DownloadArgs {
@@ -60,11 +61,11 @@ fn parse_download_args(parts: &[&str]) -> Result<DownloadArgs, String> {
         output: None,
         quiet: false,
         advanced: false,
-        ftp: false,
-        sftp: false,
-        torrent: false,
-        metalink: false,
+        forced: None,
         sha256: None,
+        headers: Vec::new(),
+        resume: false,
+        quality: "best".into(),
     };
 
     let mut i = 0;
@@ -72,16 +73,33 @@ fn parse_download_args(parts: &[&str]) -> Result<DownloadArgs, String> {
         match parts[i] {
             "-a" | "--advanced" | "--turbo" => args.advanced = true,
             "-q" | "--quiet" => args.quiet = true,
-            "--ftp" => args.ftp = true,
-            "--sftp" => args.sftp = true,
-            "--torrent" => args.torrent = true,
-            "--metalink" => args.metalink = true,
-            "-o" | "--output" => {
+            "-c" | "--continue" => args.resume = true,
+            "--ftp" => args.forced = Some(Protocol::Ftp),
+            "--sftp" => args.forced = Some(Protocol::Sftp),
+            "--webdav" => args.forced = Some(Protocol::WebDav),
+            "--torrent" => args.forced = Some(Protocol::Torrent),
+            "--metalink" => args.forced = Some(Protocol::Metalink),
+            "--ytdlp" => args.forced = Some(Protocol::Video),
+            "-o" | "-O" | "--output" => {
                 i += 1;
                 if i >= parts.len() {
                     return Err(format!("'{}' requires a path argument", parts[i - 1]));
                 }
-                args.output = Some(parts[i].to_string());
+                args.output = Some(utils::expand_tilde(parts[i]));
+            }
+            "-H" | "--header" => {
+                i += 1;
+                if i >= parts.len() {
+                    return Err("'--header' requires a \"Name: value\" argument".to_string());
+                }
+                args.headers.push(parts[i].to_string());
+            }
+            "--quality" => {
+                i += 1;
+                if i >= parts.len() {
+                    return Err("'--quality' requires a value".to_string());
+                }
+                args.quality = parts[i].to_string();
             }
             "--sha256" => {
                 i += 1;
@@ -121,98 +139,21 @@ fn parse_download_args(parts: &[&str]) -> Result<DownloadArgs, String> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn run_download(args: DownloadArgs, config: &Config) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let optimizer = Optimizer::from_config(config.optimization.clone());
+    let mut job = Job::new(args.url);
+    job.output = args.output;
+    job.quiet = args.quiet;
+    job.advanced = args.advanced;
+    job.forced = args.forced;
+    job.sha256 = args.sha256;
+    job.headers = crate::parse_extra_headers(&args.headers);
+    job.resume = args.resume;
+    job.quality = VideoQuality::parse(&args.quality);
 
-    let is_metalink = args.metalink || metalink::is_metalink(&args.url);
-
-    if is_metalink {
-        let output_dir = args.output.as_deref().unwrap_or(".");
-        let result = metalink::download_metalink(
-            &args.url,
-            output_dir,
-            args.quiet,
-            config.proxy.clone(),
-            optimizer,
-        );
-        // Record to history
-        let mut history = DownloadHistory::load();
-        let entry = HistoryEntry::new(&args.url, output_dir, None);
-        let (status, err) = match &result {
-            Ok(()) => (EntryStatus::Completed, None),
-            Err(e) => (EntryStatus::Failed, Some(e.to_string())),
-        };
-        history.record(entry, status, err);
-        let _ = history.save();
-        return result;
-    }
-
-    // Capture url/output_dir before consuming args, for history recording
-    let url_for_history = args.url.clone();
-    let output_dir_for_history = args.output.as_deref().unwrap_or(".").to_string();
-    let sha256_for_history = args.sha256.clone();
-
-    let result: Result<(), Box<dyn Error + Send + Sync>> =
-        // Auto-detect magnet links as torrent downloads
-        if args.torrent || args.url.starts_with("magnet:?") {
-            let output_dir = args.output.unwrap_or_else(|| "torrent_output".to_string());
-            kget::torrent::download_magnet(
-                &args.url,
-                &output_dir,
-                args.quiet,
-                config.proxy.clone(),
-                optimizer,
-                kget::torrent::TorrentCallbacks::default(),
-            )
-        } else if args.ftp {
-            let output = utils::resolve_output_path(args.output, &args.url, "ftp_output");
-            FtpDownloader::new(args.url, output, args.quiet, config.proxy.clone(), optimizer)
-                .download()
-        } else if args.sftp {
-            let output = utils::resolve_output_path(args.output, &args.url, "sftp_output");
-            SftpDownloader::new(args.url, output, args.quiet, config.proxy.clone(), optimizer)
-                .download()
-        } else if args.advanced {
-            let output = utils::resolve_output_path(args.output, &args.url, "download");
-            AdvancedDownloader::new(
-                args.url,
-                output,
-                args.quiet,
-                config.proxy.clone(),
-                optimizer,
-            )
-            .and_then(|mut dl| {
-                if let Some(hash) = args.sha256 {
-                    dl.set_expected_sha256(hash);
-                }
-                dl.download()
-            })
-        } else {
-            // Default: simple HTTP/HTTPS
-            let options = DownloadOptions {
-                quiet_mode: args.quiet,
-                output_path: args.output,
-                verify_iso: args.sha256.is_some(),
-                expected_sha256: args.sha256,
-                extra_headers: Vec::new(),
-            };
-            http_download(&args.url, config.proxy.clone(), optimizer, options, None)
-        };
-
-    // Record to history (best-effort)
-    let mut history = DownloadHistory::load();
-    let entry = HistoryEntry::new(
-        &url_for_history,
-        &output_dir_for_history,
-        sha256_for_history.as_deref(),
-    );
-    let (status, err) = match &result {
-        Ok(()) => (EntryStatus::Completed, None),
-        Err(e) => (EntryStatus::Failed, Some(e.to_string())),
+    let ctx = Ctx {
+        config: config.clone(),
+        cancel: Arc::new(AtomicBool::new(false)),
     };
-    history.record(entry, status, err);
-    let _ = history.save();
-
-    result
+    crate::run_and_record(&job, &ctx).map(|_| ())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -232,8 +173,10 @@ fn cmd_config(parts: &[&str], config: &mut Config) -> Result<(), Box<dyn Error +
                     None => "unlimited".to_string(),
                 }
             );
-            println!("  compression   {}", config.optimization.compression);
-            println!("  cache         {}", config.optimization.cache_enabled);
+            println!(
+                "  ytdlp-path    {}",
+                config.ytdlp_path.as_deref().unwrap_or("auto-detect")
+            );
             println!(
                 "  proxy         {}",
                 if config.proxy.enabled {
@@ -251,7 +194,7 @@ fn cmd_config(parts: &[&str], config: &mut Config) -> Result<(), Box<dyn Error +
         "set" => {
             if parts.len() < 3 {
                 println!("Usage: config set <key> <value>");
-                println!("  keys: connections, speed-limit, compression, cache");
+                println!("  keys: connections, speed-limit, ytdlp-path");
                 return Ok(());
             }
             let key = parts[1];
@@ -281,25 +224,25 @@ fn cmd_config(parts: &[&str], config: &mut Config) -> Result<(), Box<dyn Error +
                     }
                     config.save()?;
                 }
-                "compression" => {
-                    let v: bool = value
-                        .parse()
-                        .map_err(|_| format!("'{}' is not 'true' or 'false'", value))?;
-                    config.optimization.compression = v;
+                "ytdlp-path" => {
+                    if value == "auto" || value.is_empty() {
+                        config.ytdlp_path = None;
+                        println!("yt-dlp path: auto-detect");
+                    } else {
+                        config.ytdlp_path = Some(utils::expand_tilde(value));
+                        println!("yt-dlp path set to {}", utils::expand_tilde(value));
+                    }
                     config.save()?;
-                    println!("Compression set to {}", v);
                 }
-                "cache" => {
-                    let v: bool = value
-                        .parse()
-                        .map_err(|_| format!("'{}' is not 'true' or 'false'", value))?;
-                    config.optimization.cache_enabled = v;
-                    config.save()?;
-                    println!("Cache set to {}", v);
+                "compression" | "cache" => {
+                    println!(
+                        "'{}' was removed in 1.7.1 (it never affected downloads).",
+                        key
+                    );
                 }
                 unknown => {
                     println!(
-                        "Unknown config key: '{}'\n  Available keys: connections, speed-limit, compression, cache",
+                        "Unknown config key: '{}'\n  Available keys: connections, speed-limit, ytdlp-path",
                         unknown
                     );
                 }
@@ -326,15 +269,21 @@ Commands
           --turbo            Alias for --advanced
       -o, --output <path>    Save to this file or directory
       -q, --quiet            No progress output
+      -c, --continue         Resume a partial download (<file>.part)
+      -H, --header <h>       Extra HTTP header, e.g. -H "Referer: https://x"
           --sha256 <hash>    Verify SHA-256 after download
-          --ftp              Use FTP protocol  (ftp://[user:pass@]host/path)
-          --sftp             Use SFTP protocol (sftp://[user[:pass]@]host/path)
+          --quality <q>      yt-dlp quality: best, 1080p, 720p, 480p, 360p, audio
+          --ftp / --sftp / --webdav / --ytdlp
+                             Force a protocol (normally detected from the URL)
           --torrent          Force torrent/magnet handling
           --metalink         Treat source as a Metalink manifest (.meta4/.metalink)
 
+    Quote paths with spaces: download -o "~/My Downloads/x.iso" <url>
+    You can also paste a URL on its own to download it.
+
   history                    Show recent download history (last 50)
   history clear              Remove all history entries
-  history clear completed    Remove only completed/cancelled entries
+  history clear completed    Remove completed, cancelled and handed-off entries
 
   config                     Show current configuration
   config show                Show current configuration
@@ -342,8 +291,7 @@ Commands
     keys:
       connections  <1-32>           Parallel HTTP connections
       speed-limit  <bytes/s | 0>   Bandwidth cap (0 = unlimited)
-      compression  <true|false>     Enable compression cache
-      cache        <true|false>     Enable local download cache
+      ytdlp-path   <path | auto>    yt-dlp binary to use
 
   clear                      Clear the terminal screen
   version                    Show KGet version
@@ -355,7 +303,8 @@ Examples
   download https://example.com/file.zip
   download -a -o ~/Downloads/ubuntu.iso https://releases.ubuntu.com/...
   download --sha256 abc123 https://example.com/checksummed.tar.gz
-  download --ftp ftp://ftp.gnu.org/gnu/emacs/emacs-28.2.tar.gz
+  download ftp://ftp.gnu.org/gnu/emacs/emacs-28.2.tar.gz
+  https://www.youtube.com/watch?v=...
   download --sftp sftp://user@server.com/backups/db.sql.gz
   download magnet:?xt=urn:btih:...
   download --metalink ubuntu.meta4
@@ -402,8 +351,29 @@ pub fn interactive_mode() {
                 }
                 let _ = rl.add_history_entry(input);
 
-                let parts: Vec<&str> = input.split_whitespace().collect();
+                let owned: Vec<String> = match shlex::split(input) {
+                    Some(p) if !p.is_empty() => p,
+                    Some(_) => continue,
+                    None => {
+                        eprintln!("Error: unbalanced quotes");
+                        continue;
+                    }
+                };
+                let parts: Vec<&str> = owned.iter().map(String::as_str).collect();
                 let cmd = parts[0];
+
+                // A URL pasted on its own starts a download.
+                if parts.len() == 1 && (cmd.contains("://") || cmd.starts_with("magnet:?")) {
+                    match parse_download_args(&parts) {
+                        Ok(args) => {
+                            if let Err(e) = run_download(args, &config) {
+                                eprintln!("Download failed: {}", e);
+                            }
+                        }
+                        Err(e) => eprintln!("Error: {}", e),
+                    }
+                    continue;
+                }
 
                 match cmd {
                     "exit" | "quit" => {
@@ -425,15 +395,20 @@ pub fn interactive_mode() {
                         match sub {
                             "clear" => {
                                 let scope = parts.get(2).copied().unwrap_or("all");
-                                let mut history = DownloadHistory::load();
-                                let n = match scope {
-                                    "completed" | "done" => history.clear_completed(),
-                                    _ => history.clear_all(),
-                                };
-                                if let Err(e) = history.save() {
-                                    eprintln!("Failed to save history: {}", e);
-                                } else {
-                                    println!("Removed {} history entries.", n);
+                                let mut removed = 0usize;
+                                let r = DownloadHistory::update(|entries| {
+                                    let before = entries.len();
+                                    match scope {
+                                        "completed" | "done" => entries.retain(|e| {
+                                            e.status == kget::queue::EntryStatus::Failed
+                                        }),
+                                        _ => entries.clear(),
+                                    }
+                                    removed = before - entries.len();
+                                });
+                                match r {
+                                    Err(e) => eprintln!("Failed to save history: {}", e),
+                                    Ok(()) => println!("Removed {} history entries.", removed),
                                 }
                             }
                             _ => {
@@ -443,13 +418,13 @@ pub fn interactive_mode() {
                                     println!("No download history.");
                                 } else {
                                     println!(
-                                        "{:<10} {:<22} {:<12} {}",
-                                        "ID", "Date (UTC)", "Status", "File"
+                                        "{:<16} {:<22} {:<12} File",
+                                        "ID", "Date (UTC)", "Status"
                                     );
-                                    println!("{}", "-".repeat(80));
+                                    println!("{}", "-".repeat(86));
                                     for e in entries {
                                         println!(
-                                            "{:<10} {:<22} {:<12} {}",
+                                            "{:<16} {:<22} {:<12} {}",
                                             e.id,
                                             e.created_at_display(),
                                             e.status,

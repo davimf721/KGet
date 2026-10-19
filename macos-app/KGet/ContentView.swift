@@ -101,7 +101,7 @@ struct ContentView: View {
     private var filteredDownloads: [Download] {
         switch currentFilter {
         case .all:       return downloadManager.downloads
-        case .active:    return downloadManager.downloads.filter { $0.status == .downloading || $0.status == .verifying || $0.status == .pending }
+        case .active:    return downloadManager.downloads.filter { $0.status == .downloading || $0.status == .verifying || $0.status == .pending || $0.status == .paused }
         case .completed: return downloadManager.downloads.filter { $0.status == .completed }
         case .failed:    return downloadManager.downloads.filter { $0.status == .failed || $0.status == .cancelled }
         case .history:   return []
@@ -156,7 +156,7 @@ struct ContentView: View {
     private func downloadCount(for item: SidebarItem) -> Int {
         switch item {
         case .all:       return downloadManager.downloads.count
-        case .active:    return downloadManager.downloads.filter { $0.status == .downloading || $0.status == .verifying || $0.status == .pending }.count
+        case .active:    return downloadManager.downloads.filter { $0.status == .downloading || $0.status == .verifying || $0.status == .pending || $0.status == .paused }.count
         case .completed: return downloadManager.downloads.filter { $0.status == .completed }.count
         case .failed:    return downloadManager.downloads.filter { $0.status == .failed || $0.status == .cancelled }.count
         case .history:   return downloadManager.historyEntries.count
@@ -739,6 +739,7 @@ struct DownloadRowView: View {
         switch download.status {
         case .pending:     return .secondary
         case .downloading: return .accentColor
+        case .paused:      return .yellow
         case .verifying:   return .purple
         case .completed:   return .green
         case .failed:      return .red
@@ -752,7 +753,19 @@ struct DownloadRowView: View {
                 Image(systemName: "link").foregroundStyle(.secondary)
             }.buttonStyle(.plain).help("Copy URL")
 
-            if download.status == .downloading {
+            if download.status == .downloading && !download.isTorrent {
+                Button { downloadManager.pauseDownload(download) } label: {
+                    Image(systemName: "pause.circle").foregroundStyle(.yellow)
+                }.buttonStyle(.plain).help("Pause")
+            }
+
+            if download.status == .paused {
+                Button { downloadManager.resumeDownload(download) } label: {
+                    Image(systemName: "play.circle").foregroundStyle(Color.accentColor)
+                }.buttonStyle(.plain).help("Resume")
+            }
+
+            if download.status == .downloading || download.status == .paused {
                 Button { downloadManager.cancelDownload(download) } label: {
                     Image(systemName: "stop.circle").foregroundStyle(.red)
                 }.buttonStyle(.plain).help("Cancel")

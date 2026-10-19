@@ -2,6 +2,16 @@
 
 ## Shipped
 
+### v1.7.1
+- ✅ **Safe resume** — `.part` + `.kget` state for turbo mode, validated chunks, retry from exact offset, Ctrl+C keeps progress.
+- ✅ **CLI flags no longer persisted** — `--save-config`, never stores proxy passwords; `KGET_CONFIG_DIR`.
+- ✅ **Unified HTTP client** — HTTP/HTTPS/SOCKS5 proxies for all targets, no transparent decompression.
+- ✅ **yt-dlp** — found outside `PATH` (Homebrew/MacPorts/pipx), `KGET_YTDLP_PATH`, real progress and output path.
+- ✅ **New flags** — `-c`, `--no-clobber`, `--retries`, `--timeout`, `-j`, `--checksum`, `--checksum-url`, `--doctor`.
+- ✅ **Versioned JSONL protocol** — used by the macOS app (pause/resume, real file names).
+- ✅ **`.torrent` files**, Metalink v3, FTP/SFTP resume and timeouts, atomic multi-process history.
+- ✅ **CI + automated releases** — GitHub Actions for Linux/macOS/Windows, crates.io and Homebrew.
+
 ### v1.7.0
 - ✅ **Batch download (`--batch urls.txt`)** — parallel, one URL per line, `#` = comment.
 - ✅ **Download scheduling (`--at "HH:MM"`)** — sleep until local wall-clock time.

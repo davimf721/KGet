@@ -1,21 +1,29 @@
 //! FTP client implementation.
 
-use crate::config::ProxyConfig;
+use crate::ByteProgressCallback;
+use crate::config::{FtpConfig, ProxyConfig};
 use crate::optimization::Optimizer;
-use crate::progress::create_progress_bar;
+use crate::progress::{Throttle, create_progress_bar};
 use crate::utils::print;
 use std::error::Error;
 use std::io::Write;
+use std::net::ToSocketAddrs;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 use suppaftp::FtpStream;
 use url::Url;
+
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+const IO_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// FTP file downloader with progress tracking.
 ///
 /// Supports:
 /// - Anonymous FTP (use "anonymous" as username)
-/// - Authenticated FTP with username/password in URL
+/// - Authenticated FTP with username/password in URL (percent-encoded)
 /// - Binary transfer mode (safe for all file types)
-/// - SOCKS5 proxy connections
+/// - SOCKS5 proxy connections (with optional credentials)
+/// - Resuming an interrupted transfer (`REST`) from `<file>.part`
 ///
 /// # URL Format
 ///
@@ -56,6 +64,9 @@ pub struct FtpDownloader {
     proxy: ProxyConfig,
     #[allow(dead_code)]
     optimizer: Optimizer,
+    config: FtpConfig,
+    resume: bool,
+    progress_callback: Option<ByteProgressCallback>,
 }
 
 impl FtpDownloader {
@@ -81,14 +92,49 @@ impl FtpDownloader {
             quiet_mode,
             proxy,
             optimizer,
+            config: FtpConfig::default(),
+            resume: true,
+            progress_callback: None,
         }
     }
 
+    /// Use the passive-mode / default-port settings from the configuration.
+    pub fn with_config(mut self, config: FtpConfig) -> Self {
+        self.config = config;
+        self
+    }
+
+    /// Continue an existing `<file>.part` (default `true`).
+    pub fn with_resume(mut self, resume: bool) -> Self {
+        self.resume = resume;
+        self
+    }
+
+    /// Structured progress callback `(bytes, total)`.
+    pub fn with_progress_callback(mut self, cb: ByteProgressCallback) -> Self {
+        self.progress_callback = Some(cb);
+        self
+    }
+
+    /// Download the file.
     pub fn download(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
         let url = Url::parse(&self.url)?;
+        if url.scheme().eq_ignore_ascii_case("ftps") {
+            return Err("FTPS (ftp over TLS) is not supported yet; use sftp:// or ftp://".into());
+        }
         let host = url.host_str().ok_or("Invalid host")?;
-        let port = url.port().unwrap_or(21);
-        let path = url.path();
+        let port = url.port().unwrap_or(self.config.default_port);
+        let path = urlencoding::decode(url.path())?.into_owned();
+        // url.username() is "" when the URL has no user — fall back to "anonymous"
+        let username = if url.username().is_empty() {
+            "anonymous".to_string()
+        } else {
+            urlencoding::decode(url.username())?.into_owned()
+        };
+        let password = match url.password() {
+            Some(p) => urlencoding::decode(p)?.into_owned(),
+            None => "anonymous".to_string(),
+        };
 
         print(
             &format!("Connecting to FTP server {}:{}...", host, port),
@@ -98,51 +144,111 @@ impl FtpDownloader {
         let mut ftp = if self.proxy.enabled {
             self.connect_via_proxy(host, port)?
         } else {
-            FtpStream::connect((host, port))?
+            let addr = (host, port)
+                .to_socket_addrs()?
+                .next()
+                .ok_or_else(|| format!("Cannot resolve host {host}"))?;
+            FtpStream::connect_timeout(addr, CONNECT_TIMEOUT)?
         };
-
-        // url.username() returns "" (empty string) when the URL has no user — fall back to "anonymous"
-        let username = if url.username().is_empty() {
-            "anonymous"
-        } else {
-            url.username()
-        };
-        let password = url.password().unwrap_or("anonymous");
+        ftp.get_ref().set_read_timeout(Some(IO_TIMEOUT))?;
+        ftp.get_ref().set_write_timeout(Some(IO_TIMEOUT))?;
+        if !self.config.passive_mode {
+            ftp.set_mode(suppaftp::Mode::Active);
+        }
 
         print(&format!("Logging in as {}...", username), self.quiet_mode);
-        ftp.login(username, password)?;
+        ftp.login(&username, &password)?;
 
         ftp.transfer_type(suppaftp::types::FileType::Binary)?;
 
-        let size = ftp.size(path)? as u64;
+        // Not every server implements SIZE: fall back to a spinner.
+        let size = ftp.size(&path).ok().map(|s| s as u64);
+
+        let final_path = PathBuf::from(&self.output_path);
+        if let Some(parent) = final_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent)?;
+        }
+        let part = crate::download::part_path_for(&final_path);
+
+        let mut offset = if self.resume {
+            std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0)
+        } else {
+            0
+        };
+        if size.is_some_and(|s| offset > s) {
+            offset = 0;
+        }
+        if offset > 0 && ftp.resume_transfer(offset as usize).is_err() {
+            print(
+                "Server does not support resume (REST); restarting",
+                self.quiet_mode,
+            );
+            offset = 0;
+        }
+        if offset > 0 {
+            print(&format!("Resuming at byte {offset}"), self.quiet_mode);
+        }
 
         let progress = create_progress_bar(
             self.quiet_mode,
             format!("Downloading {}", path),
-            Some(size),
+            size,
             false,
         );
+        progress.set_position(offset);
 
-        let mut file = std::fs::File::create(&self.output_path)?;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .append(offset > 0)
+            .truncate(offset == 0)
+            .open(&part)?;
 
-        // Download file
-        let mut downloaded = 0;
-        ftp.retr(path, |reader| {
-            let mut buffer = vec![0; 8192];
-            loop {
-                match reader.read(&mut buffer) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        file.write_all(&buffer[..n])
-                            .map_err(|e| suppaftp::FtpError::ConnectionError(e))?;
-                        downloaded += n;
-                        progress.set_position(downloaded as u64);
+        let mut downloaded = offset;
+        let mut throttle = Throttle::new(200);
+        let cb = self.progress_callback.clone();
+        if size != Some(offset) {
+            ftp.retr(&path, |reader| {
+                let mut buffer = vec![0; 64 * 1024];
+                loop {
+                    match reader.read(&mut buffer) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            file.write_all(&buffer[..n])
+                                .map_err(suppaftp::FtpError::ConnectionError)?;
+                            downloaded += n as u64;
+                            progress.set_position(downloaded);
+                            if let Some(cb) = &cb {
+                                let pct = size
+                                    .map(|s| downloaded as f64 / s.max(1) as f64 * 100.0)
+                                    .unwrap_or(0.0);
+                                if throttle.ready(pct) {
+                                    cb(downloaded, size);
+                                }
+                            }
+                        }
+                        Err(e) => return Err(suppaftp::FtpError::ConnectionError(e)),
                     }
-                    Err(e) => return Err(suppaftp::FtpError::ConnectionError(e)),
                 }
-            }
-            Ok(())
-        })?;
+                Ok(())
+            })?;
+        }
+        file.flush()?;
+        drop(file);
+        let _ = ftp.quit();
+
+        if let Some(expected) = size
+            && downloaded != expected
+        {
+            return Err(format!(
+                "Incomplete FTP download: {downloaded} of {expected} bytes; run again to resume"
+            )
+            .into());
+        }
+        if let Some(cb) = &cb {
+            cb(downloaded, Some(downloaded));
+        }
+        std::fs::rename(&part, Path::new(&self.output_path))?;
 
         progress.finish();
         print("Download completed successfully!", self.quiet_mode);
@@ -157,21 +263,31 @@ impl FtpDownloader {
     ) -> Result<FtpStream, Box<dyn Error + Send + Sync>> {
         match self.proxy.proxy_type {
             crate::config::ProxyType::Http | crate::config::ProxyType::Https => {
-                Err("HTTP/HTTPS proxy not supported for FTP".into())
+                Err("HTTP/HTTPS proxy not supported for FTP (use a SOCKS5 proxy)".into())
             }
             crate::config::ProxyType::Socks5 => {
-                if let Some(proxy_url) = &self.proxy.url {
-                    let proxy = Url::parse(proxy_url)?;
-                    let proxy_host = proxy.host_str().ok_or("Invalid proxy host")?;
-                    let proxy_port = proxy.port().unwrap_or(1080);
+                let proxy_url = self
+                    .proxy
+                    .url
+                    .as_deref()
+                    .ok_or("Proxy URL not configured")?;
+                let proxy_url =
+                    crate::http::normalize_proxy_url(proxy_url, crate::config::ProxyType::Socks5);
+                let proxy = Url::parse(&proxy_url)?;
+                let proxy_host = proxy.host_str().ok_or("Invalid proxy host")?;
+                let proxy_port = proxy.port().unwrap_or(1080);
 
-                    let stream =
-                        socks::Socks5Stream::connect((proxy_host, proxy_port), (host, port))?;
+                let stream = match (&self.proxy.username, &self.proxy.password) {
+                    (Some(u), Some(p)) => socks::Socks5Stream::connect_with_password(
+                        (proxy_host, proxy_port),
+                        (host, port),
+                        u,
+                        p,
+                    )?,
+                    _ => socks::Socks5Stream::connect((proxy_host, proxy_port), (host, port))?,
+                };
 
-                    Ok(FtpStream::connect_with_stream(stream.into_inner())?)
-                } else {
-                    Err("Proxy URL not configured".into())
-                }
+                Ok(FtpStream::connect_with_stream(stream.into_inner())?)
             }
         }
     }

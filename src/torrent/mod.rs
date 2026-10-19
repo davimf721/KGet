@@ -47,8 +47,9 @@
 
 use std::error::Error;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
-use crate::config::ProxyConfig;
+use crate::config::{ProxyConfig, TorrentConfig};
 use crate::optimization::Optimizer;
 
 mod external;
@@ -93,6 +94,35 @@ pub struct TorrentCallbacks {
     pub progress: Option<ProgressCb>,
 }
 
+/// Callback receiving the torrent's file list `(relative name, size)`.
+pub type FilesCb = Arc<dyn Fn(Vec<(String, u64)>) + Send + Sync>;
+
+/// Callback receiving the bytes downloaded per file (same order as the file list).
+pub type FileProgressCb = Arc<dyn Fn(Vec<u64>) + Send + Sync>;
+
+/// Extra settings for [`download_torrent`].
+#[derive(Clone, Default)]
+pub struct TorrentOptions {
+    /// Port, DHT and peer settings (native backend)
+    pub config: TorrentConfig,
+    /// Set to `true` to stop the download
+    pub cancel: Option<Arc<AtomicBool>>,
+    /// Called once the file list is known (native backend)
+    pub on_files: Option<FilesCb>,
+    /// Called about once per second with per-file progress (native backend)
+    pub on_file_progress: Option<FileProgressCb>,
+}
+
+/// How a torrent request ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TorrentOutcome {
+    /// KGet downloaded the data itself.
+    Downloaded,
+    /// The link/file was opened in an external torrent client; nothing was
+    /// downloaded by KGet.
+    HandedOff,
+}
+
 fn emit_status(cb: &TorrentCallbacks, msg: impl Into<String>) {
     if let Some(f) = &cb.status {
         f(msg.into());
@@ -126,6 +156,18 @@ pub fn is_supported_magnet_link(magnet: &str) -> bool {
     let lower = magnet.to_ascii_lowercase();
     lower.starts_with("magnet:?")
         && (lower.contains("xt=urn:btih:") || lower.contains("xt=urn:btmh:"))
+}
+
+/// Return true for a `.torrent` file path or an `http(s)://…/.torrent` URL.
+pub fn is_torrent_file(source: &str) -> bool {
+    let lower = source.trim().to_ascii_lowercase();
+    let path = lower.split(['?', '#']).next().unwrap_or(&lower);
+    path.ends_with(".torrent")
+}
+
+/// Return true when `source` is a magnet link or a `.torrent` file/URL.
+pub fn is_supported_torrent_source(source: &str) -> bool {
+    is_supported_magnet_link(source) || is_torrent_file(source)
 }
 
 /// Download a torrent from a magnet link.
@@ -194,14 +236,42 @@ pub fn is_supported_magnet_link(magnet: &str) -> bool {
 /// - Download is interrupted
 pub fn download_magnet(
     magnet: &str,
-    _output_dir: &str,
-    _quiet: bool,
-    _proxy: ProxyConfig,
-    _optimizer: Optimizer,
+    output_dir: &str,
+    quiet: bool,
+    proxy: ProxyConfig,
+    optimizer: Optimizer,
     cb: TorrentCallbacks,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    if !is_supported_magnet_link(magnet) {
-        return Err("Invalid or unsupported BitTorrent magnet link".into());
+    download_torrent(
+        magnet,
+        output_dir,
+        quiet,
+        proxy,
+        optimizer,
+        cb,
+        TorrentOptions::default(),
+    )
+    .map(|_| ())
+}
+
+/// Download a magnet link or `.torrent` file/URL, honouring [`TorrentOptions`].
+///
+/// Unlike [`download_magnet`], the result tells whether KGet downloaded the
+/// data ([`TorrentOutcome::Downloaded`]) or only opened it in an external
+/// client ([`TorrentOutcome::HandedOff`]).
+#[cfg_attr(not(feature = "torrent-native"), allow(unused_variables))]
+pub fn download_torrent(
+    source: &str,
+    output_dir: &str,
+    quiet: bool,
+    proxy: ProxyConfig,
+    optimizer: Optimizer,
+    cb: TorrentCallbacks,
+    opts: TorrentOptions,
+) -> Result<TorrentOutcome, Box<dyn Error + Send + Sync>> {
+    let magnet = source.trim();
+    if !is_supported_torrent_source(magnet) {
+        return Err("Invalid or unsupported BitTorrent magnet link or .torrent file".into());
     }
 
     emit_progress(&cb, 0.0);
@@ -211,13 +281,9 @@ pub fn download_magnet(
             #[cfg(feature = "torrent-native")]
             {
                 return native::download_magnet_native(
-                    magnet,
-                    _output_dir,
-                    _quiet,
-                    _proxy,
-                    _optimizer,
-                    cb,
-                );
+                    magnet, output_dir, quiet, proxy, optimizer, cb, opts,
+                )
+                .map(|_| TorrentOutcome::Downloaded);
             }
 
             #[cfg(not(feature = "torrent-native"))]
@@ -232,12 +298,7 @@ pub fn download_magnet(
             #[cfg(feature = "torrent-transmission")]
             {
                 return transmission::download_via_transmission(
-                    magnet,
-                    _output_dir,
-                    _quiet,
-                    _proxy,
-                    _optimizer,
-                    cb,
+                    magnet, output_dir, quiet, proxy, optimizer, cb,
                 );
             }
 
@@ -255,12 +316,11 @@ pub fn download_magnet(
     emit_status(
         &cb,
         format!(
-            "Opening magnet link in your default torrent client (output folder may be managed by that client): {}",
+            "Opening in your default torrent client (KGet does not download it; the output folder is managed by that client): {}",
             magnet
         ),
     );
 
     external::open_magnet_in_default_client(magnet)?;
-    emit_progress(&cb, 1.0);
-    Ok(())
+    Ok(TorrentOutcome::HandedOff)
 }

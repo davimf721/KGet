@@ -10,7 +10,7 @@
 
 use crate::DownloadOptions;
 use crate::config::ProxyConfig;
-use crate::download::download as http_download;
+use crate::download::download_to_path as http_download;
 use crate::optimization::Optimizer;
 use std::error::Error;
 
@@ -29,6 +29,7 @@ pub struct WebDavDownloader {
     optimizer: Optimizer,
     username: Option<String>,
     password: Option<String>,
+    options: DownloadOptions,
 }
 
 impl WebDavDownloader {
@@ -43,34 +44,59 @@ impl WebDavDownloader {
         proxy: ProxyConfig,
         optimizer: Optimizer,
     ) -> Self {
-        let (http_url, username, password) = parse_webdav_url(&url);
-        Self { http_url, output, quiet, proxy, optimizer, username, password }
+        let (http_url, username, password) =
+            parse_webdav_url(&url).unwrap_or_else(|_| (url.clone(), None, None));
+        Self {
+            http_url,
+            output,
+            quiet,
+            proxy,
+            optimizer,
+            username,
+            password,
+            options: DownloadOptions::default(),
+        }
     }
 
-    pub fn download(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let mut extra_headers: Vec<(String, String)> = Vec::new();
+    /// Extra options (resume, retries, SHA-256, progress callback…) for the
+    /// underlying HTTP download. `quiet_mode` and `output_path` are ignored.
+    pub fn with_options(mut self, options: DownloadOptions) -> Self {
+        self.options = options;
+        self
+    }
+
+    /// Download the resource and return the path of the saved file.
+    pub fn download_to_path(
+        &self,
+        status_callback: Option<&(dyn Fn(String) + Send + Sync)>,
+    ) -> Result<std::path::PathBuf, Box<dyn Error + Send + Sync>> {
+        let mut options = self.options.clone();
+        options.quiet_mode = self.quiet;
+        options.output_path = Some(self.output.clone());
 
         if let Some(user) = &self.username {
+            if self.http_url.starts_with("http://") && !self.quiet {
+                eprintln!("Warning: sending WebDAV credentials without TLS (use webdavs://)");
+            }
             let pass = self.password.as_deref().unwrap_or("");
             let creds = base64_encode(format!("{user}:{pass}").as_bytes());
-            extra_headers.push(("Authorization".to_string(), format!("Basic {creds}")));
+            options
+                .extra_headers
+                .push(("Authorization".to_string(), format!("Basic {creds}")));
         }
-
-        let options = DownloadOptions {
-            quiet_mode: self.quiet,
-            output_path: Some(self.output.clone()),
-            verify_iso: false,
-            expected_sha256: None,
-            extra_headers,
-        };
 
         http_download(
             &self.http_url,
             self.proxy.clone(),
             self.optimizer.clone(),
             options,
-            None,
+            status_callback,
         )
+    }
+
+    /// Download the resource.
+    pub fn download(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        self.download_to_path(None).map(|_| ())
     }
 }
 
@@ -79,43 +105,60 @@ impl WebDavDownloader {
 // ────────────────────────────────────────────────────────────
 
 /// Convert `webdav://user:pass@host/path` → (`http://host/path`, user, pass).
-fn parse_webdav_url(url: &str) -> (String, Option<String>, Option<String>) {
-    let (scheme, rest) = if url.to_lowercase().starts_with("webdavs://") {
-        ("https", &url["webdavs://".len()..])
+///
+/// Credentials are percent-decoded; `@` characters in the path are preserved.
+fn parse_webdav_url(
+    raw: &str,
+) -> Result<(String, Option<String>, Option<String>), url::ParseError> {
+    let mut u = url::Url::parse(raw)?;
+    let scheme = if u.scheme().eq_ignore_ascii_case("webdavs") {
+        "https"
     } else {
-        ("http", &url["webdav://".len()..])
+        "http"
     };
-
-    // Check for embedded credentials: user:pass@host/path
-    if let Some(at) = rest.find('@') {
-        let creds = &rest[..at];
-        let host_path = &rest[at + 1..];
-        let http_url = format!("{scheme}://{host_path}");
-        if let Some(colon) = creds.find(':') {
-            return (
-                http_url,
-                Some(creds[..colon].to_string()),
-                Some(creds[colon + 1..].to_string()),
-            );
-        }
-        return (http_url, Some(creds.to_string()), None);
-    }
-
-    (format!("{scheme}://{rest}"), None, None)
+    let decode = |s: &str| {
+        urlencoding::decode(s)
+            .map(|c| c.into_owned())
+            .unwrap_or_else(|_| s.to_string())
+    };
+    let user = (!u.username().is_empty()).then(|| decode(u.username()));
+    let pass = u.password().map(decode);
+    let _ = u.set_username("");
+    let _ = u.set_password(None);
+    // Url::set_scheme can't switch between "special" and non-special schemes,
+    // so rebuild the string instead.
+    let http_url = format!("{scheme}{}", &u.as_str()[u.scheme().len()..]);
+    Ok((http_url, user, pass))
 }
 
 /// Minimal RFC 4648 base64 encoder — avoids adding a `base64` crate.
 fn base64_encode(data: &[u8]) -> String {
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
         let b0 = chunk[0] as usize;
-        let b1 = if chunk.len() > 1 { chunk[1] as usize } else { 0 };
-        let b2 = if chunk.len() > 2 { chunk[2] as usize } else { 0 };
+        let b1 = if chunk.len() > 1 {
+            chunk[1] as usize
+        } else {
+            0
+        };
+        let b2 = if chunk.len() > 2 {
+            chunk[2] as usize
+        } else {
+            0
+        };
         out.push(CHARS[b0 >> 2] as char);
         out.push(CHARS[((b0 & 3) << 4) | (b1 >> 4)] as char);
-        out.push(if chunk.len() > 1 { CHARS[((b1 & 15) << 2) | (b2 >> 6)] as char } else { '=' });
-        out.push(if chunk.len() > 2 { CHARS[b2 & 63] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            CHARS[((b1 & 15) << 2) | (b2 >> 6)] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            CHARS[b2 & 63] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -126,17 +169,27 @@ mod tests {
 
     #[test]
     fn parse_plain_webdav() {
-        let (url, user, pass) = parse_webdav_url("webdav://nas.local/files/report.pdf");
+        let (url, user, pass) = parse_webdav_url("webdav://nas.local/files/report.pdf").unwrap();
         assert_eq!(url, "http://nas.local/files/report.pdf");
         assert!(user.is_none() && pass.is_none());
     }
 
     #[test]
     fn parse_webdavs_with_credentials() {
-        let (url, user, pass) = parse_webdav_url("webdavs://alice:secret@cloud.example.com/docs/file.zip");
+        let (url, user, pass) =
+            parse_webdav_url("webdavs://alice:secret@cloud.example.com/docs/file.zip").unwrap();
         assert_eq!(url, "https://cloud.example.com/docs/file.zip");
         assert_eq!(user.as_deref(), Some("alice"));
         assert_eq!(pass.as_deref(), Some("secret"));
+    }
+
+    #[test]
+    fn parse_encoded_credentials_and_at_in_path() {
+        let (url, user, pass) =
+            parse_webdav_url("webdavs://bob:p%40ss@host.example/users/@me/f.txt").unwrap();
+        assert_eq!(url, "https://host.example/users/@me/f.txt");
+        assert_eq!(user.as_deref(), Some("bob"));
+        assert_eq!(pass.as_deref(), Some("p@ss"));
     }
 
     #[test]

@@ -1,11 +1,20 @@
 <img width="1000" height="500" alt="KGet Banner" src="https://github.com/user-attachments/assets/d0888e3f-90a2-42d6-a9aa-b216dc36f1f4" />
 
-# KGet v1.7.0
+# KGet v1.7.1
 
 **A fast, modern download manager written in Rust.**  
 HTTP/HTTPS · FTP/SFTP · WebDAV · BitTorrent · Metalink · yt-dlp · CLI · GUI · Library
 
 [English](README.md) | [Português](translations/README.pt-BR.md) | [Español](translations/README.es.md)
+
+[![CI](https://github.com/davimf721/KGet/actions/workflows/ci.yml/badge.svg)](https://github.com/davimf721/KGet/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/Kget.svg)](https://crates.io/crates/Kget)
+[![docs.rs](https://docs.rs/Kget/badge.svg)](https://docs.rs/Kget)
+
+> **1.7.1** is a reliability release: turbo downloads can no longer finish with a
+> corrupted file, every download resumes after Ctrl+C, CLI flags no longer leak
+> into `config.json`, proxies cover HTTPS/SOCKS5, and the macOS app finds yt-dlp
+> installed with Homebrew. See the [CHANGELOG](CHANGELOG.md).
 
 ---
 
@@ -25,34 +34,38 @@ Most download tools are either too simple (single-connection wget-clones) or too
 ### Download Protocols
 | Protocol | Flag | Notes |
 |----------|------|-------|
-| HTTP / HTTPS | *(auto)* | Multi-connection, resume, gzip/brotli/lz4, proxy |
-| FTP | `--ftp` | Authenticated or anonymous |
-| SFTP | `--sftp` | Password or key-based; host-key verification |
-| WebDAV | `--webdav` or `webdav://` | HTTP Basic auth embedded in URL |
-| Magnet / BitTorrent | *(auto-detected)* | Built-in torrent client (`torrent-native` feature) |
-| Metalink `.meta4` | `--metalink` | Multi-mirror fallback, SHA-256 verified (RFC 5854) |
+| HTTP / HTTPS | *(auto)* | Multi-connection, resume, HTTP/HTTPS/SOCKS5 proxy, byte-exact files |
+| FTP | `ftp://` *(auto)* or `--ftp` | Authenticated or anonymous, resume (`REST`) |
+| SFTP | `sftp://` *(auto)* or `--sftp` | Password or key-based; host-key verification; resume |
+| WebDAV | `webdav://` *(auto)* or `--webdav` | HTTP Basic auth embedded in URL |
+| Magnet / BitTorrent | *(auto-detected)* | Magnet links and `.torrent` files/URLs (`torrent-native` feature) |
+| Metalink `.meta4` / `.metalink` | *(auto)* or `--metalink` | v3 + v4 (RFC 5854), multi-mirror, SHA-256/512/MD5 verified |
 | Video sites | `--ytdlp` or *(auto-detected)* | YouTube, Vimeo, Twitch, TikTok, Instagram… via yt-dlp |
 
 ### Download Engine
-- **Turbo mode** (`-a`) — parallel byte-range connections, resumable after interruption
-- **Batch download** (`--batch urls.txt`) — one URL per line, `#` = comment, all run in parallel
+- **Turbo mode** (`-a`) — parallel byte-range connections; every chunk is validated and retried from its exact offset
+- **Safe resume** — data goes to `<file>.part` (plus a `<file>.kget` state for turbo mode); press Ctrl+C at any time and run the same command again (`-c` for simple downloads)
+- **Overwrite control** — `--no-clobber` skips existing files; `--retries N` and `--timeout SECS` tune the network behaviour
+- **Batch download** (`--batch urls.txt`, or `--batch -` for stdin) — `-j/--jobs N` parallel downloads, unique file names
 - **Download scheduling** (`--at "HH:MM"`) — sleep until a specific local wall-clock time
 - **Speed limiting** (`-l <bytes/s>`) — global token-bucket throttle across all parallel threads
 - **Custom HTTP headers** (`-H "Name: Value"`) — inject arbitrary headers into any request
 - **Auto-extract archives** (`--extract`) — unzip/tar/7z after download (`.zip`, `.tar.gz`, `.7z`, …)
 - **SHA-256 verification** (`--sha256 <hash>`) — hard-error on mismatch; never silently accepts corrupt files
-- **Sidecar checksum files** — verifies against GNU/BSD `.sha256sum` files
+- **Any checksum** (`--checksum sha512:<hex>`) and **sidecar files** (`--checksum-url …/SHA256SUMS`) — GNU, BSD and hash-only formats
 - **Content-Disposition** — uses server-suggested filenames automatically
-- **Filename safety** — rejects null bytes, path traversal, Windows reserved names, and >255-byte filenames
+- **Filename safety** — server-provided names are sanitized (no traversal, control or reserved characters); `%20` is decoded
 
 ### Integrity & Security
 - **Multi-algorithm checksums** — SHA-256, SHA-512, SHA-1, MD5, BLAKE3
 - **SFTP host-key verification** — checks `~/.ssh/known_hosts`; hard-errors on mismatch
-- **Retry policy** — retries on 5xx and network errors only; fails immediately on 4xx
-- **JSONL events** (`--jsonl`) — machine-readable progress for scripts and agents
+- **Retry policy** — retries 408/429/5xx and network errors with backoff (honours `Retry-After`); fails immediately on other 4xx
+- **JSONL events** (`--jsonl`) — versioned (`"v":1`) machine-readable events for every protocol
+- **Diagnostics** (`--doctor`) — config path, yt-dlp location, extract tools, compiled features
 
 ### History & Persistence
-- **Download history** — every download recorded to `history.json`; `--history` / `--history-clear`
+- **Download history** — every download recorded to `history.json` (atomic, multi-process safe, credentials stripped); `--history` / `--history-clear`
+- **Configuration** — flags apply only to the current run; `--save-config` persists them (proxy passwords are never written). `KGET_CONFIG_DIR` overrides the config directory
 - **Interactive REPL** (`--interactive`) — full command history, all protocols, live config editing
 
 ### GUIs
@@ -94,8 +107,11 @@ brew install kget --with-gui --with-torrent # all optional features
 ### Pre-built binaries
 
 Download the latest release from [Releases](https://github.com/davimf721/KGet/releases):
-- **macOS** — `KGet-1.7.0-macOS-Native.dmg` (native SwiftUI app, no Rust needed)
-- **Linux/Windows** — CLI binary or GUI binary (see release assets)
+- **macOS** — `KGet-1.7.1-macOS-Native.dmg` (native SwiftUI app, no Rust needed)
+- **macOS CLI** — `kget-1.7.1-macos-arm64` (Apple Silicon) / `kget-1.7.1-macos-x64` (Intel)
+- **Linux** — `kget-1.7.1-linux-x64`, `kget-1.7.1-linux-x64-static` (musl), `kget-1.7.1-linux-arm64`
+- **Windows** — `kget-1.7.1-windows-x64.exe` / `.zip`
+- Verify with `SHA256SUMS-1.7.1.txt`
 
 ### From crates.io
 
@@ -137,27 +153,40 @@ kget -a https://releases.ubuntu.com/24.04/ubuntu-24.04-desktop-amd64.iso
 
 # Quiet mode
 kget -q https://example.com/file.zip
+
+# Interrupted? Run it again — turbo resumes automatically, -c continues a simple download
+kget -c https://example.com/big.iso
+
+# Don't overwrite, more retries, shorter timeout
+kget --no-clobber --retries 5 --timeout 20 https://example.com/file.zip
+
+# Verify with a checksum file published next to the download
+kget --checksum-url https://releases.ubuntu.com/24.04/SHA256SUMS https://releases.ubuntu.com/24.04/ubuntu-24.04-desktop-amd64.iso
+
+# Check your environment (paths, yt-dlp, tools, features)
+kget --doctor
 ```
 
 ### Protocols
 
 ```bash
-# FTP (anonymous or authenticated)
-kget --ftp ftp://ftp.gnu.org/gnu/emacs/emacs-28.2.tar.gz
-kget --ftp ftp://user:pass@server/file.zip
+# FTP (anonymous or authenticated) — detected from the scheme
+kget ftp://ftp.gnu.org/gnu/emacs/emacs-28.2.tar.gz
+kget ftp://user:pass@server/file.zip
 
-# SFTP (password or key-based)
-kget --sftp sftp://user:pass@server/path/to/file.dat
-kget --sftp sftp://user@server/path/to/file.dat
+# SFTP (password or key-based); /~/ is relative to your home directory
+kget sftp://user:pass@server/path/to/file.dat
+kget sftp://user@server/~/backups/file.dat
 
 # WebDAV (auto-detected from scheme)
 kget webdav://files.myserver.com/share/report.pdf
 kget webdavs://user:pass@nas.local/backups/db.tar.gz
 
-# Magnet link (auto-detected)
+# Magnet link or .torrent file/URL (auto-detected)
 kget "magnet:?xt=urn:btih:HASH&dn=filename"
+kget ~/Downloads/debian.iso.torrent
 
-# Metalink — tries mirrors in priority order, verifies SHA-256
+# Metalink (v3 or v4) — tries mirrors in priority order, verifies size and hash
 kget --metalink ubuntu-24.04.meta4
 kget https://releases.ubuntu.com/ubuntu.meta4
 ```
@@ -175,11 +204,17 @@ kget --ytdlp --quality audio https://www.youtube.com/watch?v=dQw4w9WgXcQ
 # Qualities: best, 1080p, 720p, 480p, 360p, audio
 ```
 
+yt-dlp is looked up in `PATH`, then in `/opt/homebrew/bin`, `/usr/local/bin`,
+`/opt/local/bin` and `~/.local/bin` (so the macOS app finds Homebrew installs
+when opened from the Dock). Set `KGET_YTDLP_PATH=/path/to/yt-dlp` to use a
+specific binary.
+
 ### Batch & scheduling
 
 ```bash
-# Batch — one URL per line, # = comment
-kget --batch urls.txt -O ~/Downloads/
+# Batch — one URL per line, # = comment; 8 at a time
+kget --batch urls.txt -O ~/Downloads/ -j 8
+cat urls.txt | kget --batch - -O ~/Downloads/
 
 # Schedule for tonight at 11pm
 kget --at "23:00" -a https://example.com/large-file.iso
@@ -188,8 +223,10 @@ kget --at "23:00" -a https://example.com/large-file.iso
 ### Checksums & verification
 
 ```bash
-# Verify against expected SHA-256
+# Verify against expected SHA-256 (or any algorithm)
 kget --sha256 abc123def456... https://example.com/file.iso
+kget --checksum sha512:9f86d08… https://example.com/file.iso
+kget --checksum-url https://example.com/file.iso.sha256 https://example.com/file.iso
 
 # Auto-extract after download
 kget --extract https://example.com/archive.tar.gz
@@ -203,7 +240,7 @@ kget -H "Authorization: Bearer token123" -H "Accept: application/json" https://a
 ```bash
 kget --history                    # list last 50 downloads
 kget --history-clear              # remove all entries
-kget --history-clear completed    # remove only completed/cancelled
+kget --history-clear completed    # keep only failures
 ```
 
 ### Interactive REPL
@@ -213,8 +250,9 @@ kget --interactive
 ```
 
 ```
-kget> download -a -o ~/Downloads/ubuntu.iso https://releases.ubuntu.com/...
-kget> download --sftp sftp://user@server/backups/db.sql.gz
+kget> download -a -o "~/My Downloads/ubuntu.iso" https://releases.ubuntu.com/...
+kget> https://example.com/file.zip          # pasting a URL downloads it
+kget> download sftp://user@server/backups/db.sql.gz
 kget> download --ytdlp --quality 720p https://youtube.com/watch?v=...
 kget> config set connections 8
 kget> config set speed-limit 1048576
@@ -225,8 +263,23 @@ kget> help
 ### JSONL events (for scripts and agents)
 
 ```bash
-kget --jsonl -a https://example.com/file.iso | jq '.percent'
+kget --jsonl -a https://example.com/file.iso | jq -c 'select(.event=="progress") | .percent'
 ```
+
+Every line is one JSON object with `"v": 1` and an `event` field:
+
+```jsonc
+{"v":1,"event":"started","url":"…","protocol":"http","advanced":true,"output":"…"}
+{"v":1,"event":"progress","bytes":524288,"total":1048576,"percent":50.0,"speed_bps":3145728,"eta_secs":12}
+{"v":1,"event":"status","message":"Calculating SHA256..."}
+{"v":1,"event":"files","files":[{"name":"a.mkv","size":123}]}            // torrents
+{"v":1,"event":"verified","algorithm":"sha256","hash":"…","ok":true}
+{"v":1,"event":"saved","path":"/abs/path/file.iso","bytes":1048576}
+{"v":1,"event":"completed"}
+{"v":1,"event":"error","code":"http_404","message":"…","retryable":false}
+```
+
+Exit codes: `0` success, `1` error, `130` cancelled (Ctrl+C — partial data is kept for resume).
 
 ### All CLI flags
 
@@ -235,13 +288,23 @@ kget --jsonl -a https://example.com/file.iso | jq '.percent'
 | `-a, --advanced` | Turbo mode — parallel connections, resumable |
 | `-O <path>` | Output file or directory |
 | `-q, --quiet` | Minimal output |
-| `-p <proxy>` | HTTP/SOCKS5 proxy |
-| `-l <bytes/s>` | Speed limit in bytes per second |
+| `-c, --continue` | Continue a partial download (`<file>.part`) |
+| `--no-clobber` | Skip the download if the file already exists |
+| `--retries <n>` | Attempts per request (default 3) |
+| `--timeout <secs>` | Connect / per-read timeout (default 60) |
+| `-p <proxy>` | HTTP, HTTPS or SOCKS5 proxy (`socks5://host:1080`); used for HTTP and HTTPS targets |
+| `--proxy-type <t>` | `http`, `https`, `socks5` (inferred from the proxy URL when omitted) |
+| `-l <bytes/s>` | Speed limit in bytes per second (`0` = unlimited) |
+| `--save-config` | Persist proxy/limit/torrent flags to `config.json` (never the proxy password) |
 | `-H "Name: Value"` | Extra HTTP header (repeatable) |
 | `--sha256 <hash>` | Verify SHA-256 after download |
+| `--checksum <alg:hex>` | Verify with sha256, sha512, sha1, md5 or blake3 |
+| `--checksum-url <url>` | Verify against a checksum file (GNU, BSD or hash-only) |
 | `--extract` | Auto-extract archives after download |
 | `--at "HH:MM"` | Schedule download for a specific local time |
-| `--batch <file>` | Download all URLs from a file |
+| `--batch <file\|->` | Download all URLs from a file (or stdin) |
+| `-j, --jobs <n>` | Parallel downloads in batch mode (default 4) |
+| `--doctor` | Print diagnostics and exit |
 | `--ftp` | Use FTP protocol |
 | `--sftp` | Use SFTP protocol |
 | `--webdav` | Use WebDAV protocol |
@@ -262,13 +325,13 @@ KGet is also a reusable Rust library. Add it to your project:
 
 ```toml
 [dependencies]
-Kget = "1.7.0"
+Kget = "1.7.1"
 
 # Optional: torrent client
-Kget = { version = "1.7.0", features = ["torrent-native"] }
+Kget = { version = "1.7.1", features = ["torrent-native"] }
 
 # Optional: async API
-Kget = { version = "1.7.0", features = ["async"] }
+Kget = { version = "1.7.1", features = ["async"] }
 ```
 
 ### Builder API (recommended)
@@ -302,7 +365,7 @@ for r in results {
 // Event channel
 let (handle, rx) = kget::builder("https://example.com/large.iso")
     .connections(4)
-    .spawn()?;
+    .spawn();
 
 for event in rx {
     match event {
@@ -342,14 +405,24 @@ brew install zig && cargo install cargo-zigbuild
 ./build-cross.sh
 ```
 
+### Releases
+
+Releases are built by GitHub Actions (`.github/workflows/release.yml`): pushing a
+`vX.Y.Z` tag (or running the workflow manually) builds Linux, macOS and Windows
+binaries plus the macOS DMG, publishes the GitHub release with `SHA256SUMS`,
+publishes the crate to crates.io and updates the Homebrew tap.
+
 ## Testing
 
 ```bash
 cargo test                          # all tests
 cargo test --lib --test unit_tests  # unit tests only
 cargo test --test mock_server_tests # HTTP mock server tests
+cargo test --test resume_tests      # resume / truncation / retry regressions
 ./run-tests.sh                      # full suite with lint and format check
 ```
+
+Tests use a temporary `KGET_CONFIG_DIR`, so they never change your real configuration.
 
 ---
 

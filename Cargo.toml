@@ -1,6 +1,6 @@
 [package]
 name = "Kget"
-version = "1.7.0"
+version = "1.7.1"
 edition = "2024"
 description = "A powerful and versatile download manager and library"
 authors = ["Davi Moreira Fuzatto <davimoreiraf@gmail.com>"]
@@ -22,22 +22,15 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.5.60", features = ["derive"] }
-console = "0.16.2"
 fs2 = "0.4.3"
 humansize = "2.1.3"
 indicatif = {version = "0.18.4", features = ["rayon"]}
 mime = "0.3.17"
-tokio = { version = "1.0", features = ["full"] }
-futures = "0.3.32"
+tokio = { version = "1.0", features = ["rt-multi-thread", "time", "macros", "sync"], optional = true }
 rayon = "1.11.0"
-tempfile = "3.26.0"
-flate2 = "1.1.9"
-brotli = "8.0.2"
-lz4 = "1.24.0"
 serde = { version = "1.0.218", features = ["derive"] }
 serde_json = "1.0.149"
 dirs = "6.0.0"
-ftp = "3.0"
 ssh2 = { version = "0.9", features = ["vendored-openssl"] }
 url = "2.4"
 suppaftp = "8.0.2"
@@ -48,17 +41,21 @@ md-5 = "0.10"
 blake3 = "1"
 hex = "0.4"
 transmission-rpc = { version = "0.5.0", optional = true }
-reqwest = { version = "0.13.2", default-features = false, features = ["blocking", "json", "gzip", "brotli", "deflate", "stream", "hickory-dns", "default-tls"] }
+# No transparent decompression: downloaded files must be byte-identical to the server's.
+reqwest = { version = "0.13.2", default-features = false, features = ["blocking", "json", "stream", "hickory-dns", "default-tls", "socks"] }
 rustyline = "17.0.2"
 urlencoding = "2.1"
 roxmltree = "0.20"
+ctrlc = "3.4"
+shlex = "1.3"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
 [features]
 default = []
-async = []
+async = ["dep:tokio"]
 gui = ["eframe", "egui", "rfd", "arboard", "image", "egui_extras", "torrent-native", "notify-rust"]
-torrent-transmission = ["transmission-rpc"]
-torrent-native = ["librqbit"]
+torrent-transmission = ["transmission-rpc", "dep:tokio"]
+torrent-native = ["librqbit", "dep:tokio"]
 
 [dependencies.eframe]
 version = "0.33.3"
@@ -74,10 +71,6 @@ optional = true
 
 [dependencies.arboard]
 version = "3.6.1"
-optional = true
-
-[dependencies.opener]
-version = "0.8.4"
 optional = true
 
 [dependencies.image]
@@ -102,6 +95,7 @@ optional = true
 tempfile = "3.10"
 wiremock = "0.6"
 tokio-test = "0.4"
+tokio = { version = "1.0", features = ["full"] }
 assert_cmd = "2.0"
 predicates = "3.1"
 hex = "0.4"

@@ -15,123 +15,31 @@ import SwiftUI
 // MARK: - Constants
 
 private enum Constants {
-    static let progressUpdateInterval: TimeInterval = 0.5
     static let sha256ChunkSize = 1024 * 1024  // 1MB
     static let progressUIUpdateInterval: TimeInterval = 0.1
 }
 
-// MARK: - Output Parser
+// MARK: - JSONL Events
 
-private struct OutputParser {
-    
-    struct ParsedProgress {
-        let percent: Double
-        let downloadedSize: String
-        let totalSize: String
-        let speed: String
-        let eta: String
-    }
-    
-    static func parseProgress(from output: String) -> ParsedProgress? {
-        guard let percent = extractPercent(from: output) else { return nil }
-        return ParsedProgress(
-            percent: percent,
-            downloadedSize: extractDownloadedSize(from: output),
-            totalSize: extractTotalSize(from: output),
-            speed: extractSpeed(from: output),
-            eta: extractETA(from: output)
-        )
-    }
-    
-    static func parseFiles(from output: String) -> [TorrentFile]? {
-        guard output.contains("FILES:"),
-              let jsonArray = extractJSONArray(from: output, prefix: "FILES: ["),
-              let data = jsonArray.data(using: .utf8),
-              let files = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+/// One line of `kget --jsonl` output (protocol version 1).
+private struct KEvent {
+    let event: String
+    let raw: [String: Any]
+
+    init?(line: String) {
+        guard let data = line.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let event = obj["event"] as? String
         else { return nil }
-        
-        return files.enumerated().map { idx, file in
-            TorrentFile(
-                id: idx,
-                name: file["name"] as? String ?? "file_\(idx)",
-                size: (file["size"] as? Int64) ?? Int64(file["size"] as? Int ?? 0),
-                downloaded: 0,
-                progress: 0
-            )
-        }
+        self.event = event
+        self.raw = obj
     }
-    
-    static func parseFileProgress(from output: String) -> [(idx: Int, downloaded: Int64, pct: Double)]? {
-        guard output.contains("FILE_PROGRESS:"),
-              let jsonArray = extractJSONArray(from: output, prefix: "FILE_PROGRESS: ["),
-              let data = jsonArray.data(using: .utf8),
-              let files = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
-        else { return nil }
-        
-        return files.compactMap { file -> (Int, Int64, Double)? in
-            guard let idx = file["idx"] as? Int else { return nil }
-            let downloaded = (file["downloaded"] as? Int64) ?? Int64(file["downloaded"] as? Int ?? 0)
-            let pct = file["pct"] as? Double ?? 0
-            return (idx, downloaded, pct)
-        }
-    }
-    
-    static func parseLength(from output: String) -> Int64? {
-        guard let match = output.range(of: #"Length:\s*(\d+)"#, options: .regularExpression) else { return nil }
-        let str = output[match].replacingOccurrences(of: "Length:", with: "").trimmingCharacters(in: .whitespaces)
-        return Int64(str)
-    }
-    
-    static func containsError(_ output: String) -> Bool {
-        let lowercased = output.lowercased()
-        return lowercased.contains("error") || lowercased.contains("failed")
-    }
-    
-    // MARK: - Private Helpers
-    
-    private static func extractPercent(from output: String) -> Double? {
-        guard let match = output.range(of: #"PROGRESS:\s*([\d.]+)%"#, options: .regularExpression) else { return nil }
-        let str = output[match]
-            .replacingOccurrences(of: "PROGRESS:", with: "")
-            .replacingOccurrences(of: "%", with: "")
-            .trimmingCharacters(in: .whitespaces)
-        return Double(str)
-    }
-    
-    private static func extractDownloadedSize(from output: String) -> String {
-        extractSizePair(from: output)?.downloaded ?? ""
-    }
-    
-    private static func extractTotalSize(from output: String) -> String {
-        extractSizePair(from: output)?.total ?? ""
-    }
-    
-    private static func extractSizePair(from output: String) -> (downloaded: String, total: String)? {
-        guard let match = output.range(of: #"\(([^/]+)/([^)]+)\)"#, options: .regularExpression) else { return nil }
-        let str = output[match].replacingOccurrences(of: "(", with: "").replacingOccurrences(of: ")", with: "")
-        let parts = str.split(separator: "/")
-        guard parts.count == 2 else { return nil }
-        return (String(parts[0]).trimmingCharacters(in: .whitespaces),
-                String(parts[1]).trimmingCharacters(in: .whitespaces))
-    }
-    
-    private static func extractSpeed(from output: String) -> String {
-        guard let match = output.range(of: #"SPEED:\s*([^\s]+/s)"#, options: .regularExpression) else { return "" }
-        return output[match].replacingOccurrences(of: "SPEED:", with: "").trimmingCharacters(in: .whitespaces)
-    }
-    
-    private static func extractETA(from output: String) -> String {
-        guard let match = output.range(of: #"ETA:\s*([^\n]+)"#, options: .regularExpression) else { return "" }
-        let eta = output[match].replacingOccurrences(of: "ETA:", with: "").trimmingCharacters(in: .whitespaces)
-        return eta == "--" ? "" : eta
-    }
-    
-    private static func extractJSONArray(from output: String, prefix: String) -> String? {
-        guard let start = output.range(of: prefix) else { return nil }
-        let afterBracket = output[start.upperBound...]
-        guard let end = afterBracket.range(of: "]") else { return nil }
-        return "[" + String(afterBracket[..<end.lowerBound]) + "]"
-    }
+
+    func string(_ key: String) -> String? { raw[key] as? String }
+    func double(_ key: String) -> Double? { (raw[key] as? NSNumber)?.doubleValue }
+    func int64(_ key: String) -> Int64? { (raw[key] as? NSNumber)?.int64Value }
+    func bool(_ key: String) -> Bool? { (raw[key] as? NSNumber)?.boolValue }
+    func array(_ key: String) -> [[String: Any]] { raw[key] as? [[String: Any]] ?? [] }
 }
 
 // MARK: - Formatters
@@ -210,19 +118,30 @@ private struct DownloadValidator {
         if trimmed.lowercased().hasPrefix("magnet:") && !isSupportedMagnet(trimmed) {
             return "Invalid magnet link. Expected a btih/btmh info hash."
         }
-        guard trimmed.lowercased().hasPrefix("http://")
-            || trimmed.lowercased().hasPrefix("https://")
-            || trimmed.lowercased().hasPrefix("ftp://")
-            || trimmed.lowercased().hasPrefix("sftp://")
-            || trimmed.lowercased().hasPrefix("magnet:?")
+        let lower = trimmed.lowercased()
+        guard lower.hasPrefix("http://")
+            || lower.hasPrefix("https://")
+            || lower.hasPrefix("ftp://")
+            || lower.hasPrefix("sftp://")
+            || lower.hasPrefix("webdav://")
+            || lower.hasPrefix("webdavs://")
+            || lower.hasPrefix("magnet:?")
+            || isTorrentFile(trimmed)
         else {
-            return "Supported: http, https, ftp, sftp, and magnet links."
+            return "Supported: http, https, ftp, sftp, webdav, magnet links and .torrent files."
         }
         return nil
     }
 
     static func normalize(_ value: String) -> String {
         value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Local `.torrent` path or `http(s)://…/x.torrent` URL.
+    static func isTorrentFile(_ value: String) -> Bool {
+        let lower = value.lowercased()
+        let path = lower.split(separator: "?").first.map(String.init) ?? lower
+        return path.hasSuffix(".torrent")
     }
 }
 
@@ -277,11 +196,11 @@ private struct BinaryLocator {
     static func findKgetBinary() -> String? {
         let paths: [String?] = [
             Bundle.main.executableURL?.deletingLastPathComponent().appendingPathComponent("kget-bin").path,
-            "/usr/local/bin/kget",
-            FileManager.default.currentDirectoryPath + "/target/release/kget",
-            "./target/release/kget"
+            "/opt/homebrew/bin/kget",          // Homebrew on Apple Silicon
+            "/usr/local/bin/kget",             // Homebrew on Intel
+            NSHomeDirectory() + "/.cargo/bin/kget",
         ]
-        return paths.compactMap { $0 }.first { FileManager.default.fileExists(atPath: $0) }
+        return paths.compactMap { $0 }.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 }
 
@@ -295,19 +214,15 @@ private struct DownloadConfiguration {
     let verifyISOIntegrity: Bool
     let expectedSHA256: String?
     
-    var isTorrent: Bool { url.hasPrefix("magnet:") }
+    var isTorrent: Bool { url.lowercased().hasPrefix("magnet:") || DownloadValidator.isTorrentFile(url) }
     var effectiveAdvanced: Bool { advanced && !isTorrent }
     var shouldVerify: Bool { verifyISO || (verifyISOIntegrity && url.lowercased().hasSuffix(".iso")) }
 }
 
-private struct ProgressMonitorConfig {
-    let downloadId: UUID
-    let filePath: String
-    let usesOutputProgress: Bool
-}
-
 // MARK: - Download Manager
 
+/// All mutable state (`downloads`, `processes`, buffers) is only touched on the
+/// main queue; process callbacks hop to it with `DispatchQueue.main.async`.
 class DownloadManager: ObservableObject {
     static let shared = DownloadManager()
     
@@ -323,11 +238,16 @@ class DownloadManager: ObservableObject {
     @Published var speedLimitKBPerSecond = ""
     @Published var autoExtract = false
     @Published var videoQuality = "best"
+    @Published var ytdlpPath = ""
     @Published var historyEntries: [HistoryEntry] = []
     @Published var clipboardDetectedURL: String?
+    @Published var diagnostics = ""
 
+    // Main queue only.
     private var processes: [UUID: Process] = [:]
-    private var progressTimers: [UUID: Timer] = [:]
+    private var stdoutBuffers: [UUID: Data] = [:]
+    private var stderrBuffers: [UUID: Data] = [:]
+    private var lastStderrError: [UUID: String] = [:]
     private var cancellables = Set<AnyCancellable>()
     private var clipboardChangeCount = NSPasteboard.general.changeCount
     private var clipboardTimer: Timer?
@@ -348,7 +268,11 @@ class DownloadManager: ObservableObject {
             return false
         }
 
-        if let existing = downloads.first(where: { DownloadValidator.normalize($0.url) == normalizedURL }) {
+        // Only an active download blocks a new one; finished items can be downloaded again.
+        if let existing = downloads.first(where: {
+            DownloadValidator.normalize($0.url) == normalizedURL
+                && [.pending, .downloading, .verifying, .paused].contains($0.status)
+        }) {
             selectedDownloadId = existing.id
             lastStartError = "This download is already in the list."
             DispatchQueue.main.async {
@@ -383,11 +307,36 @@ class DownloadManager: ObservableObject {
     }
     
     func cancelDownload(_ download: Download) {
-        stopProgressTimer(for: download.id)
-        terminateProcess(for: download.id)
         updateStatus(for: download.id, to: .cancelled)
+        terminateProcess(for: download.id)
     }
-    
+
+    /// Pause = SIGINT: kget saves its resume state (.part / .kget) and exits.
+    func pauseDownload(_ download: Download) {
+        DispatchQueue.main.async {
+            guard let process = self.processes[download.id], process.isRunning else { return }
+            if let index = self.downloads.firstIndex(where: { $0.id == download.id }) {
+                self.downloads[index].status = .paused
+                self.downloads[index].speed = ""
+                self.downloads[index].eta = ""
+            }
+            process.interrupt()
+        }
+    }
+
+    /// Resume = run the same download again with `-c`.
+    func resumeDownload(_ download: Download) {
+        updateDownload(download.id) { dl in
+            dl.status = .pending
+            dl.error = nil
+        }
+        DispatchQueue.main.async {
+            if let current = self.downloads.first(where: { $0.id == download.id }) {
+                self.executeDownload(current, advanced: current.isAdvanced, extraArgs: ["-c"])
+            }
+        }
+    }
+
     func retryDownload(_ download: Download) {
         updateDownload(download.id) { dl in
             dl.status = .pending
@@ -395,9 +344,12 @@ class DownloadManager: ObservableObject {
             dl.error = nil
             dl.expectedBytes = 0
         }
-        
-        if let download = downloads.first(where: { $0.id == download.id }) {
-            executeDownload(download, advanced: download.isAdvanced)
+        DispatchQueue.main.async {
+            if let current = self.downloads.first(where: { $0.id == download.id }) {
+                // Turbo downloads resume automatically from their .kget state;
+                // -c lets simple downloads continue their .part file too.
+                self.executeDownload(current, advanced: current.isAdvanced, extraArgs: ["-c"])
+            }
         }
     }
     
@@ -414,7 +366,7 @@ class DownloadManager: ObservableObject {
     func cancelSelectedDownload() {
         guard let selectedDownloadId,
               let download = downloads.first(where: { $0.id == selectedDownloadId }),
-              download.status == .downloading else { return }
+              download.status == .downloading || download.status == .paused else { return }
         cancelDownload(download)
     }
 
@@ -453,8 +405,13 @@ class DownloadManager: ObservableObject {
     }
     
     func loadHistory() {
-        guard let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return }
-        let historyURL = appSupport.appendingPathComponent("kget/history.json")
+        let historyURL: URL
+        if let dir = ProcessInfo.processInfo.environment["KGET_CONFIG_DIR"], !dir.isEmpty {
+            historyURL = URL(fileURLWithPath: dir).appendingPathComponent("history.json")
+        } else {
+            guard let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return }
+            historyURL = appSupport.appendingPathComponent("kget/history.json")
+        }
         guard let data = try? Data(contentsOf: historyURL),
               let entries = try? JSONDecoder().decode([HistoryEntry].self, from: data) else { return }
         historyEntries = entries.sorted { $0.createdAt > $1.createdAt }
@@ -472,6 +429,8 @@ class DownloadManager: ObservableObject {
             || t.lowercased().hasPrefix("magnet:?")
     }
 
+    /// Mirrors `kget::ytdlp::is_video_url` (the binary reports the final
+    /// protocol in its `started` event).
     func isVideoURL(_ string: String) -> Bool {
         let hosts = [
             "youtube.com/watch", "youtube.com/shorts", "youtu.be/",
@@ -479,7 +438,7 @@ class DownloadManager: ObservableObject {
             "twitter.com/i/status", "x.com/i/status",
             "instagram.com/reel", "instagram.com/p/",
             "tiktok.com/", "facebook.com/watch", "facebook.com/videos",
-            "bilibili.com/video", "rumble.com/v",
+            "bilibili.com/video", "rumble.com/v", "odysee.com/@",
         ]
         let lower = string.lowercased()
         return hosts.contains(where: { lower.contains($0) })
@@ -499,6 +458,35 @@ class DownloadManager: ObservableObject {
         UserDefaults.standard.set(speedLimitKBPerSecond, forKey: "speedLimitKBPerSecond")
         UserDefaults.standard.set(autoExtract, forKey: "autoExtract")
         UserDefaults.standard.set(videoQuality, forKey: "videoQuality")
+        UserDefaults.standard.set(ytdlpPath, forKey: "ytdlpPath")
+    }
+
+    /// Run `kget --doctor` with the same environment used for downloads.
+    func runDiagnostics() {
+        guard let binaryPath = BinaryLocator.findKgetBinary() else {
+            diagnostics = "kget binary not found (looked in the app bundle, /opt/homebrew/bin, /usr/local/bin and ~/.cargo/bin)."
+            return
+        }
+        let env = buildEnvironment()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: binaryPath)
+            process.arguments = ["--doctor"]
+            process.environment = env
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = pipe
+            var output = ""
+            do {
+                try process.run()
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                output = String(data: data, encoding: .utf8) ?? ""
+            } catch {
+                output = "Failed to run kget: \(error.localizedDescription)"
+            }
+            DispatchQueue.main.async { self.diagnostics = "Binary: \(binaryPath)\n" + output }
+        }
     }
     
     // MARK: - Clipboard Monitoring
@@ -527,7 +515,9 @@ class DownloadManager: ObservableObject {
     // MARK: - Private Helpers
 
     private func createDownload(from config: DownloadConfiguration) -> Download {
-        let filename = FilenameExtractor.extract(from: config.url)
+        let filename = DownloadValidator.isTorrentFile(config.url) && !config.url.contains("://")
+            ? ((config.url as NSString).lastPathComponent as NSString).deletingPathExtension
+            : FilenameExtractor.extract(from: config.url)
         let fullPath = (config.outputPath as NSString).appendingPathComponent(filename)
         
         return Download(
@@ -559,14 +549,11 @@ class DownloadManager: ObservableObject {
         updateDownload(id) { $0.status = status }
     }
     
-    private func stopProgressTimer(for id: UUID) {
-        progressTimers[id]?.invalidate()
-        progressTimers.removeValue(forKey: id)
-    }
-    
     private func terminateProcess(for id: UUID) {
-        processes[id]?.terminate()
-        processes.removeValue(forKey: id)
+        DispatchQueue.main.async {
+            // SIGINT lets kget keep its partial data for a later retry.
+            self.processes[id]?.interrupt()
+        }
     }
     
     private func loadSettings() {
@@ -586,6 +573,7 @@ class DownloadManager: ObservableObject {
             autoExtract = UserDefaults.standard.bool(forKey: "autoExtract")
         }
         videoQuality = UserDefaults.standard.string(forKey: "videoQuality") ?? "best"
+        ytdlpPath = UserDefaults.standard.string(forKey: "ytdlpPath") ?? ""
     }
     
     func verifyISOChecksum(_ download: Download) {
@@ -629,47 +617,43 @@ class DownloadManager: ObservableObject {
     
     // MARK: - Download Execution
     
-    private func executeDownload(_ download: Download, advanced: Bool) {
+    private func executeDownload(_ download: Download, advanced: Bool, extraArgs: [String] = []) {
         guard let binaryPath = BinaryLocator.findKgetBinary() else {
             updateDownload(download.id) { $0.status = .failed; $0.error = "kget binary not found" }
             return
         }
-        
-        let process = createProcess(binaryPath: binaryPath, download: download, advanced: advanced)
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: binaryPath)
+        process.arguments = buildArguments(for: download, advanced: advanced) + extraArgs
+        process.environment = buildEnvironment()
         setupOutputHandlers(for: process, downloadId: download.id)
         setupTerminationHandler(for: process, downloadId: download.id)
         runProcess(process, for: download)
     }
-    
-    private func createProcess(binaryPath: String, download: Download, advanced: Bool) -> Process {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: binaryPath)
-        process.arguments = buildArguments(for: download, advanced: advanced)
-        process.environment = buildEnvironment()
-        return process
-    }
-    
-    private func buildArguments(for download: Download, advanced: Bool) -> [String] {
-        let isVideo = isVideoURL(download.url)
-        let isWebDAV = isWebDAVURL(download.url)
 
-        if isVideo {
+    private func buildArguments(for download: Download, advanced: Bool) -> [String] {
+        // Machine-readable events; never parse localized text.
+        var args = [download.url, "--jsonl"]
+
+        if isVideoURL(download.url) {
             // Route through yt-dlp; output dir is the parent folder
             let outputDir = (download.fullFilePath as NSString).deletingLastPathComponent
-            return [download.url, "--ytdlp", "--quality", videoQuality, "-O", outputDir]
+            return args + ["--ytdlp", "--quality", videoQuality, "-O", outputDir]
         }
 
-        var args = [download.url, "-O", download.fullFilePath]
-
-        if isWebDAV {
-            args.append("--webdav")
-        } else if advanced {
+        if download.isTorrent {
+            args.append(contentsOf: ["-O", download.outputPath])
+        } else {
+            args.append(contentsOf: ["-O", download.fullFilePath])
+        }
+        if advanced && !isWebDAVURL(download.url) && !download.isTorrent {
             args.append("-a")
         }
 
-        if let speedLimit = speedLimitBytesPerSecond() {
-            args.append(contentsOf: ["-l", "\(speedLimit)"])
-        }
+        // Always pass the limit (0 = unlimited) so a value saved by older
+        // versions in config.json can never stick.
+        args.append(contentsOf: ["-l", "\(speedLimitBytesPerSecond() ?? 0)"])
         if let expectedSHA256 = download.expectedSHA256 {
             args.append(contentsOf: ["--sha256", expectedSHA256])
         }
@@ -692,264 +676,244 @@ class DownloadManager: ObservableObject {
         guard !trimmed.isEmpty, let kb = Int(trimmed), kb > 0 else { return nil }
         return kb * 1024
     }
-    
+
     private func buildEnvironment() -> [String: String] {
         var env = ProcessInfo.processInfo.environment
+
+        // GUI apps get a minimal PATH from launchd; add the usual install
+        // locations (Homebrew Apple Silicon/Intel, MacPorts, pipx/pip --user).
+        let extraPaths = [
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/opt/local/bin",
+            NSHomeDirectory() + "/.local/bin",
+        ]
+        let currentPath = env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
+        let existing = Set(currentPath.split(separator: ":").map(String.init))
+        let missing = extraPaths.filter { !existing.contains($0) }
+        env["PATH"] = (missing + [currentPath]).joined(separator: ":")
+
+        // A yt-dlp path chosen in Settings wins over auto-detection.
+        let customYtdlp = ytdlpPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !customYtdlp.isEmpty {
+            env["KGET_YTDLP_PATH"] = (customYtdlp as NSString).expandingTildeInPath
+        }
+
         env["LANG"] = "en_US.UTF-8"
-        env["TERM"] = "xterm-256color"
+        env["TERM"] = "dumb"
         return env
     }
-    
+
     private func setupOutputHandlers(for process: Process, downloadId: UUID) {
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
-        
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
-        
-        var expectedBytes: Int64 = 0
-        
+
+        // availableData returns arbitrary chunks: buffer and split on newlines.
         stdoutPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            self?.handleStdout(handle: handle, downloadId: downloadId, expectedBytes: &expectedBytes)
+            let chunk = handle.availableData
+            guard !chunk.isEmpty else { return }
+            DispatchQueue.main.async {
+                self?.consume(chunk, downloadId: downloadId, isStderr: false)
+            }
         }
-        
         stderrPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            self?.handleStderr(handle: handle, downloadId: downloadId)
-        }
-    }
-    
-    private func handleStdout(handle: FileHandle, downloadId: UUID, expectedBytes: inout Int64) {
-        let data = handle.availableData
-        guard !data.isEmpty, let output = String(data: data, encoding: .utf8) else { return }
-        
-        processProgressOutput(output, downloadId: downloadId)
-        processFilesOutput(output, downloadId: downloadId)
-        processFileProgressOutput(output, downloadId: downloadId)
-        processLengthOutput(output, downloadId: downloadId, expectedBytes: &expectedBytes)
-        processErrorOutput(output, downloadId: downloadId)
-    }
-    
-    private func handleStderr(handle: FileHandle, downloadId: UUID) {
-        let data = handle.availableData
-        guard !data.isEmpty, let output = String(data: data, encoding: .utf8) else { return }
-        processErrorOutput(output, downloadId: downloadId)
-    }
-    
-    private func processProgressOutput(_ output: String, downloadId: UUID) {
-        guard let parsed = OutputParser.parseProgress(from: output) else { return }
-        
-        updateDownload(downloadId) { dl in
-            let shouldUpdate = dl.isTorrent || parsed.percent >= dl.progress
-            if shouldUpdate { dl.progress = parsed.percent }
-            
-            dl.status = .downloading
-            if !parsed.downloadedSize.isEmpty { dl.downloadedSize = parsed.downloadedSize }
-            if !parsed.totalSize.isEmpty { dl.totalSize = parsed.totalSize }
-            if !parsed.speed.isEmpty {
-                dl.speed = parsed.speed
-                let raw = self.speedStringToBytes(parsed.speed)
-                if raw > 0 {
-                    dl.speedRaw = raw
-                    dl.speedHistory.append(raw)
-                    if dl.speedHistory.count > 30 { dl.speedHistory.removeFirst() }
-                }
-            }
-            if !parsed.eta.isEmpty { dl.eta = parsed.eta }
-        }
-    }
-    
-    private func processFilesOutput(_ output: String, downloadId: UUID) {
-        guard let files = OutputParser.parseFiles(from: output) else { return }
-        updateDownload(downloadId) { $0.torrentFiles = files }
-    }
-    
-    private func processFileProgressOutput(_ output: String, downloadId: UUID) {
-        guard let fileProgress = OutputParser.parseFileProgress(from: output) else { return }
-        
-        updateDownload(downloadId) { dl in
-            for (idx, downloaded, pct) in fileProgress where idx < dl.torrentFiles.count {
-                dl.torrentFiles[idx].downloaded = downloaded
-                dl.torrentFiles[idx].progress = pct
+            let chunk = handle.availableData
+            guard !chunk.isEmpty else { return }
+            DispatchQueue.main.async {
+                self?.consume(chunk, downloadId: downloadId, isStderr: true)
             }
         }
     }
-    
-    private func processLengthOutput(_ output: String, downloadId: UUID, expectedBytes: inout Int64) {
-        guard expectedBytes == 0, let bytes = OutputParser.parseLength(from: output) else { return }
-        expectedBytes = bytes
-        
-        updateDownload(downloadId) { dl in
-            dl.expectedBytes = bytes
-            dl.totalSize = Formatters.formatBytes(bytes)
+
+    /// Main queue only.
+    private func consume(_ chunk: Data, downloadId: UUID, isStderr: Bool) {
+        var buffer = (isStderr ? stderrBuffers[downloadId] : stdoutBuffers[downloadId]) ?? Data()
+        buffer.append(chunk)
+        while let newline = buffer.firstIndex(of: 0x0A) {
+            let lineData = buffer[buffer.startIndex..<newline]
+            buffer.removeSubrange(buffer.startIndex...newline)
+            guard let line = String(data: lineData, encoding: .utf8) else { continue }
+            if isStderr {
+                handleStderrLine(line, downloadId: downloadId)
+            } else {
+                handleLine(line, downloadId: downloadId)
+            }
+        }
+        if isStderr { stderrBuffers[downloadId] = buffer } else { stdoutBuffers[downloadId] = buffer }
+    }
+
+    /// Fallback error text: the last `Error:` line printed by kget.
+    private func handleStderrLine(_ line: String, downloadId: UUID) {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("Error:") {
+            lastStderrError[downloadId] = String(trimmed.dropFirst("Error:".count)).trimmingCharacters(in: .whitespaces)
         }
     }
-    
-    private func processErrorOutput(_ output: String, downloadId: UUID) {
-        guard OutputParser.containsError(output) else { return }
-        updateDownload(downloadId) { dl in
-            if dl.error == nil { dl.error = output.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    /// Main queue only.
+    private func handleLine(_ line: String, downloadId: UUID) {
+        guard let ev = KEvent(line: line),
+              let index = downloads.firstIndex(where: { $0.id == downloadId }) else { return }
+        var dl = downloads[index]
+
+        switch ev.event {
+        case "started":
+            if dl.status == .pending { dl.status = .downloading }
+        case "meta":
+            if let total = ev.int64("total") {
+                dl.expectedBytes = total
+                dl.totalSize = Formatters.formatBytes(total)
+            }
+        case "progress":
+            if dl.status != .paused && dl.status != .cancelled && dl.status != .verifying {
+                dl.status = .downloading
+            }
+            if let percent = ev.double("percent"), dl.isTorrent || percent >= dl.progress {
+                dl.progress = percent
+            }
+            if let bytes = ev.int64("bytes"), bytes > 0 {
+                dl.downloadedSize = Formatters.formatBytes(bytes)
+            }
+            if let total = ev.int64("total") {
+                dl.expectedBytes = total
+                dl.totalSize = Formatters.formatBytes(total)
+            }
+            if let speed = ev.double("speed_bps"), speed > 0 {
+                dl.speed = Formatters.formatSpeed(speed)
+                dl.speedRaw = speed
+                dl.speedHistory.append(speed)
+                if dl.speedHistory.count > 30 { dl.speedHistory.removeFirst() }
+            }
+            if let eta = ev.double("eta_secs") {
+                dl.eta = Formatters.formatTime(eta)
+            }
+        case "status":
+            if let message = ev.string("message"),
+               message.contains("SHA256") || message.contains("Calculating") {
+                dl.status = .verifying
+            }
+        case "files":
+            dl.torrentFiles = ev.array("files").enumerated().map { idx, file in
+                TorrentFile(
+                    id: idx,
+                    name: file["name"] as? String ?? "file_\(idx)",
+                    size: (file["size"] as? NSNumber)?.int64Value ?? 0,
+                    downloaded: 0,
+                    progress: 0
+                )
+            }
+        case "file_progress":
+            for file in ev.array("files") {
+                guard let idx = (file["idx"] as? NSNumber)?.intValue, idx < dl.torrentFiles.count else { continue }
+                dl.torrentFiles[idx].downloaded = (file["downloaded"] as? NSNumber)?.int64Value ?? 0
+                dl.torrentFiles[idx].progress = (file["pct"] as? NSNumber)?.doubleValue ?? 0
+            }
+        case "verified":
+            if ev.bool("ok") == true, let hash = ev.string("hash"), ev.string("algorithm") == "sha256" {
+                dl.sha256Checksum = hash
+            }
+        case "saved":
+            if let path = ev.string("path") { dl.fullFilePath = path }
+            if let bytes = ev.int64("bytes") { dl.downloadedSize = Formatters.formatBytes(bytes) }
+        case "completed":
+            dl.progress = 100
+        case "error":
+            if let message = ev.string("message") { dl.error = message }
+        default:
+            break
         }
+        downloads[index] = dl
     }
-    
+
     private func setupTerminationHandler(for process: Process, downloadId: UUID) {
+        // terminationHandler runs on a background thread: hop to the main queue.
         process.terminationHandler = { [weak self] proc in
-            self?.cleanupProcess(downloadId: downloadId, process: process)
-            self?.finalizeDownload(downloadId: downloadId, exitCode: proc.terminationStatus)
+            let status = proc.terminationStatus
+            DispatchQueue.main.async {
+                self?.cleanupProcess(downloadId: downloadId, process: proc)
+                self?.finalizeDownload(downloadId: downloadId, exitCode: status)
+            }
         }
     }
-    
+
+    /// Main queue only.
     private func cleanupProcess(downloadId: UUID, process: Process) {
-        DispatchQueue.main.async { [weak self] in
-            self?.stopProgressTimer(for: downloadId)
-        }
-        
         (process.standardOutput as? Pipe)?.fileHandleForReading.readabilityHandler = nil
         (process.standardError as? Pipe)?.fileHandleForReading.readabilityHandler = nil
-        processes.removeValue(forKey: downloadId)
+        // Flush a last line without a trailing newline.
+        if let rest = stdoutBuffers[downloadId], !rest.isEmpty,
+           let line = String(data: rest, encoding: .utf8) {
+            handleLine(line, downloadId: downloadId)
+        }
+        if processes[downloadId] === process {
+            processes.removeValue(forKey: downloadId)
+        }
+        stdoutBuffers.removeValue(forKey: downloadId)
+        stderrBuffers.removeValue(forKey: downloadId)
     }
-    
+
+    /// Main queue only. Success or failure is decided by the exit code.
     private func finalizeDownload(downloadId: UUID, exitCode: Int32) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self,
-                  let index = self.downloads.firstIndex(where: { $0.id == downloadId }),
-                  self.downloads[index].status != .cancelled else { return }
-            
-            let download = self.downloads[index]
-            let fileExists = FileManager.default.fileExists(atPath: download.fullFilePath)
-            let fileSize = self.getFileSize(download.fullFilePath)
-            
-            if exitCode == 0 && fileExists && fileSize > 0 {
-                self.handleSuccessfulCompletion(at: index, fileSize: fileSize)
-            } else {
-                self.handleFailedCompletion(at: index, fileExists: fileExists, fileSize: fileSize, exitCode: exitCode)
+        let stderrError = lastStderrError.removeValue(forKey: downloadId)
+        guard let index = downloads.firstIndex(where: { $0.id == downloadId }) else { return }
+        let status = downloads[index].status
+        if status == .cancelled || status == .paused { return }
+
+        if exitCode == 0 {
+            handleSuccessfulCompletion(at: index)
+        } else if exitCode == 130 {
+            downloads[index].status = .cancelled
+        } else {
+            downloads[index].status = .failed
+            if downloads[index].error == nil {
+                downloads[index].error = stderrError ?? "Download failed (exit code: \(exitCode))"
             }
         }
     }
-    
-    private func handleSuccessfulCompletion(at index: Int, fileSize: Int64) {
+
+    private func handleSuccessfulCompletion(at index: Int) {
         downloads[index].status = .completed
         downloads[index].progress = 100
-        downloads[index].downloadedSize = Formatters.formatBytes(fileSize)
-        
+        downloads[index].error = nil
+        downloads[index].speed = ""
+        downloads[index].eta = ""
+        let fileSize = getFileSize(downloads[index].fullFilePath)
+        if fileSize > 0 {
+            downloads[index].downloadedSize = Formatters.formatBytes(fileSize)
+        }
+
         let download = downloads[index]
-        if download.verifyIntegrity && download.isISO {
+        // The binary already hashed the file when --sha256 was given.
+        if download.verifyIntegrity && download.isISO && download.sha256Checksum == nil {
             verifyISOChecksum(download)
         } else {
             sendNotification(title: "Download Complete", body: download.filename)
         }
     }
-    
-    private func handleFailedCompletion(at index: Int, fileExists: Bool, fileSize: Int64, exitCode: Int32) {
-        downloads[index].status = .failed
-        guard downloads[index].error == nil else { return }
-        downloads[index].error = determineErrorMessage(fileExists: fileExists, fileSize: fileSize, exitCode: exitCode)
-    }
-    
-    private func determineErrorMessage(fileExists: Bool, fileSize: Int64, exitCode: Int32) -> String {
-        if !fileExists { return "File was not created" }
-        if fileSize == 0 { return "Downloaded file is empty" }
-        return "Download failed (exit code: \(exitCode))"
-    }
-    
+
     private func runProcess(_ process: Process, for download: Download) {
-        do {
-            try process.run()
-            processes[download.id] = process
-            updateStatus(for: download.id, to: .downloading)
-            startProgressMonitoring(for: download)
-        } catch {
-            updateDownload(download.id) { $0.status = .failed; $0.error = error.localizedDescription }
-        }
-    }
-    
-    // MARK: - Progress Monitoring
-    
-    private func startProgressMonitoring(for download: Download) {
-        let config = ProgressMonitorConfig(
-            downloadId: download.id,
-            filePath: download.fullFilePath,
-            usesOutputProgress: download.isAdvanced || download.isTorrent
-        )
-        
-        var lastSize: Int64 = 0
-        var lastTime = Date()
-        
-        let timer = Timer.scheduledTimer(withTimeInterval: Constants.progressUpdateInterval, repeats: true) { [weak self] timer in
-            guard let self = self else { timer.invalidate(); return }
-            
-            guard let index = self.downloads.firstIndex(where: { $0.id == config.downloadId }),
-                  self.downloads[index].status == .downloading else {
-                timer.invalidate()
-                self.progressTimers.removeValue(forKey: config.downloadId)
-                return
+        DispatchQueue.main.async {
+            do {
+                try process.run()
+                self.processes[download.id] = process
+                if let index = self.downloads.firstIndex(where: { $0.id == download.id }) {
+                    self.downloads[index].status = .downloading
+                }
+            } catch {
+                if let index = self.downloads.firstIndex(where: { $0.id == download.id }) {
+                    self.downloads[index].status = .failed
+                    self.downloads[index].error = error.localizedDescription
+                }
             }
-            
-            guard !config.usesOutputProgress else {
-                lastTime = Date()
-                return
-            }
-            
-            self.updateFileBasedProgress(at: index, filePath: config.filePath, lastSize: &lastSize, lastTime: &lastTime)
         }
-        
-        progressTimers[download.id] = timer
-        RunLoop.main.add(timer, forMode: .common)
     }
-    
-    private func updateFileBasedProgress(at index: Int, filePath: String, lastSize: inout Int64, lastTime: inout Date) {
-        let currentTime = Date()
-        let currentSize = getFileSize(filePath)
-        let expectedBytes = downloads[index].expectedBytes
-        
-        let timeDiff = currentTime.timeIntervalSince(lastTime)
-        let speed = timeDiff > 0 ? Double(currentSize - lastSize) / timeDiff : 0
-        let progress = calculateProgress(currentSize: currentSize, expectedBytes: expectedBytes)
-        let eta = calculateETA(expectedBytes: expectedBytes, currentSize: currentSize, speed: speed)
-        
-        downloads[index].progress = progress
-        downloads[index].downloadedSize = Formatters.formatBytes(currentSize)
-        downloads[index].speed = Formatters.formatSpeed(speed)
-        downloads[index].eta = eta
-        if speed > 0 {
-            downloads[index].speedRaw = speed
-            downloads[index].speedHistory.append(speed)
-            if downloads[index].speedHistory.count > 30 { downloads[index].speedHistory.removeFirst() }
-        }
-        
-        if expectedBytes > 0 {
-            downloads[index].totalSize = Formatters.formatBytes(expectedBytes)
-        }
-        
-        lastSize = currentSize
-        lastTime = currentTime
-    }
-    
-    private func calculateProgress(currentSize: Int64, expectedBytes: Int64) -> Double {
-        if expectedBytes > 0 { return min(Double(currentSize) / Double(expectedBytes) * 100, 100) }
-        return currentSize > 0 ? min(Double(currentSize) / 1_000_000 * 5, 95) : 0
-    }
-    
-    private func calculateETA(expectedBytes: Int64, currentSize: Int64, speed: Double) -> String {
-        guard expectedBytes > 0, speed > 0 else { return "" }
-        return Formatters.formatTime(Double(expectedBytes - currentSize) / speed)
-    }
-    
+
     private func getFileSize(_ path: String) -> Int64 {
         (try? FileManager.default.attributesOfItem(atPath: path)[.size] as? Int64) ?? 0
     }
 
-    private func speedStringToBytes(_ s: String) -> Double {
-        let lower = s.lowercased()
-        let multiplier: Double
-        if lower.contains("gb/s") { multiplier = 1_000_000_000 }
-        else if lower.contains("mb/s") { multiplier = 1_000_000 }
-        else if lower.contains("kb/s") { multiplier = 1_000 }
-        else if lower.contains("b/s") { multiplier = 1 }
-        else { return 0 }
-        let digits = lower.components(separatedBy: CharacterSet.decimalDigits.union(CharacterSet(charactersIn: ".")).inverted).joined()
-        return (Double(digits) ?? 0) * multiplier
-    }
-    
     // MARK: - Notifications
     
     private func sendNotification(title: String, body: String) {
@@ -1034,7 +998,11 @@ struct Download: Identifiable {
         self.speedHistory = []
     }
     
-    var filename: String { URL(string: url)?.lastPathComponent ?? "download" }
+    /// Real file name (from `Content-Disposition`/yt-dlp once the binary reports it).
+    var filename: String {
+        let name = (fullFilePath as NSString).lastPathComponent
+        return name.isEmpty ? (URL(string: url)?.lastPathComponent ?? "download") : name
+    }
     var fileExists: Bool { FileManager.default.fileExists(atPath: fullFilePath) }
     var fileSize: String? {
         guard let size = try? FileManager.default.attributesOfItem(atPath: fullFilePath)[.size] as? UInt64 else { return nil }
@@ -1043,7 +1011,7 @@ struct Download: Identifiable {
 }
 
 enum DownloadStatus: String, CaseIterable {
-    case pending, downloading, verifying, completed, failed, cancelled
+    case pending, downloading, paused, verifying, completed, failed, cancelled
 
     var displayName: String { rawValue.capitalized }
 
@@ -1051,6 +1019,7 @@ enum DownloadStatus: String, CaseIterable {
         switch self {
         case .pending: return "clock"
         case .downloading: return "arrow.down.circle"
+        case .paused: return "pause.circle"
         case .verifying: return "checkmark.shield"
         case .completed: return "checkmark.circle.fill"
         case .failed: return "exclamationmark.circle.fill"
@@ -1062,6 +1031,7 @@ enum DownloadStatus: String, CaseIterable {
         switch self {
         case .pending: return "gray"
         case .downloading: return "blue"
+        case .paused: return "yellow"
         case .verifying: return "purple"
         case .completed: return "green"
         case .failed: return "red"
@@ -1108,6 +1078,7 @@ struct HistoryEntry: Codable, Identifiable {
         case "completed": return .green
         case "failed":    return .red
         case "cancelled": return .orange
+        case "handed_off": return .blue
         default:          return .secondary
         }
     }
@@ -1117,6 +1088,7 @@ struct HistoryEntry: Codable, Identifiable {
         case "completed": return "checkmark.circle.fill"
         case "failed":    return "xmark.circle.fill"
         case "cancelled": return "minus.circle.fill"
+        case "handed_off": return "arrow.up.forward.app"
         default:          return "clock"
         }
     }

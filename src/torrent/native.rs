@@ -6,14 +6,15 @@
 use std::error::Error;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use librqbit::{AddTorrent, AddTorrentOptions, AddTorrentResponse, Session, SessionOptions};
 
-use crate::config::ProxyConfig;
+use crate::config::{ProxyConfig, TorrentConfig};
 use crate::optimization::Optimizer;
 use crate::progress::create_progress_bar;
-use crate::torrent::TorrentCallbacks;
+use crate::torrent::{FileProgressCb, FilesCb, TorrentCallbacks, TorrentOptions};
 use crate::utils::print;
 
 // ============================================================================
@@ -54,10 +55,11 @@ impl DownloadStats {
 // ============================================================================
 
 fn format_eta(seconds: f64) -> String {
-    match seconds {
-        s if s < 60.0 => format!("{:.0}s", s),
-        s if s < 3600.0 => format!("{:.0}m {:.0}s", s / 60.0, s % 60.0),
-        s => format!("{:.0}h {:.0}m", s / 3600.0, (s % 3600.0) / 60.0),
+    let s = seconds.max(0.0) as u64;
+    match s {
+        0..=59 => format!("{s}s"),
+        60..=3599 => format!("{}m {}s", s / 60, s % 60),
+        _ => format!("{}h {}m", s / 3600, (s % 3600) / 60),
     }
 }
 
@@ -75,49 +77,22 @@ fn calculate_progress(
     (downloaded, total)
 }
 
-fn build_file_json(name: &str, size: u64) -> String {
-    format!(
-        r#"{{"name":"{}","size":{}}}"#,
-        name.replace('\"', "\\\""),
-        size
-    )
-}
-
-fn build_file_progress_json(
-    idx: usize,
-    name: &str,
-    downloaded: u64,
-    size: u64,
-    pct: f64,
-) -> String {
-    format!(
-        r#"{{"idx":{},"name":"{}","downloaded":{},"size":{},"pct":{:.1}}}"#,
-        idx,
-        name.replace('\"', "\\\""),
-        downloaded,
-        size,
-        pct
-    )
-}
-
 fn emit_files_json(file_infos: &FileInfoList) {
     if file_infos.is_empty() {
         return;
     }
-
-    let json: Vec<String> = file_infos
+    let v: Vec<_> = file_infos
         .iter()
-        .map(|(name, size)| build_file_json(name, *size))
+        .map(|(name, size)| serde_json::json!({ "name": name, "size": size }))
         .collect();
-    println!("FILES: [{}]", json.join(","));
+    println!("FILES: {}", serde_json::Value::Array(v));
 }
 
 fn emit_file_progress_json(file_infos: &FileInfoList, file_progress: &[u64]) {
     if file_infos.is_empty() || file_progress.is_empty() {
         return;
     }
-
-    let json: Vec<String> = file_infos
+    let v: Vec<_> = file_infos
         .iter()
         .enumerate()
         .map(|(i, (name, size))| {
@@ -127,11 +102,16 @@ fn emit_file_progress_json(file_infos: &FileInfoList, file_progress: &[u64]) {
             } else {
                 100.0
             };
-            build_file_progress_json(i, name, downloaded, *size, pct)
+            serde_json::json!({
+                "idx": i,
+                "name": name,
+                "downloaded": downloaded,
+                "size": size,
+                "pct": (pct * 10.0).round() / 10.0,
+            })
         })
         .collect();
-
-    println!("FILE_PROGRESS: [{}]", json.join(","));
+    println!("FILE_PROGRESS: {}", serde_json::Value::Array(v));
 }
 
 // ============================================================================
@@ -143,8 +123,12 @@ pub struct NativeTorrentDownloader {
     magnet: String,
     output_dir: String,
     quiet: bool,
-    _proxy: ProxyConfig,
+    proxy: ProxyConfig,
     _optimizer: Optimizer,
+    config: TorrentConfig,
+    cancel: Arc<AtomicBool>,
+    files_cb: Option<FilesCb>,
+    file_progress_cb: Option<FileProgressCb>,
     status_cb: Option<Arc<dyn Fn(String) + Send + Sync>>,
     progress_cb: Option<Arc<dyn Fn(f32) + Send + Sync>>,
 }
@@ -161,11 +145,29 @@ impl NativeTorrentDownloader {
             magnet,
             output_dir,
             quiet,
-            _proxy: proxy,
+            proxy,
             _optimizer: optimizer,
+            config: TorrentConfig::default(),
+            cancel: Arc::new(AtomicBool::new(false)),
+            files_cb: None,
+            file_progress_cb: None,
             status_cb: None,
             progress_cb: None,
         }
+    }
+
+    /// Apply port / DHT settings from the torrent configuration.
+    pub fn set_config(&mut self, config: TorrentConfig) {
+        self.config = config;
+    }
+
+    /// Token that stops the download when set to `true`.
+    pub fn set_cancel_token(&mut self, cancel: Arc<AtomicBool>) {
+        self.cancel = cancel;
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
     }
 
     pub fn set_status_callback<F>(&mut self, cb: F)
@@ -202,16 +204,30 @@ impl NativeTorrentDownloader {
         self.emit_status(format!("Starting native torrent download: {}", self.magnet));
         self.emit_progress(0.0);
 
+        if self.proxy.enabled {
+            self.emit_status(
+                "Warning: the native torrent client does not use the configured proxy",
+            );
+        }
+
         let output_path = self.ensure_output_dir()?;
         let session = self.create_session(&output_path).await?;
         let handle = self.add_torrent(&session).await?;
 
-        self.wait_for_metadata(&handle).await?;
+        if let Err(e) = self.wait_for_metadata(&handle).await {
+            session.stop().await;
+            return Err(e);
+        }
 
         let name = handle.name().unwrap_or_else(|| "Torrent".to_string());
         let file_infos = self.extract_file_infos(&handle);
 
-        emit_files_json(&file_infos);
+        if let Some(cb) = &self.files_cb {
+            cb(file_infos.clone());
+        }
+        if !self.quiet {
+            emit_files_json(&file_infos);
+        }
 
         let stats = handle.stats();
         self.emit_status(format!(
@@ -226,8 +242,14 @@ impl NativeTorrentDownloader {
             false,
         );
 
-        self.run_download_loop(&handle, &name, &file_infos, &progress_bar)
-            .await?;
+        if let Err(e) = self
+            .run_download_loop(&handle, &name, &file_infos, &progress_bar)
+            .await
+        {
+            drop(handle);
+            session.stop().await;
+            return Err(e);
+        }
 
         self.emit_progress(1.0);
         progress_bar.finish_with_message(format!("✓ {} downloaded successfully!", name));
@@ -247,20 +269,25 @@ impl NativeTorrentDownloader {
         Ok(path)
     }
 
-    async fn create_session(&self, output_path: &PathBuf) -> Result<Arc<Session>, BoxError> {
+    async fn create_session(
+        &self,
+        output_path: &std::path::Path,
+    ) -> Result<Arc<Session>, BoxError> {
         self.emit_status("Initializing BitTorrent session...");
 
+        let port = self.config.port.unwrap_or(6881);
         let opts = SessionOptions {
-            disable_dht: false,
+            disable_dht: !self.config.dht_enabled,
             disable_dht_persistence: true,
             dht_config: None,
             persistence: None,
-            listen_port_range: Some(6881..6889),
-            enable_upnp_port_forwarding: true,
+            listen_port_range: Some(port..port.saturating_add(8)),
+            // Only map ports automatically when the user did not pick one.
+            enable_upnp_port_forwarding: self.config.port.is_none(),
             ..Default::default()
         };
 
-        let session = Session::new_with_opts(output_path.clone(), opts)
+        let session = Session::new_with_opts(output_path.to_path_buf(), opts)
             .await
             .map_err(|e| format!("Failed to create torrent session: {}", e))?;
         Ok(session)
@@ -270,17 +297,26 @@ impl NativeTorrentDownloader {
         &self,
         session: &Arc<Session>,
     ) -> Result<Arc<librqbit::ManagedTorrent>, BoxError> {
-        self.emit_status("Adding magnet link...");
+        self.emit_status("Adding torrent...");
 
         let opts = AddTorrentOptions {
             overwrite: true,
             ..Default::default()
         };
 
-        match session
-            .add_torrent(AddTorrent::from_url(&self.magnet), Some(opts))
-            .await
+        let lower = self.magnet.to_ascii_lowercase();
+        let add = if lower.starts_with("magnet:")
+            || lower.starts_with("http://")
+            || lower.starts_with("https://")
         {
+            AddTorrent::from_url(&self.magnet)
+        } else {
+            let bytes = std::fs::read(&self.magnet)
+                .map_err(|e| format!("Cannot read torrent file '{}': {}", self.magnet, e))?;
+            AddTorrent::from_bytes(bytes)
+        };
+
+        match session.add_torrent(add, Some(opts)).await {
             Ok(AddTorrentResponse::Added(_, handle)) => Ok(handle),
             Ok(AddTorrentResponse::AlreadyManaged(_, handle)) => {
                 self.emit_status("Torrent already exists, resuming...");
@@ -305,6 +341,9 @@ impl NativeTorrentDownloader {
         loop {
             if start.elapsed() > timeout {
                 return Err("Timeout waiting for torrent metadata. No peers found.".into());
+            }
+            if self.is_cancelled() {
+                return Err(Box::new(crate::KgetError::Cancelled));
             }
 
             let stats = handle.stats();
@@ -344,6 +383,10 @@ impl NativeTorrentDownloader {
         let mut last_time = Instant::now();
 
         loop {
+            if self.is_cancelled() {
+                progress_bar.abandon_with_message("Cancelled");
+                return Err(Box::new(crate::KgetError::Cancelled));
+            }
             let stats = handle.stats();
             let download_stats = self.compute_stats(&stats, file_infos, last_bytes, last_time);
 
@@ -360,16 +403,26 @@ impl NativeTorrentDownloader {
             );
             progress_bar.set_message(msg.clone());
 
-            // Output for external parsers
-            println!(
-                "PROGRESS: {:.1}% ({}/{}) SPEED: {}/s ETA: {}",
-                download_stats.progress_pct,
-                downloaded_str,
-                total_str,
-                download_stats.format_speed(),
-                download_stats.eta
-            );
-            emit_file_progress_json(file_infos, &stats.file_progress);
+            if let Some(cb) = &self.file_progress_cb
+                && !stats.file_progress.is_empty()
+            {
+                cb(stats.file_progress.clone());
+            }
+
+            // Line-oriented output for external parsers (never in quiet/JSONL mode)
+            if !self.quiet {
+                progress_bar.suspend(|| {
+                    println!(
+                        "PROGRESS: {:.1}% ({}/{}) SPEED: {}/s ETA: {}",
+                        download_stats.progress_pct,
+                        downloaded_str,
+                        total_str,
+                        download_stats.format_speed(),
+                        download_stats.eta
+                    );
+                    emit_file_progress_json(file_infos, &stats.file_progress);
+                });
+            }
 
             if (download_stats.progress_pct - last_progress).abs() >= PROGRESS_EMIT_THRESHOLD {
                 self.emit_status(msg);
@@ -438,7 +491,7 @@ impl NativeTorrentDownloader {
 // Public API
 // ============================================================================
 
-/// Download a magnet link using the native torrent client
+/// Download a magnet link or `.torrent` using the native torrent client
 pub fn download_magnet_native(
     magnet: &str,
     output_dir: &str,
@@ -446,6 +499,7 @@ pub fn download_magnet_native(
     proxy: ProxyConfig,
     optimizer: Optimizer,
     callbacks: TorrentCallbacks,
+    opts: TorrentOptions,
 ) -> Result<(), BoxError> {
     let mut downloader = NativeTorrentDownloader::new(
         magnet.to_string(),
@@ -454,6 +508,12 @@ pub fn download_magnet_native(
         proxy,
         optimizer,
     );
+    downloader.set_config(opts.config);
+    if let Some(cancel) = opts.cancel {
+        downloader.set_cancel_token(cancel);
+    }
+    downloader.files_cb = opts.on_files;
+    downloader.file_progress_cb = opts.on_file_progress;
 
     if let Some(status) = callbacks.status {
         downloader.set_status_callback(move |s| status(s));
@@ -464,4 +524,16 @@ pub fn download_magnet_native(
     }
 
     tokio::runtime::Runtime::new()?.block_on(downloader.download())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_eta;
+
+    #[test]
+    fn eta_uses_integer_division() {
+        assert_eq!(format_eta(119.0), "1m 59s");
+        assert_eq!(format_eta(5.4), "5s");
+        assert_eq!(format_eta(3_661.0), "1h 1m");
+    }
 }

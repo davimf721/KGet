@@ -80,6 +80,7 @@ fn run_simple(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn Erro
         quiet_mode: false,
         verify_iso: false,
         expected_sha256: None,
+        ..Default::default()
     };
 
     println!("📥 Starting simple download: {}", url);
@@ -115,7 +116,7 @@ fn run_advanced(
         false, // quiet_mode = false (show output)
         ProxyConfig::default(),
         Optimizer::new(),
-    );
+    )?;
 
     // Set progress callback (receives 0.0 to 1.0)
     downloader.set_progress_callback(|progress| {
@@ -163,6 +164,7 @@ fn run_auto_verify(
         verify_iso: true, // Automatically verify after download
         quiet_mode: false,
         expected_sha256: None,
+        ..Default::default()
     };
 
     println!("💿 Downloading ISO with automatic integrity check...");
@@ -263,7 +265,6 @@ fn run_config_custom() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     // ── Configure Optimization ──
     config.optimization.max_connections = 8; // Parallel connections
-    config.optimization.compression = true; // Enable caching compression
     config.optimization.speed_limit = Some(5_000_000); // 5 MB/s limit
 
     // ── Configure Torrent ──
@@ -303,7 +304,7 @@ fn run_config_custom() -> Result<(), Box<dyn Error + Send + Sync>> {
         false,
         config.proxy.clone(),
         Optimizer::from_config(config.optimization),
-    );
+    )?;
 
     Ok(())
 }

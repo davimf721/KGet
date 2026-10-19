@@ -6,8 +6,11 @@
 //! the hash after a successful download — all automatically.
 //!
 //! # Supported features
-//! - Multiple mirrors with optional `priority` attribute (lower = preferred)
-//! - `sha-256`, `sha-512`, and `md5` hash types (sha-256 preferred)
+//! - Metalink 4 (RFC 5854, `.meta4`) and Metalink 3 (`.metalink`) manifests
+//! - Multiple mirrors: v4 `priority` (lower = preferred) and v3 `preference`
+//!   (higher = preferred)
+//! - `sha-256`, `sha-512`, and `md5` hash types, all verified (sha-256 preferred)
+//! - The manifest `<size>` is checked against the downloaded file
 //! - Multiple `<file>` entries per manifest
 //! - Local `.meta4` files and remote `.meta4` URLs
 //!
@@ -19,15 +22,16 @@
 //!
 //! download_metalink(
 //!     "ubuntu-24.04.meta4",
-//!     "~/Downloads",
+//!     "~/Downloads", // `~` is expanded
 //!     false,
 //!     ProxyConfig::default(),
 //!     Optimizer::new(),
 //! ).unwrap();
 //! ```
 
+use crate::checksum::{ChecksumAlgorithm, compute_checksum};
 use crate::config::ProxyConfig;
-use crate::download::verify_file_sha256;
+use crate::http::ClientOptions;
 use crate::optimization::Optimizer;
 use std::error::Error;
 use std::path::{Path, PathBuf};
@@ -86,8 +90,8 @@ pub struct MetalinkDoc {
 
 /// Parse a `.meta4` or `.metalink` XML string into a [`MetalinkDoc`].
 ///
-/// Both the RFC 5854 namespace (`urn:ietf:params:xml:ns:metalink`) and the
-/// older Metalink 3.x format (no namespace) are accepted.
+/// Both the RFC 5854 format (`<metalink><file>…`) and the older Metalink
+/// 3.x format (`<metalink><files><file>…<resources><url>…`) are accepted.
 pub fn parse(content: &str) -> Result<MetalinkDoc, Box<dyn Error + Send + Sync>> {
     let doc = roxmltree::Document::parse(content)
         .map_err(|e| format!("Metalink XML parse error: {}", e))?;
@@ -96,7 +100,7 @@ pub fn parse(content: &str) -> Result<MetalinkDoc, Box<dyn Error + Send + Sync>>
     let mut files: Vec<MetalinkFile> = Vec::new();
 
     for file_node in root
-        .children()
+        .descendants()
         .filter(|n| n.is_element() && n.tag_name().name() == "file")
     {
         let name = file_node
@@ -110,25 +114,37 @@ pub fn parse(content: &str) -> Result<MetalinkDoc, Box<dyn Error + Send + Sync>>
         let mut md5: Option<String> = None;
         let mut urls: Vec<MetalinkUrl> = Vec::new();
 
-        for child in file_node.children().filter(|n| n.is_element()) {
+        for child in file_node.descendants().filter(|n| n.is_element()) {
             match child.tag_name().name() {
                 "size" => {
                     size = child.text().and_then(|t| t.trim().parse::<u64>().ok());
                 }
+                // Piece hashes (v3 <pieces>, v4 <pieces>) are not whole-file hashes.
+                "hash"
+                    if child
+                        .parent_element()
+                        .is_some_and(|p| p.tag_name().name() == "pieces") => {}
                 "hash" => {
                     let hash_type = child.attribute("type").unwrap_or("").to_lowercase();
                     let value = child.text().map(|t| t.trim().to_ascii_lowercase());
                     match hash_type.as_str() {
-                        "sha-256" => sha256 = value,
-                        "sha-512" => sha512 = value,
+                        "sha-256" | "sha256" => sha256 = value,
+                        "sha-512" | "sha512" => sha512 = value,
                         "md5" => md5 = value,
                         _ => {}
                     }
                 }
                 "url" => {
+                    // v4 priority: lower is better; v3 preference: higher is better (1–100)
                     let priority = child
                         .attribute("priority")
                         .and_then(|p| p.parse::<u32>().ok())
+                        .or_else(|| {
+                            child
+                                .attribute("preference")
+                                .and_then(|p| p.parse::<u32>().ok())
+                                .map(|p| 101u32.saturating_sub(p))
+                        })
                         .unwrap_or(999);
                     if let Some(url_text) = child.text() {
                         let url = url_text.trim().to_string();
@@ -190,7 +206,7 @@ pub fn download_metalink(
         println!("Metalink: {} file(s) to download", manifest.files.len());
     }
 
-    let out_dir = PathBuf::from(output_dir);
+    let out_dir = PathBuf::from(crate::utils::expand_tilde(output_dir));
     if !out_dir.exists() {
         std::fs::create_dir_all(&out_dir)?;
     }
@@ -216,7 +232,7 @@ fn fetch_manifest(
         if !quiet {
             println!("Fetching Metalink manifest: {}", source);
         }
-        let client = build_http_client(proxy)?;
+        let client = crate::http::build_client(proxy, &ClientOptions::default())?;
         let response = client.get(source).send()?;
         if !response.status().is_success() {
             return Err(format!(
@@ -230,33 +246,6 @@ fn fetch_manifest(
         std::fs::read_to_string(source)
             .map_err(|e| format!("Cannot read Metalink file '{}': {}", source, e).into())
     }
-}
-
-/// Build a blocking reqwest client with optional proxy support.
-fn build_http_client(
-    proxy: &ProxyConfig,
-) -> Result<reqwest::blocking::Client, Box<dyn Error + Send + Sync>> {
-    let mut builder = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
-        .user_agent(concat!("KGet/", env!("CARGO_PKG_VERSION")));
-
-    if proxy.enabled
-        && let Some(proxy_url) = &proxy.url
-    {
-        let p = match proxy.proxy_type {
-            crate::config::ProxyType::Http => reqwest::Proxy::http(proxy_url),
-            crate::config::ProxyType::Https => reqwest::Proxy::https(proxy_url),
-            crate::config::ProxyType::Socks5 => reqwest::Proxy::all(proxy_url),
-        };
-        if let Ok(mut p) = p {
-            if let (Some(u), Some(pw)) = (&proxy.username, &proxy.password) {
-                p = p.basic_auth(u, pw);
-            }
-            builder = builder.proxy(p);
-        }
-    }
-
-    Ok(builder.build()?)
 }
 
 /// Download a single metalink file, trying each mirror in order.
@@ -294,31 +283,52 @@ fn download_one_file(
                     println!("  Download OK");
                 }
 
-                // Verify hash if the manifest provides one.
-                if let Some((hash_type, expected)) = file.best_hash() {
-                    if hash_type == "sha-256" {
-                        if !quiet {
-                            println!("  Verifying SHA-256...");
-                        }
-                        match verify_file_sha256(&dest, Some(expected), None) {
-                            Ok(_) => {
-                                if !quiet {
-                                    println!("  SHA-256 OK ✓");
-                                }
-                            }
-                            Err(e) => {
-                                eprintln!("  SHA-256 mismatch: {}", e);
-                                // Remove corrupted file and try next mirror.
-                                let _ = std::fs::remove_file(&dest);
-                                last_error = Some(e);
-                                continue;
-                            }
-                        }
-                    } else if !quiet {
-                        println!(
-                            "  Skipping {} verification (only sha-256 supported inline)",
-                            hash_type
+                if let Some(expected) = file.size {
+                    let got = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+                    if got != expected {
+                        let _ = std::fs::remove_file(&dest);
+                        last_error = Some(
+                            format!(
+                                "Size mismatch on mirror {}: expected {expected}, got {got}",
+                                mirror.url
+                            )
+                            .into(),
                         );
+                        continue;
+                    }
+                }
+
+                // Verify the strongest hash the manifest provides.
+                let checks = [
+                    (file.sha256.as_deref(), ChecksumAlgorithm::Sha256),
+                    (file.sha512.as_deref(), ChecksumAlgorithm::Sha512),
+                    (file.md5.as_deref(), ChecksumAlgorithm::Md5),
+                ];
+                if let Some((expected, algo)) =
+                    checks.into_iter().find_map(|(h, a)| h.map(|h| (h, a)))
+                {
+                    if !quiet {
+                        println!("  Verifying {}...", algo.name());
+                    }
+                    let got = compute_checksum(&dest, &algo)?;
+                    if got != expected {
+                        eprintln!(
+                            "  {} mismatch: expected {}, got {}",
+                            algo.name(),
+                            expected,
+                            got
+                        );
+                        // Remove the corrupted file and try the next mirror.
+                        let _ = std::fs::remove_file(&dest);
+                        last_error = Some(Box::new(crate::KgetError::ChecksumMismatch {
+                            algorithm: algo.name().to_string(),
+                            expected: expected.to_string(),
+                            got,
+                        }));
+                        continue;
+                    }
+                    if !quiet {
+                        println!("  {} OK ✓", algo.name());
                     }
                 }
 
@@ -328,6 +338,8 @@ fn download_one_file(
                 if !quiet {
                     eprintln!("  Mirror failed: {}", e);
                 }
+                // Never let the next mirror resume another mirror's partial data.
+                discard_partial(&dest);
                 last_error = Some(e);
             }
         }
@@ -351,32 +363,30 @@ fn download_from_mirror(
         .ok_or("Output path contains non-UTF-8 characters")?
         .to_string();
 
-    let dl = AdvancedDownloader::new(
+    let mut dl = AdvancedDownloader::new(
         url.to_string(),
         output_path,
         quiet,
         proxy.clone(),
         optimizer.clone(),
     )?;
+    dl.set_resume_policy(crate::advanced_download::ResumePolicy::AlwaysResume);
     dl.download()
+}
+
+fn discard_partial(dest: &Path) {
+    let part = crate::download::part_path_for(dest);
+    let _ = std::fs::remove_file(&part);
+    let mut state = dest.as_os_str().to_os_string();
+    state.push(".kget");
+    let _ = std::fs::remove_file(PathBuf::from(state));
 }
 
 /// Remove characters that are unsafe in filenames across platforms.
 fn sanitise_filename(name: &str) -> String {
-    let cleaned: String = name
-        .chars()
-        .map(|c| match c {
-            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\0' => '_',
-            c => c,
-        })
-        .collect();
-
-    let cleaned = cleaned.trim_matches('.').trim();
-    if cleaned.is_empty() {
-        "download".to_string()
-    } else {
-        cleaned.to_string()
-    }
+    // Manifest names may contain directories ("dir/file"); keep only the file name.
+    let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    crate::utils::sanitize_filename(base)
 }
 
 // ============================================================================
@@ -389,4 +399,53 @@ pub fn is_metalink(source: &str) -> bool {
     // Strip query string for URL detection
     let base = lower.split('?').next().unwrap_or(&lower);
     base.ends_with(".meta4") || base.ends_with(".metalink")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_metalink_v3() {
+        let xml = r#"<?xml version="1.0"?>
+<metalink version="3.0" xmlns="http://www.metalinker.org/">
+  <files>
+    <file name="ex.iso">
+      <size>42</size>
+      <verification><hash type="sha512">ABCD</hash></verification>
+      <resources>
+        <url type="http" preference="10">http://slow/ex.iso</url>
+        <url type="http" preference="100">http://fast/ex.iso</url>
+      </resources>
+    </file>
+  </files>
+</metalink>"#;
+        let doc = parse(xml).unwrap();
+        assert_eq!(doc.files.len(), 1);
+        let f = &doc.files[0];
+        assert_eq!(f.size, Some(42));
+        assert_eq!(f.sha512.as_deref(), Some("abcd"));
+        assert_eq!(f.urls[0].url, "http://fast/ex.iso");
+    }
+
+    #[test]
+    fn parses_metalink_v4() {
+        let xml = r#"<?xml version="1.0"?>
+<metalink xmlns="urn:ietf:params:xml:ns:metalink">
+  <file name="a.bin">
+    <hash type="sha-256">00ff</hash>
+    <url priority="2">http://b/a.bin</url>
+    <url priority="1">http://a/a.bin</url>
+  </file>
+</metalink>"#;
+        let doc = parse(xml).unwrap();
+        assert_eq!(doc.files[0].urls[0].url, "http://a/a.bin");
+        assert_eq!(doc.files[0].sha256.as_deref(), Some("00ff"));
+    }
+
+    #[test]
+    fn sanitises_directory_names() {
+        assert_eq!(sanitise_filename("dir/sub/file.iso"), "file.iso");
+        assert_eq!(sanitise_filename(".."), "download");
+    }
 }
