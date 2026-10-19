@@ -221,7 +221,7 @@ pub fn download_to_path(
     let mut attempt = 0u32;
     let mut progress_bar: Option<indicatif::ProgressBar> = None;
     let started_at = Instant::now();
-    let session_start_bytes = downloaded;
+    let mut session_start_bytes = downloaded;
     let mut status_throttle = Throttle::new(200);
     let mut byte_throttle = Throttle::new(200);
     let mut is_iso = target.to_lowercase().ends_with(".iso");
@@ -276,6 +276,7 @@ pub fn download_to_path(
                 }
                 // Stale .part larger than the remote file: start over.
                 downloaded = 0;
+                session_start_bytes = 0;
                 continue;
             }
             code if http::is_transient_status(code) => {
@@ -301,6 +302,7 @@ pub fn download_to_path(
             _ => {
                 // 200 (or 2xx without range): the server sends the whole file.
                 downloaded = 0;
+                session_start_bytes = 0;
                 false
             }
         };
@@ -449,7 +451,7 @@ pub fn download_to_path(
                 }
 
                 throttle_download(
-                    downloaded - session_start_bytes,
+                    downloaded.saturating_sub(session_start_bytes),
                     started_at,
                     optimizer.speed_limit,
                 );

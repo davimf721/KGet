@@ -60,7 +60,7 @@ A maioria das ferramentas de download é simples demais (clones de wget com cone
 
 ### Histórico e Persistência
 - **Histórico de downloads** — todo download gravado em `history.json`; `--history` / `--history-clear`
-- **REPL interativo** (`--interactive`) — histórico completo, todos os protocolos, edição de config ao vivo
+- **REPL interativo** (`--interactive`) — todas as opções de download da CLI, lote, retry, checksums, Tab para completar, histórico persistente, Ctrl+C para pausar
 
 ### GUIs
 - **App macOS nativo** — SwiftUI, sidebar `NavigationSplitView`, monitor de clipboard, drag-and-drop de URLs, sparkline de velocidade, aba de histórico, Share Extension, menu bar
@@ -210,14 +210,24 @@ kget --interactive
 ```
 
 ```
-kget> download -a -o ~/Downloads/ubuntu.iso https://releases.ubuntu.com/...
-kget> download --sftp sftp://usuario@servidor/backups/db.sql.gz
+kget> https://example.com/arquivo.zip       # colar uma URL já baixa
+kget> cd ~/Downloads                        # pasta onde esta sessão salva os arquivos
+kget> set turbo on                          # padrões da sessão: turbo, quality, retries, timeout
+kget> download -a -o "ubuntu.iso" --checksum-url https://host/SHA256SUMS https://releases.ubuntu.com/...
+kget> download -l 1048576 -p socks5://127.0.0.1:1080 https://example.com/grande.iso   # só neste download
 kget> download --ytdlp --quality 720p https://youtube.com/watch?v=...
-kget> config set connections 8
-kget> config set speed-limit 1048576
-kget> history
-kget> help
+kget> batch urls.txt -j 8                   # downloads em paralelo a partir de um arquivo
+kget> info https://example.com/arquivo.zip  # tamanho, tipo, retomável? (sem baixar)
+kget> history failed                        # também: history 20 | completed | search <texto> | clear
+kget> retry 2                               # refaz uma entrada; continua o .part
+kget> open last                             # também: reveal, extract, checksum, verify
+kget> config set connections 8              # salvo no config.json (config show | path | reset)
+kget> doctor
+kget> help download
 ```
+
+Tab completa comandos, flags, chaves de config e caminhos; ↑/↓ navegam pelos comandos anteriores
+(salvos entre sessões). Ctrl+C para o download em andamento e mantém os dados parciais — `retry last` continua.
 
 ### Eventos JSONL (para scripts e agentes)
 

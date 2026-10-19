@@ -7,6 +7,21 @@ Todos los cambios notables en este proyecto serán documentados en este archivo.
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 y este proyecto se adhiere al [Versionado Semántico](https://semver.org/spec/v2.0.0.html).
 
+## [Sin publicar]
+
+### Añadido
+- **El modo interactivo (`kget -i`) ahora cubre la CLI:** todas las flags de descarga (`--checksum`, `--checksum-url`,
+  `--extract`, `-c`, `--no-clobber`, `-H`, `--retries`, `--timeout`, `--at`, `-j`, protocolos forzados) y
+  `-l`/`-p` por descarga, sin guardarse. Nuevos comandos: `batch`, `info`, `retry`, `open`, `reveal`,
+  `checksum`, `verify`, `extract`, `doctor`, `cd`/`pwd`, `set` (valores de la sesión), `history N|failed|completed|search|clear`,
+  `config path|reset`, `version`, `help <tema>`. Autocompletado con Tab, historial guardado entre sesiones,
+  varias URLs por línea, y Ctrl+C detiene la descarga en curso (conservando el `.part`) en lugar de ignorarse.
+
+### Corregido
+- Reanudar (`-c`) en un servidor que ignora `Range` y reenvía el archivo completo hacía fallar los builds de debug
+  y rompía el límite de velocidad en los builds de release.
+- Una descarga fallida o cancelada guardada con `-O archivo` queda registrada con ese nombre, para poder reanudarse.
+
 ## [1.7.1] - 2026-10-18
 
 ### Corregido
