@@ -66,7 +66,7 @@ Most download tools are either too simple (single-connection wget-clones) or too
 ### History & Persistence
 - **Download history** — every download recorded to `history.json` (atomic, multi-process safe, credentials stripped); `--history` / `--history-clear`
 - **Configuration** — flags apply only to the current run; `--save-config` persists them (proxy passwords are never written). `KGET_CONFIG_DIR` overrides the config directory
-- **Interactive REPL** (`--interactive`) — full command history, all protocols, live config editing
+- **Interactive REPL** (`--interactive`) — every CLI download option, batch, retry, checksums, Tab completion, persistent history, Ctrl+C to pause
 
 ### GUIs
 - **Native macOS app** — SwiftUI, `NavigationSplitView` sidebar, clipboard monitor, drag-and-drop URLs, speed sparkline, history tab, Share Extension, menu bar
@@ -250,15 +250,24 @@ kget --interactive
 ```
 
 ```
-kget> download -a -o "~/My Downloads/ubuntu.iso" https://releases.ubuntu.com/...
 kget> https://example.com/file.zip          # pasting a URL downloads it
-kget> download sftp://user@server/backups/db.sql.gz
+kget> cd ~/Downloads                        # where this session saves files
+kget> set turbo on                          # session defaults: turbo, quality, retries, timeout
+kget> download -a -o "ubuntu.iso" --checksum-url https://host/SHA256SUMS https://releases.ubuntu.com/...
+kget> download -l 1048576 -p socks5://127.0.0.1:1080 https://example.com/big.iso   # this download only
 kget> download --ytdlp --quality 720p https://youtube.com/watch?v=...
-kget> config set connections 8
-kget> config set speed-limit 1048576
-kget> history
-kget> help
+kget> batch urls.txt -j 8                   # parallel downloads from a file
+kget> info https://example.com/file.zip     # size, type, resumable? (no download)
+kget> history failed                        # also: history 20 | completed | search <text> | clear
+kget> retry 2                               # re-run an entry; resumes its .part file
+kget> open last                             # also: reveal, extract, checksum, verify
+kget> config set connections 8              # saved to config.json (config show | path | reset)
+kget> doctor
+kget> help download
 ```
+
+Tab completes commands, flags, config keys and paths; ↑/↓ browse previous commands (saved across
+sessions). Ctrl+C stops the running download and keeps partial data — `retry last` continues it.
 
 ### JSONL events (for scripts and agents)
 

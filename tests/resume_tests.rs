@@ -275,6 +275,24 @@ fn simple_continue_flag_resumes_existing_part() {
 }
 
 #[test]
+fn simple_continue_against_server_without_ranges_restarts_cleanly() {
+    // The server answers the resume request with 200 + the whole body; this
+    // used to underflow the speed-limit counter (panic in debug builds).
+    let body = pattern(200_000);
+    let srv = serve(body.clone(), Behavior::default());
+    let dir = TempDir::new().unwrap();
+    let out = dir.path().join("f.bin");
+    std::fs::write(dir.path().join("f.bin.part"), &body[..50_000]).unwrap();
+    let opts = DownloadOptions {
+        resume: true,
+        ..Default::default()
+    };
+    simple(&format!("{}/f.bin", srv.base), &out, opts).unwrap();
+    assert_eq!(std::fs::read(&out).unwrap(), body);
+    assert!(!dir.path().join("f.bin.part").exists());
+}
+
+#[test]
 fn simple_429_respects_retry_after() {
     let body = pattern(10_000);
     let srv = serve(

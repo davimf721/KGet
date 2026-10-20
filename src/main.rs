@@ -292,7 +292,7 @@ pub(crate) enum Outcome {
 }
 
 /// Downloads that stop cleanly on Ctrl+C (others exit immediately).
-static CANCEL_AWARE: AtomicBool = AtomicBool::new(true);
+pub(crate) static CANCEL_AWARE: AtomicBool = AtomicBool::new(true);
 
 /// Run one job and record it in the history; emits JSONL events when asked.
 pub(crate) fn run_and_record(job: &Job, ctx: &Ctx) -> Result<Outcome, BoxError> {
@@ -325,6 +325,22 @@ pub(crate) fn run_and_record(job: &Job, ctx: &Ctx) -> Result<Outcome, BoxError> 
         .map(utils::expand_tilde)
         .unwrap_or_else(|| ".".into());
     let mut entry = HistoryEntry::new(&job.url, &output_dir, job.sha256.as_deref());
+    // `-o file.bin`: record that name, so a failed or cancelled entry can be
+    // retried/resumed from the right `.part` file.
+    if matches!(
+        proto,
+        Protocol::Http | Protocol::Ftp | Protocol::Sftp | Protocol::WebDav
+    ) && let Some(o) = job.output.as_deref()
+        && !o.ends_with('/')
+        && !o.ends_with(std::path::MAIN_SEPARATOR)
+        && !Path::new(&output_dir).is_dir()
+    {
+        let file = Path::new(&output_dir);
+        entry.set_saved_file(file);
+        if file.parent().is_none_or(|d| d.as_os_str().is_empty()) {
+            entry.output_dir = ".".into();
+        }
+    }
     let cancelled = ctx.cancel.load(Ordering::SeqCst);
     let (status, error_msg) = match &result {
         Ok(Outcome::Saved(path)) => {
@@ -1067,7 +1083,7 @@ fn apply_cli_overrides(config: &mut Config, args: &Args) {
     }
 }
 
-fn parse_checksum_spec(spec: &str) -> Result<(ChecksumAlgorithm, String), BoxError> {
+pub(crate) fn parse_checksum_spec(spec: &str) -> Result<(ChecksumAlgorithm, String), BoxError> {
     let (algo, hex) = match spec.split_once(':') {
         Some((a, h)) => (
             ChecksumAlgorithm::parse(a)
@@ -1118,9 +1134,26 @@ fn run_batch(batch_file: &str, args: &Args, template: &Job, ctx: &Ctx) -> Result
     }
 
     let output_dir = PathBuf::from(utils::expand_tilde(args.output.as_deref().unwrap_or(".")));
-    std::fs::create_dir_all(&output_dir)?;
-    let jobs = args.jobs.clamp(1, 64);
-    if !args.jsonl {
+    let (_, failed) = run_urls(urls, &output_dir, args.jobs, template, ctx, args.jsonl)?;
+    if ctx.cancel.load(Ordering::SeqCst) {
+        return Ok(130);
+    }
+    Ok(if failed > 0 { 1 } else { 0 })
+}
+
+/// Download `urls` into `output_dir`, `jobs` at a time, and return
+/// `(succeeded, failed)`. Shared by `--batch` and the interactive `batch` command.
+pub(crate) fn run_urls(
+    urls: Vec<String>,
+    output_dir: &Path,
+    jobs: usize,
+    template: &Job,
+    ctx: &Ctx,
+    jsonl: bool,
+) -> Result<(usize, usize), BoxError> {
+    std::fs::create_dir_all(output_dir)?;
+    let jobs = jobs.clamp(1, 64);
+    if !jsonl {
         println!("Batch: {} URL(s) queued, {} at a time", urls.len(), jobs);
     }
 
@@ -1132,21 +1165,21 @@ fn run_batch(batch_file: &str, args: &Args, template: &Job, ctx: &Ctx) -> Result
             let mut job = template.clone();
             job.url = url.clone();
             job.quiet = true;
-            job.tag_events = args.jsonl;
+            job.tag_events = jsonl;
             job.forced = template.forced;
             let proto = job.protocol();
             job.output = Some(match proto {
                 Protocol::Http | Protocol::WebDav | Protocol::Ftp | Protocol::Sftp => {
                     let name = utils::get_filename_from_url_or_default(url, "download");
                     let path = if template.overwrite == OverwritePolicy::Overwrite {
-                        utils::unique_path(&output_dir, &name, &mut taken)
+                        utils::unique_path(output_dir, &name, &mut taken)
                     } else {
                         // -c / --no-clobber must find the existing file under its own name
                         let p = output_dir.join(&name);
                         if taken.insert(p.clone()) {
                             p
                         } else {
-                            utils::unique_path(&output_dir, &name, &mut taken)
+                            utils::unique_path(output_dir, &name, &mut taken)
                         }
                     };
                     path.to_string_lossy().into_owned()
@@ -1161,7 +1194,7 @@ fn run_batch(batch_file: &str, args: &Args, template: &Job, ctx: &Ctx) -> Result
         .num_threads(jobs)
         .thread_name(|i| format!("kget-batch-{i}"))
         .build()?;
-    let results: Vec<(String, Result<(), String>)> = pool.install(|| {
+    let results: Vec<Result<(), String>> = pool.install(|| {
         use rayon::prelude::*;
         batch_jobs
             .par_iter()
@@ -1169,29 +1202,26 @@ fn run_batch(batch_file: &str, args: &Args, template: &Job, ctx: &Ctx) -> Result
                 let r = run_and_record(job, ctx)
                     .map(|_| ())
                     .map_err(|e| e.to_string());
-                if !args.jsonl {
+                if !jsonl {
                     match &r {
                         Ok(()) => println!("[OK]   {}", job.url),
                         Err(e) => eprintln!("[FAIL] {} — {}", job.url, e),
                     }
                 }
-                (job.url.clone(), r)
+                r
             })
             .collect()
     });
 
-    let failed = results.iter().filter(|(_, r)| r.is_err()).count();
+    let failed = results.iter().filter(|r| r.is_err()).count();
     let succeeded = results.len() - failed;
-    if !args.jsonl {
+    if !jsonl {
         println!(
             "Batch complete: {} succeeded, {} failed.",
             succeeded, failed
         );
     }
-    if ctx.cancel.load(Ordering::SeqCst) {
-        return Ok(130);
-    }
-    Ok(if failed > 0 { 1 } else { 0 })
+    Ok((succeeded, failed))
 }
 
 // ============================================================================
@@ -1213,7 +1243,7 @@ pub(crate) fn parse_extra_headers(raw: &[String]) -> Vec<(String, String)> {
         .collect()
 }
 
-fn print_doctor(config: &Config) {
+pub(crate) fn print_doctor(config: &Config) {
     println!("KGet {}", env!("CARGO_PKG_VERSION"));
     println!(
         "OS:       {} ({})",
@@ -1283,7 +1313,7 @@ fn detach_owned_console() {
 ///
 /// Uses the system time zone (including on Windows) and re-checks the clock
 /// every 30 seconds, so DST changes and system sleep are handled.
-fn wait_until(time: &str, quiet: bool) -> Result<(), BoxError> {
+pub(crate) fn wait_until(time: &str, quiet: bool) -> Result<(), BoxError> {
     use chrono::{Local, NaiveTime, TimeZone};
 
     let target_time = NaiveTime::parse_from_str(time.trim(), "%H:%M")

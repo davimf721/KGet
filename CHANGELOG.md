@@ -7,6 +7,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0.html),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Interactive mode (`kget -i`) now covers the CLI:** every download flag (`--checksum`, `--checksum-url`,
+  `--extract`, `-c`, `--no-clobber`, `-H`, `--retries`, `--timeout`, `--at`, `-j`, forced protocols) plus
+  per-download `-l`/`-p` that are not saved. New commands: `batch`, `info`, `retry`, `open`, `reveal`,
+  `checksum`, `verify`, `extract`, `doctor`, `cd`/`pwd`, `set` (session defaults), `history N|failed|completed|search|clear`,
+  `config path|reset`, `version`, `help <topic>`. Tab completion, history saved across sessions,
+  several URLs per line, and Ctrl+C stops the running download (keeping the `.part`) instead of being ignored.
+
+### Fixed
+- Resuming (`-c`) against a server that ignores `Range` and resends the whole file crashed debug builds
+  and broke the speed limit in release builds.
+- A failed or cancelled download saved with `-O file` is recorded under that name, so it can be resumed.
+
 ## [1.7.1] - 2026-10-18
 
 ### Fixed
