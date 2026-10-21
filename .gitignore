@@ -5,6 +5,7 @@ release/
 torrent_output/
 
 .DS_Store
+._*
 .idea/
 .vscode/
 .claude/
