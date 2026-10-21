@@ -694,7 +694,7 @@ fn throttle_download(downloaded: u64, started_at: Instant, speed_limit: Option<u
 ///
 /// # Output
 ///
-/// Prints the SHA256 hash to stdout and sends it via callback if provided.
+/// Sends the SHA256 hash (and progress messages) to the callback, if provided.
 pub fn verify_iso_integrity(
     path: &Path,
     callback: Option<&(dyn Fn(String) + Send + Sync)>,
@@ -714,7 +714,10 @@ pub fn verify_file_sha256(
         }
     };
 
-    send("Calculating SHA256 hash... (this may take a while for large ISOs)");
+    send(&format!(
+        "{} (this may take a while for large ISOs)",
+        crate::events::verifying_status("sha256")
+    ));
 
     let mut file = File::open(path)?;
     let mut hasher = sha2::Sha256::new();

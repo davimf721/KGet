@@ -442,9 +442,11 @@ download_metalink(
 ```
 
 `download_metalink` parses the RFC 5854 manifest, sorts mirrors by `priority`
-(lowest first), tries each in order, and verifies SHA-256 after a successful
-download. A corrupted mirror (hash mismatch) is deleted and the next mirror is
-tried automatically.
+(lowest first), tries each in order, and verifies the strongest hash it lists
+(SHA-256, then SHA-512, then MD5) after a successful download. A corrupted
+mirror (hash mismatch) is deleted and the next mirror is tried automatically.
+`download_metalink_with_status` takes an extra status callback that receives a
+`kget::events::verifying_status` message before each hash is computed.
 
 Parse the manifest yourself:
 
@@ -546,7 +548,13 @@ println!("saved to {}", saved.display());
 HTTP errors are returned as boxed `KgetError::Http { status, url }` /
 `KgetError::NotFound`, so `KgetError::from(err)` lets you match them.
 `kget::protocol::detect(url)` tells which downloader a URL needs, and
-`kget::JsonEvent` is the serializable type behind `kget --jsonl`.
+`kget::JsonEvent` is the serializable type behind `kget --jsonl`
+(`"v": 1`; new events and fields are additive and keep the version, so ignore
+unknown ones). `JsonEvent::Phase` announces post-transfer work —
+`{"event":"phase","phase":"verifying","algorithm":"sha256"}` or
+`{"event":"phase","phase":"extracting"}` — and
+`JsonEvent::phase_from_status` maps the engine's hashing status message
+(`kget::events::verifying_status`) to it, for your own status callbacks.
 
 ## Library Guarantees
 

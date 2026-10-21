@@ -12,11 +12,13 @@ commands and events instead of reimplementing download behavior.
 
 | Module | Responsibility |
 |--------|---------------|
-| `src/download.rs` | Single-stream HTTP/HTTPS download with retry, gzip/brotli/lz4 decompression, SHA-256/multi-algorithm verification, `Content-Disposition` support, 4xx-vs-5xx retry policy |
+| `src/download.rs` | Single-stream HTTP/HTTPS download with retry, SHA-256 verification, `Content-Disposition` support, 408/429/5xx-vs-4xx retry policy; bodies are saved byte-for-byte (no transparent decompression) |
 | `src/advanced_download.rs` | Resumable multi-connection HTTP downloader (`AdvancedDownloader`); splits file into byte ranges, parallelises via rayon; global `TokenBucket` throttle; `ResumePolicy` enum |
 | `src/builder.rs` | `DownloadBuilder` + `BatchBuilder` — fluent entry points (`kget::builder()`, `kget::batch()`); `.download()`, `.spawn()`, `.download_to_bytes()`, `.download_async()` |
 | `src/error.rs` | `KgetError` typed enum with `From` impls for `reqwest::Error`, `io::Error`, `Box<dyn Error>` |
-| `src/events.rs` | `DownloadEvent` channel variants: `Progress`, `Status`, `Completed`, `Error` |
+| `src/events.rs` | `DownloadEvent` channel variants (`Progress`, `Status`, `Completed`, `Error`) and `JsonEvent`, the versioned `--jsonl` protocol (see below) |
+| `src/http.rs` | Shared reqwest client construction: proxy (HTTP/HTTPS/SOCKS5, never silently bypassed), timeouts, user agent |
+| `src/protocol.rs` | `detect(url)` → `Protocol` routing used by every frontend |
 | `src/checksum.rs` | `ChecksumAlgorithm` enum + `compute_checksum()` — SHA-256, SHA-512, SHA-1, MD5, BLAKE3 |
 | `src/ftp/` | FTP protocol adapter (suppaftp) |
 | `src/sftp/mod.rs` | SFTP protocol adapter (ssh2); SSH host-key verification against `~/.ssh/known_hosts`; `CheckResult::Failure` hard-errors |
@@ -39,7 +41,7 @@ commands and events instead of reimplementing download behavior.
 
 **macOS native app** (`macos-app/`):
 - SwiftUI shell that spawns `kget-bin` (the Rust binary renamed)
-- Communicates via subprocess stdio (being migrated to JSONL)
+- Runs `kget-bin <url> --jsonl` and consumes the JSONL protocol; it never parses human-readable text
 - `DownloadManager.swift` drives the Rust process
 - `ContentView.swift` — `NavigationSplitView` main UI (v1.7.0 redesign)
 - `MenuBarView.swift` — menu bar extra with active download count
@@ -81,6 +83,32 @@ it by extracting stable modules when a feature needs them.
 - CLI output intended for app parsing should be machine-stable JSONL, not localized human text.
 - Platform shells should own platform UX only: menus, notifications, sharing, file pickers, permissions, and window/navigation behavior.
 
+## JSONL Protocol
+
+`kget --jsonl` prints one `JsonEvent` (`src/events.rs`) per line, tagged by
+`event` and carrying the protocol version `"v": 1`. In `--batch` mode every
+event also has the `url` it belongs to.
+
+| Event | Fields | Meaning |
+|-------|--------|---------|
+| `started` | `url`, `protocol`, `advanced`, `output` | Job started |
+| `progress` | `bytes`, `total`, `percent`, `speed_bps`, `eta_secs`, `progress` | Throttled to ~5/s |
+| `status` | `message` | Human text for logs only; never match on it |
+| `files` / `file_progress` | `files` | Torrent contents and per-file progress |
+| `phase` | `phase` (`verifying` \| `extracting`), `algorithm` (verifying only) | Post-transfer phase started |
+| `verified` | `algorithm`, `hash`, `ok` | Checksum result |
+| `saved` | `path`, `bytes` | File in its final location |
+| `completed` | — | Job succeeded |
+| `error` | `code`, `message`, `retryable` | Job failed |
+
+Versioning: new event types and new fields are additive and keep `"v": 1`;
+consumers must ignore events and fields they do not know. `"v"` is bumped only
+for breaking changes (an event or field removed, renamed, or given a different
+meaning). When a frontend needs information that is only in a `status`
+message, add a structured event or field instead of parsing the text — the
+`phase` event replaced the macOS app's `"SHA256"`/`"Calculating"` string match
+this way (the app keeps that match only as a fallback for older binaries).
+
 ## Feature Flags
 
 | Flag | Adds |
@@ -106,7 +134,7 @@ client backed by the same `kget-app` API.
 
 1. Keep shrinking `src/main.rs` until it only parses CLI args and launches modes.
 2. Move queue state from individual UIs into an app service.
-3. Replace ad hoc text parsing between SwiftUI and Rust with JSONL events.
+3. ~~Replace ad hoc text parsing between SwiftUI and Rust with JSONL events.~~ Done (1.7.1; verification/extraction `phase` events in 1.8).
 4. Split protocol traits from concrete implementations.
 5. Store queue/history in SQLite with schema migrations.
 6. Introduce FFI only after the app command/event API is stable.

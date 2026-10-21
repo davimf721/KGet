@@ -22,7 +22,7 @@ use kget::advanced_download::{AdvancedDownloader, ResumePolicy};
 use kget::app::{DownloadCommand, WorkerToGuiMessage, spawn_download_worker};
 use kget::checksum::{ChecksumAlgorithm, compute_checksum, parse_sidecar};
 use kget::config::{Config, ProxyType};
-use kget::events::{FileEntry, FileProgressEntry, JsonEvent, SpeedMeter};
+use kget::events::{FileEntry, FileProgressEntry, JsonEvent, Phase, SpeedMeter};
 use kget::ftp::FtpDownloader;
 use kget::metalink;
 use kget::optimization::Optimizer;
@@ -360,11 +360,14 @@ pub(crate) fn run_and_record(job: &Job, ctx: &Ctx) -> Result<Outcome, BoxError> 
     match &result {
         Ok(Outcome::Saved(path)) => {
             if let Some(p) = path {
-                if job.extract
-                    && utils::is_extractable(p)
-                    && let Err(e) = kget::auto_extract(p, job.quiet)
-                {
-                    eprintln!("Warning: auto-extract: {e}");
+                if job.extract && utils::is_extractable(p) {
+                    job.emit(&JsonEvent::Phase {
+                        phase: Phase::Extracting,
+                        algorithm: None,
+                    });
+                    if let Err(e) = kget::auto_extract(p, job.quiet) {
+                        eprintln!("Warning: auto-extract: {e}");
+                    }
                 }
                 let bytes = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
                 job.emit(&JsonEvent::Saved {
@@ -450,6 +453,10 @@ fn post_verify(job: &Job, ctx: &Ctx, path: &Path) -> Result<(), BoxError> {
     if !job.quiet {
         println!("Verifying {}...", algo.name());
     }
+    job.emit(&JsonEvent::Phase {
+        phase: Phase::Verifying,
+        algorithm: Some(algo.name().into()),
+    });
     let got = compute_checksum(path, &algo)?;
     let want = want.trim().to_ascii_lowercase();
     let ok = got == want;
@@ -490,6 +497,9 @@ fn jsonl_status(job: &Job) -> impl Fn(String) + Send + Sync + 'static {
     move |message: String| {
         // Progress is reported through structured progress events.
         if !message.starts_with("PROGRESS:") {
+            if let Some(phase) = JsonEvent::phase_from_status(&message) {
+                job.emit(&phase);
+            }
             job.emit(&JsonEvent::Status { message });
         }
     }
@@ -576,12 +586,14 @@ fn run_job(job: &Job, ctx: &Ctx, proto: Protocol) -> Result<Outcome, BoxError> {
         }
         Protocol::Metalink => {
             let output_dir = job.output.as_deref().unwrap_or(".");
-            metalink::download_metalink(
+            metalink::download_metalink_with_status(
                 &job.url,
                 output_dir,
                 quiet,
                 config.proxy.clone(),
                 optimizer,
+                job.jsonl
+                    .then_some(&status as &(dyn Fn(String) + Send + Sync)),
             )?;
             Ok(Outcome::Saved(None))
         }

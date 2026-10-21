@@ -36,7 +36,7 @@ A native macOS frontend for KGet built with SwiftUI, providing deep system integ
 ```
 
 The script:
-1. Builds the Rust binary with all features (`gui,torrent-native,torrent-transmission`)
+1. Builds the Rust binary with the native torrent client (`--features torrent-native`)
 2. Compiles the Swift app via `swift build`
 3. Assembles `KGet.app` bundle with the Rust binary renamed to `kget-bin`
 4. Compiles and embeds `KGetShareExtension.appex` into `Contents/PlugIns/`
@@ -71,7 +71,7 @@ The Swift frontend handles:
 
 The Rust backend (`kget-bin`) handles:
 - All actual file downloads (HTTP/HTTPS, FTP, SFTP, WebDAV, torrent)
-- Progress reporting via stdout (transitioning to JSONL)
+- Progress, verification/extraction phases and errors via the versioned `--jsonl` protocol (`src/events.rs`); the app never parses human-readable text
 - yt-dlp subprocess management
 - History persistence
 

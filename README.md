@@ -280,13 +280,21 @@ Every line is one JSON object with `"v": 1` and an `event` field:
 ```jsonc
 {"v":1,"event":"started","url":"…","protocol":"http","advanced":true,"output":"…"}
 {"v":1,"event":"progress","bytes":524288,"total":1048576,"percent":50.0,"speed_bps":3145728,"eta_secs":12}
-{"v":1,"event":"status","message":"Calculating SHA256..."}
+{"v":1,"event":"status","message":"Calculating SHA256 hash..."}           // human text, may change
 {"v":1,"event":"files","files":[{"name":"a.mkv","size":123}]}            // torrents
+{"v":1,"event":"file_progress","files":[{"idx":0,"downloaded":64,"size":123,"pct":52.0}]}
+{"v":1,"event":"phase","phase":"verifying","algorithm":"sha256"}         // hashing started
 {"v":1,"event":"verified","algorithm":"sha256","hash":"…","ok":true}
+{"v":1,"event":"phase","phase":"extracting"}                             // --extract
 {"v":1,"event":"saved","path":"/abs/path/file.iso","bytes":1048576}
 {"v":1,"event":"completed"}
 {"v":1,"event":"error","code":"http_404","message":"…","retryable":false}
 ```
+
+Match on `event` and the structured fields, never on `status` messages. New event types and fields
+are added without changing `"v"`, so ignore the ones you don't know; `"v"` is bumped only when an
+existing event or field is removed or changes meaning. In `--batch` mode every event also carries
+the `url` it belongs to.
 
 Exit codes: `0` success, `1` error, `130` cancelled (Ctrl+C — partial data is kept for resume).
 

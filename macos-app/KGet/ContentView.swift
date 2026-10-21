@@ -101,7 +101,7 @@ struct ContentView: View {
     private var filteredDownloads: [Download] {
         switch currentFilter {
         case .all:       return downloadManager.downloads
-        case .active:    return downloadManager.downloads.filter { $0.status == .downloading || $0.status == .verifying || $0.status == .pending || $0.status == .paused }
+        case .active:    return downloadManager.downloads.filter { $0.status == .downloading || $0.status == .verifying || $0.status == .extracting || $0.status == .pending || $0.status == .paused }
         case .completed: return downloadManager.downloads.filter { $0.status == .completed }
         case .failed:    return downloadManager.downloads.filter { $0.status == .failed || $0.status == .cancelled }
         case .history:   return []
@@ -156,7 +156,7 @@ struct ContentView: View {
     private func downloadCount(for item: SidebarItem) -> Int {
         switch item {
         case .all:       return downloadManager.downloads.count
-        case .active:    return downloadManager.downloads.filter { $0.status == .downloading || $0.status == .verifying || $0.status == .pending || $0.status == .paused }.count
+        case .active:    return downloadManager.downloads.filter { $0.status == .downloading || $0.status == .verifying || $0.status == .extracting || $0.status == .pending || $0.status == .paused }.count
         case .completed: return downloadManager.downloads.filter { $0.status == .completed }.count
         case .failed:    return downloadManager.downloads.filter { $0.status == .failed || $0.status == .cancelled }.count
         case .history:   return downloadManager.historyEntries.count
@@ -687,9 +687,10 @@ struct DownloadRowView: View {
                 actionButtons
             }
 
-            if download.status == .downloading || download.status == .verifying {
+            if download.status == .downloading || download.status == .verifying || download.status == .extracting {
                 let pv    = download.status == .verifying ? download.verificationProgress / 100.0 : download.progress / 100.0
-                let pcolor: Color = download.status == .verifying ? .purple : .accentColor
+                let pcolor: Color = download.status == .verifying ? .purple
+                    : download.status == .extracting ? .teal : .accentColor
 
                 LiquidProgressBar(progress: pv, color: pcolor).frame(height: 5)
 
@@ -700,8 +701,11 @@ struct DownloadRowView: View {
                         .foregroundStyle(pcolor)
                     Spacer()
                     if download.status == .verifying {
-                        Label("Calculating SHA256…", systemImage: "checkmark.shield")
+                        Label("Calculating \((download.verifyingAlgorithm ?? "sha256").uppercased())…", systemImage: "checkmark.shield")
                             .font(.caption).foregroundStyle(.purple)
+                    } else if download.status == .extracting {
+                        Label("Extracting…", systemImage: "archivebox")
+                            .font(.caption).foregroundStyle(.teal)
                     } else {
                         downloadStatsRow
                     }
@@ -741,6 +745,7 @@ struct DownloadRowView: View {
         case .downloading: return .accentColor
         case .paused:      return .yellow
         case .verifying:   return .purple
+        case .extracting:  return .teal
         case .completed:   return .green
         case .failed:      return .red
         case .cancelled:   return .orange
