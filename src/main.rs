@@ -124,9 +124,18 @@ struct Args {
     #[arg(long = "timeout", default_value_t = kget::http::DEFAULT_TIMEOUT_SECS)]
     timeout: u64,
 
-    /// Persist the given options (proxy, limit, torrent settings) to config.json
+    /// Persist the given options (proxy, limit, torrent settings) to config.json;
+    /// the proxy password goes to the system keychain
     #[arg(long = "save-config")]
     save_config: bool,
+
+    /// Save passwords used by this download (URL or prompt) in the system keychain
+    #[arg(long = "save-credentials")]
+    save_credentials: bool,
+
+    /// Manage saved passwords: list | status | add <target> | delete <target>
+    #[arg(long = "credentials", num_args = 1..=2, value_names = ["ACTION", "TARGET"])]
+    credentials: Option<Vec<String>>,
 
     /// Print diagnostics (paths, yt-dlp, tools, features) and exit
     #[arg(long = "doctor")]
@@ -256,6 +265,7 @@ impl Args {
         job.retries = self.retries.max(1);
         job.timeout = self.timeout;
         job.extract = self.extract;
+        job.save_credentials = self.save_credentials;
         Ok(job)
     }
 
@@ -301,6 +311,12 @@ fn real_main() -> Result<i32, BoxError> {
         return Ok(0);
     }
 
+    if let Some(cmd) = &args.credentials {
+        let parts: Vec<&str> = cmd.iter().map(String::as_str).collect();
+        println!("{}", kget::credentials::command(&parts)?);
+        return Ok(0);
+    }
+
     if args.interactive {
         interactive::interactive_mode();
         return Ok(0);
@@ -335,11 +351,8 @@ fn real_main() -> Result<i32, BoxError> {
     // Flags only override the configuration for this run.
     args.overrides().apply(&mut config);
     if args.save_config {
-        let mut to_save = config.clone();
-        // Never persist the proxy password.
-        to_save.proxy.password = None;
-        to_save.save()?;
-        println!("Configuration saved to {}", Config::path()?.display());
+        let path = cli::save_config(&config)?;
+        println!("Configuration saved to {}", path.display());
         if !wants_cli {
             return Ok(0);
         }
@@ -365,6 +378,8 @@ fn run_cli(args: &Args, config: Config) -> Result<i32, BoxError> {
     }
     let mut ctx = RunContext::new(config).with_cancel(cancel);
     ctx.cancel_aware = Some(cancel_aware);
+    // Ask for missing passwords on the terminal (never in --jsonl mode).
+    ctx.credential_prompts = true;
 
     let job = args.job()?;
 

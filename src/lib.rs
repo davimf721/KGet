@@ -72,6 +72,7 @@
 //! - `gui` - Cross-platform GUI using egui (includes `torrent-native`)
 //! - `torrent-native` - Native BitTorrent client using librqbit
 //! - `torrent-transmission` - Transmission RPC integration
+//! - `keychain` (default) - Save passwords in the OS credential store ([`credentials`])
 
 // Core modules
 pub mod advanced_download;
@@ -80,6 +81,7 @@ pub mod builder;
 pub mod checksum;
 pub mod cli;
 pub mod config;
+pub mod credentials;
 pub mod download;
 pub mod error;
 pub mod events;

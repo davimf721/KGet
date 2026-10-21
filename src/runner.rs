@@ -28,6 +28,7 @@
 use crate::advanced_download::{AdvancedDownloader, ResumePolicy};
 use crate::checksum::{ChecksumAlgorithm, compute_checksum, parse_sidecar};
 use crate::config::Config;
+use crate::credentials::{CredentialResolver, SavePolicy};
 use crate::events::{FileEntry, FileProgressEntry, JsonEvent, Phase, SpeedMeter};
 use crate::ftp::FtpDownloader;
 use crate::metalink;
@@ -91,6 +92,9 @@ pub struct DownloadJob {
     pub timeout: u64,
     /// Extract the archive after a successful download
     pub extract: bool,
+    /// Save the passwords this download used (from the URL or a prompt) in
+    /// the system keychain (`--save-credentials`)
+    pub save_credentials: bool,
 }
 
 impl Default for DownloadJob {
@@ -118,6 +122,7 @@ impl DownloadJob {
             retries: crate::http::DEFAULT_RETRIES,
             timeout: crate::http::DEFAULT_TIMEOUT_SECS,
             extract: false,
+            save_credentials: false,
         }
     }
 
@@ -152,6 +157,14 @@ pub struct RunContext {
     pub cancel_aware: Option<Arc<AtomicBool>>,
     /// Append every job to the persistent download history (default `true`)
     pub record_history: bool,
+    /// Ask on the terminal for passwords that are neither in the URL nor in
+    /// the system keychain, and offer to save them (default `false`).
+    ///
+    /// Only the CLI and the interactive REPL set this; it has no effect when
+    /// the reporter has an event sink (`--jsonl`, GUI, job manager) or when
+    /// stdin/stderr are not terminals, so background jobs never block on a
+    /// prompt.
+    pub credential_prompts: bool,
 }
 
 impl RunContext {
@@ -162,6 +175,7 @@ impl RunContext {
             cancel: Arc::new(AtomicBool::new(false)),
             cancel_aware: None,
             record_history: true,
+            credential_prompts: false,
         }
     }
 
@@ -289,12 +303,28 @@ pub fn run_job(
         output: job.output.clone().unwrap_or_default(),
     });
 
-    let result = dispatch(job, ctx, reporter, proto).and_then(|outcome| {
+    // A proxy password saved with `--save-config` lives in the keychain.
+    let with_proxy_password;
+    let ctx = {
+        let mut proxy = ctx.config.proxy.clone();
+        if crate::credentials::fill_proxy_password(&mut proxy) {
+            let mut filled = ctx.clone();
+            filled.config.proxy = proxy;
+            with_proxy_password = filled;
+            &with_proxy_password
+        } else {
+            ctx
+        }
+    };
+    let creds = Arc::new(credential_resolver(job, ctx, reporter));
+    let result = dispatch(job, ctx, reporter, proto, &creds).and_then(|outcome| {
         if let Outcome::Saved(Some(path)) = &outcome {
             post_verify(job, ctx, reporter, path)?;
         }
         Ok(outcome)
     });
+    // Offer to save / save accepted passwords once the progress output is done.
+    creds.finish();
 
     let cancelled = ctx.cancelled();
     if ctx.record_history && !matches!(proto, Protocol::Metalink) {
@@ -347,6 +377,24 @@ pub fn run_job(
         }
     }
     result
+}
+
+/// Credentials for `user@host` URLs (FTP, SFTP, WebDAV): the URL, then the
+/// system keychain, then — only with [`RunContext::credential_prompts`] and no
+/// event sink — a terminal prompt.
+fn credential_resolver(
+    job: &DownloadJob,
+    ctx: &RunContext,
+    reporter: &Reporter,
+) -> CredentialResolver {
+    let machine = reporter.jsonl();
+    let mut creds = CredentialResolver::system()
+        .quiet(machine)
+        .interactive(ctx.credential_prompts && !machine);
+    if job.save_credentials {
+        creds = creds.save_policy(SavePolicy::Always);
+    }
+    creds
 }
 
 /// Machine-readable error code and retryability for a failed job (the
@@ -509,6 +557,7 @@ fn dispatch(
     ctx: &RunContext,
     reporter: &Reporter,
     proto: Protocol,
+    creds: &Arc<CredentialResolver>,
 ) -> Result<Outcome, BoxError> {
     let config = &ctx.config;
     let optimizer = Optimizer::from_config(config.optimization.clone());
@@ -586,6 +635,7 @@ fn dispatch(
                 optimizer,
             )
             .with_options(options)
+            .with_credentials(creds.clone())
             .download_to_path(Some(&status))?;
             Ok(Outcome::Saved(Some(path)))
         }
@@ -611,6 +661,7 @@ fn dispatch(
                 optimizer,
             )
             .with_config(config.ftp.clone())
+            .with_credentials(creds.clone())
             .with_resume(job.resume || job.overwrite != OverwritePolicy::Overwrite);
             if let Some(cb) = event_progress(reporter) {
                 dl = dl.with_progress_callback(cb);
@@ -634,6 +685,7 @@ fn dispatch(
                 optimizer,
             )
             .with_key_path(config.sftp.key_path.clone())
+            .with_credentials(creds.clone())
             .with_resume(job.resume || job.overwrite != OverwritePolicy::Overwrite);
             if let Some(cb) = event_progress(reporter) {
                 dl = dl.with_progress_callback(cb);
@@ -1067,6 +1119,19 @@ mod tests {
         let jobs = batch_jobs(&urls, dir, &DownloadJob::default());
         assert_ne!(jobs[0].output, jobs[1].output);
         assert_eq!(jobs[2].output.as_deref(), Some("out"));
+    }
+
+    #[test]
+    fn machine_consumers_never_get_credential_prompts() {
+        let job = DownloadJob::new("sftp://alice@example.com/f.bin");
+        let mut ctx = RunContext::new(Config::default());
+        // Library default: no prompts at all.
+        assert!(!credential_resolver(&job, &ctx, &Reporter::terminal()).can_prompt());
+        // Even with prompts enabled, an event sink (JSONL, GUI, job manager)
+        // keeps the resolver non-interactive.
+        ctx.credential_prompts = true;
+        let events = Reporter::events(Arc::new(|_: &JsonEvent| {}));
+        assert!(!credential_resolver(&job, &ctx, &events).can_prompt());
     }
 
     #[test]

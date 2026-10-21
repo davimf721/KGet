@@ -41,9 +41,29 @@ const BANNER: &str = r#"
 "#;
 
 const COMMANDS: &[&str] = &[
-    "download", "get", "dl", "batch", "info", "retry", "open", "reveal", "history", "config",
-    "set", "cd", "pwd", "doctor", "checksum", "verify", "extract", "clear", "version", "help",
-    "exit", "quit",
+    "download",
+    "get",
+    "dl",
+    "batch",
+    "info",
+    "retry",
+    "open",
+    "reveal",
+    "history",
+    "config",
+    "set",
+    "cd",
+    "pwd",
+    "doctor",
+    "checksum",
+    "verify",
+    "extract",
+    "credentials",
+    "clear",
+    "version",
+    "help",
+    "exit",
+    "quit",
 ];
 
 const DOWNLOAD_FLAGS: &[&str] = &[
@@ -72,6 +92,7 @@ const DOWNLOAD_FLAGS: &[&str] = &[
     "--ytdlp",
     "--torrent",
     "--metalink",
+    "--save-credentials",
 ];
 
 const CONFIG_KEYS: &[&str] = &[
@@ -193,6 +214,7 @@ struct DownloadArgs {
     proxy: Option<String>,
     at: Option<String>,
     jobs: usize,
+    save_credentials: bool,
 }
 
 fn take_value<'a>(parts: &[&'a str], i: &mut usize, flag: &str) -> Result<&'a str, String> {
@@ -225,6 +247,7 @@ fn parse_download_args(parts: &[&str]) -> Result<DownloadArgs, String> {
             "-c" | "--continue" => args.resume = true,
             "--no-clobber" => args.no_clobber = true,
             "--extract" => args.extract = true,
+            "--save-credentials" => args.save_credentials = true,
             "--ftp" => args.forced = Some(Protocol::Ftp),
             "--sftp" => args.forced = Some(Protocol::Sftp),
             "--webdav" => args.forced = Some(Protocol::WebDav),
@@ -277,6 +300,8 @@ fn run_context(s: &Session, a: &DownloadArgs) -> RunContext {
     };
     let mut ctx = RunContext::new(overrides.applied_to(&s.config)).with_cancel(s.cancel.clone());
     ctx.cancel_aware = Some(s.cancel_aware.clone());
+    // Missing passwords are asked for on the terminal.
+    ctx.credential_prompts = true;
     ctx
 }
 
@@ -326,6 +351,7 @@ fn build_job(s: &Session, a: &DownloadArgs, url: &str) -> Result<DownloadJob, Bo
     job.retries = a.retries.unwrap_or(s.retries).max(1);
     job.timeout = a.timeout.unwrap_or(s.timeout);
     job.extract = a.extract;
+    job.save_credentials = a.save_credentials;
     Ok(job)
 }
 
@@ -1041,12 +1067,19 @@ download [flags] <url> [url…]      (aliases: get, dl — or just paste a URL)
       --timeout <secs>      Connect / read timeout
       --quality <q>         yt-dlp: best, 1080p, 720p, 480p, 360p, audio
       --at HH:MM            Start at a local time
+      --save-credentials    Save the password used (URL or prompt) in the keychain
   -j, --jobs <n>            Parallel downloads when several URLs are given
       --ftp --sftp --webdav --ytdlp --torrent --metalink   Force a protocol
 
   Ctrl+C stops the download and keeps partial data ('retry last' resumes).
+
+  sftp://user@host/…, ftp://user@host/… and webdav(s)://user@host/… use the
+  password saved in the system keychain, or ask for it ('help credentials').
 "#
         ),
+        Some("credentials") | Some("keychain") => {
+            println!("\n{}\n", kget::credentials::COMMAND_USAGE)
+        }
         Some("history") | Some("retry") | Some("open") => println!(
             r#"
 history                       Last 20 downloads (numbered #1 = newest)
@@ -1088,6 +1121,7 @@ Downloads
 History & settings
   history [N|failed|search] Recent downloads
   config [set <k> <v>]      Saved settings                       help config
+  credentials [list|delete] Passwords in the system keychain     help credentials
   set [key value]           Session settings (turbo, quality, retries, timeout)
   cd <dir> / pwd            Session download folder
 
@@ -1158,7 +1192,8 @@ impl Completer for ReplHelper {
             ["config"] => word_candidates(&["show", "set", "path", "reset"], word),
             ["config", "set"] => word_candidates(CONFIG_KEYS, word),
             ["set"] => word_candidates(SET_KEYS, word),
-            ["help"] => word_candidates(&["download", "history", "config"], word),
+            ["help"] => word_candidates(&["download", "history", "config", "credentials"], word),
+            ["credentials"] => word_candidates(&["list", "add", "delete", "status"], word),
             ["history"] => word_candidates(&["failed", "completed", "search", "clear"], word),
             ["history", "clear"] => word_candidates(&["completed", "failed"], word),
             ["checksum", _] => {
@@ -1231,6 +1266,7 @@ fn execute(s: &mut Session, parts: &[&str]) -> Result<bool, BoxError> {
         "checksum" | "hash" => cmd_checksum(s, rest)?,
         "verify" => cmd_verify(s, rest)?,
         "extract" => cmd_extract(s, rest)?,
+        "credentials" | "keychain" => println!("{}", kget::credentials::command(rest)?),
         other => {
             let suggestion = COMMANDS
                 .iter()

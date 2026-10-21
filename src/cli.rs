@@ -1,7 +1,7 @@
 //! Terminal helpers shared by the `kget` command line and interactive mode.
 //!
 //! Per-run configuration overrides (`--proxy`, `--limit`, torrent flags),
-//! `--doctor`, and the history commands live here so the binary only parses
+//! `--save-config`, `--doctor`, and the history commands live here so the binary only parses
 //! arguments and launches modes.
 
 use crate::config::{Config, ProxyType};
@@ -111,11 +111,13 @@ pub fn print_doctor(config: &Config) {
         }
     }
     println!(
-        "Features: gui={} torrent-native={} torrent-transmission={}",
+        "Features: gui={} torrent-native={} torrent-transmission={} keychain={}",
         cfg!(feature = "gui"),
         cfg!(feature = "torrent-native"),
-        cfg!(feature = "torrent-transmission")
+        cfg!(feature = "torrent-transmission"),
+        cfg!(feature = "keychain")
     );
+    println!("Keychain: {}", crate::credentials::status());
     println!(
         "Proxy:    {}",
         if config.proxy.enabled {
@@ -133,6 +135,23 @@ pub fn print_doctor(config: &Config) {
             .unwrap_or_else(|| "unlimited".into())
     );
     println!("Connections: {}", config.optimization.max_connections);
+}
+
+/// Save `config` to `config.json` (`kget --save-config`) and return its path.
+///
+/// The proxy password is never written to the file: it goes to the system
+/// keychain (a warning is printed when that is not possible).
+pub fn save_config(config: &Config) -> Result<std::path::PathBuf, BoxError> {
+    if config.proxy.password.is_some() {
+        match crate::credentials::store_proxy_password(&config.proxy) {
+            Ok(t) => println!("Proxy password saved in the system keychain ({t})."),
+            Err(e) => eprintln!("Warning: proxy password not saved: {e}"),
+        }
+    }
+    let mut to_save = config.clone();
+    to_save.proxy.password = None;
+    to_save.save()?;
+    Ok(Config::path()?)
 }
 
 /// Print the `limit` most recent history entries (`kget --history`).
