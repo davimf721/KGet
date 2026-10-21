@@ -404,7 +404,45 @@ class DownloadManager: ObservableObject {
         }
     }
     
+    /// Load the history through `kget --history --json` (stored in SQLite
+    /// since KGet 1.8), so the app never depends on the storage format.
     func loadHistory() {
+        guard let binaryPath = BinaryLocator.findKgetBinary() else {
+            loadLegacyHistoryFile()
+            return
+        }
+        let env = buildEnvironment()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: binaryPath)
+            process.arguments = ["--history", "--json", "--history-limit", "1000"]
+            process.environment = env
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = FileHandle.nullDevice
+            var entries: [HistoryEntry]?
+            do {
+                try process.run()
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                if process.terminationStatus == 0 {
+                    entries = try? JSONDecoder().decode([HistoryEntry].self, from: data)
+                }
+            } catch {
+                entries = nil
+            }
+            DispatchQueue.main.async {
+                if let entries = entries {
+                    self.historyEntries = entries.sorted { $0.createdAt > $1.createdAt }
+                } else {
+                    // kget older than 1.8 (no --json): read its history.json
+                    self.loadLegacyHistoryFile()
+                }
+            }
+        }
+    }
+
+    private func loadLegacyHistoryFile() {
         let historyURL: URL
         if let dir = ProcessInfo.processInfo.environment["KGET_CONFIG_DIR"], !dir.isEmpty {
             historyURL = URL(fileURLWithPath: dir).appendingPathComponent("history.json")

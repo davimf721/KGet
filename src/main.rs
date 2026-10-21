@@ -27,7 +27,7 @@ use kget::ftp::FtpDownloader;
 use kget::metalink;
 use kget::optimization::Optimizer;
 use kget::protocol::{self, Protocol};
-use kget::queue::{DownloadHistory, EntryStatus, HistoryEntry};
+use kget::queue::{DownloadHistory, EntryStatus, HistoryEntry, HistoryQuery};
 use kget::sftp::SftpDownloader;
 use kget::torrent::{TorrentCallbacks, TorrentOptions, TorrentOutcome};
 use kget::utils;
@@ -189,9 +189,53 @@ struct Args {
     #[arg(long = "history")]
     history: bool,
 
-    /// Clear download history (all, or --history-clear completed)
+    /// Clear download history (all, or --history-clear completed|failed)
     #[arg(long = "history-clear")]
     history_clear: Option<String>,
+
+    /// History filter: status (completed, failed, cancelled, handed_off; repeatable)
+    #[arg(long = "status", requires = "history")]
+    history_status: Vec<String>,
+
+    /// History filter: domain (also matches subdomains)
+    #[arg(long = "domain", requires = "history")]
+    history_domain: Option<String>,
+
+    /// History filter: file type (video, audio, image, archive, document, disk, package) or extensions (iso,zip)
+    #[arg(long = "type", requires = "history")]
+    history_type: Option<String>,
+
+    /// History filter: protocol (http, ftp, sftp, webdav, torrent, video)
+    #[arg(long = "protocol", requires = "history")]
+    history_protocol: Option<String>,
+
+    /// History filter: started on/after (YYYY-MM-DD, 'YYYY-MM-DD HH:MM', today, 7d, 12h; UTC)
+    #[arg(long = "since", requires = "history")]
+    history_since: Option<String>,
+
+    /// History filter: started on/before (YYYY-MM-DD includes that day; UTC)
+    #[arg(long = "until", requires = "history")]
+    history_until: Option<String>,
+
+    /// History filter: text in the URL or filename
+    #[arg(long = "search", requires = "history")]
+    history_search: Option<String>,
+
+    /// History order: newest, oldest, largest, smallest, name, fastest
+    #[arg(long = "sort", requires = "history", default_value = "newest")]
+    history_sort: String,
+
+    /// Maximum number of history entries shown (0 = all)
+    #[arg(long = "history-limit", requires = "history", default_value_t = 50)]
+    history_limit: usize,
+
+    /// Skip this many history entries (paging)
+    #[arg(long = "history-offset", requires = "history", default_value_t = 0)]
+    history_offset: usize,
+
+    /// Print the history as a JSON array (with --jsonl: one object per line)
+    #[arg(long = "json", requires = "history")]
+    history_json: bool,
 
     /// Download via WebDAV (webdav:// or webdavs:// URLs); auto-detected from scheme
     #[arg(long = "webdav")]
@@ -311,6 +355,7 @@ pub(crate) fn run_and_record(job: &Job, ctx: &Ctx) -> Result<Outcome, BoxError> 
         output: job.output.clone().unwrap_or_default(),
     });
 
+    let started = std::time::Instant::now();
     let result = run_job(job, ctx, proto).and_then(|outcome| {
         if let Outcome::Saved(Some(path)) = &outcome {
             post_verify(job, ctx, path)?;
@@ -352,6 +397,19 @@ pub(crate) fn run_and_record(job: &Job, ctx: &Ctx) -> Result<Outcome, BoxError> 
         Ok(Outcome::HandedOff) => (EntryStatus::HandedOff, None),
         Err(_) if cancelled => (EntryStatus::Cancelled, None),
         Err(e) => (EntryStatus::Failed, Some(e.to_string())),
+    };
+    entry.set_elapsed(started.elapsed());
+    entry.protocol = Some(proto.as_str().to_string());
+    entry.checksum_ok = match &result {
+        Err(e) if matches!(e.downcast_ref(), Some(KgetError::ChecksumMismatch { .. })) => {
+            Some(false)
+        }
+        Ok(Outcome::Saved(_))
+            if job.sha256.is_some() || job.checksum.is_some() || job.checksum_url.is_some() =>
+        {
+            Some(true)
+        }
+        _ => None,
     };
     if !matches!(proto, Protocol::Metalink) {
         let _ = DownloadHistory::append(entry, status, error_msg);
@@ -829,6 +887,82 @@ fn main() {
     std::process::exit(code);
 }
 
+/// Build a history query from the `--history` filter flags.
+fn history_query(args: &Args) -> Result<HistoryQuery, BoxError> {
+    let mut q = HistoryQuery::new()
+        .sort(args.history_sort.parse()?)
+        .offset(args.history_offset);
+    if args.history_limit > 0 {
+        q = q.limit(args.history_limit);
+    }
+    for s in args.history_status.iter().flat_map(|s| s.split(',')) {
+        q = q.status(s.parse()?);
+    }
+    if let Some(d) = &args.history_domain {
+        q = q.domain(d);
+    }
+    if let Some(t) = &args.history_type {
+        q = q.file_type(t);
+    }
+    if let Some(p) = &args.history_protocol {
+        q = q.protocol(p);
+    }
+    if let Some(s) = &args.history_since {
+        q = q.since(kget::queue::parse_date_bound(s, false)?);
+    }
+    if let Some(s) = &args.history_until {
+        q = q.until(kget::queue::parse_date_bound(s, true)?);
+    }
+    if let Some(s) = &args.history_search {
+        q = q.search(s);
+    }
+    Ok(q)
+}
+
+/// `--history [filters] [--json]`
+fn print_history(args: &Args) -> Result<i32, BoxError> {
+    let query = history_query(args)?;
+    let entries = DownloadHistory::query(&query)?;
+    if args.history_json && args.jsonl {
+        for e in &entries {
+            println!("{}", serde_json::to_string(e)?);
+        }
+    } else if args.history_json {
+        println!("{}", serde_json::to_string_pretty(&entries)?);
+    } else if entries.is_empty() {
+        println!("No download history.");
+    } else {
+        println!(
+            "{:<16} {:<22} {:<12} {:>10}  File",
+            "ID", "Date (UTC)", "Status", "Size"
+        );
+        println!("{}", "-".repeat(98));
+        for e in &entries {
+            let size = e
+                .bytes_total
+                .map(|b| humansize::format_size(b, humansize::BINARY))
+                .unwrap_or_default();
+            println!(
+                "{:<16} {:<22} {:<12} {:>10}  {}",
+                e.id,
+                e.created_at_display(),
+                e.status,
+                size,
+                e.filename
+            );
+        }
+        let total = DownloadHistory::count(&query)?;
+        if total > entries.len() {
+            println!(
+                "\nShowing {} of {} entries (use --history-limit/--history-offset).",
+                entries.len(),
+                total
+            );
+        }
+    }
+    Ok(0)
+}
+
 fn real_main() -> Result<i32, BoxError> {
     let args = Args::parse();
     let mut config = Config::load()?;
@@ -845,36 +979,20 @@ fn real_main() -> Result<i32, BoxError> {
 
     // History commands (don't require a URL)
     if args.history {
-        let history = DownloadHistory::load();
-        let entries = history.recent(50);
-        if entries.is_empty() {
-            println!("No download history.");
-        } else {
-            println!("{:<16} {:<22} {:<12} File", "ID", "Date (UTC)", "Status");
-            println!("{}", "-".repeat(86));
-            for e in entries {
-                println!(
-                    "{:<16} {:<22} {:<12} {}",
-                    e.id,
-                    e.created_at_display(),
-                    e.status,
-                    e.filename
-                );
-            }
-        }
-        return Ok(0);
+        return print_history(&args);
     }
 
     if let Some(ref scope) = args.history_clear {
-        let mut removed = 0usize;
-        DownloadHistory::update(|entries| {
-            let before = entries.len();
-            match scope.as_str() {
-                "completed" | "done" => entries.retain(|e| e.status == EntryStatus::Failed),
-                _ => entries.clear(),
-            }
-            removed = before - entries.len();
-        })?;
+        let query = match scope.as_str() {
+            // Everything that is not a failure (failures can be retried)
+            "completed" | "done" => HistoryQuery::new()
+                .status(EntryStatus::Completed)
+                .status(EntryStatus::Cancelled)
+                .status(EntryStatus::HandedOff),
+            "failed" => HistoryQuery::new().status(EntryStatus::Failed),
+            _ => HistoryQuery::new(),
+        };
+        let removed = DownloadHistory::delete(&query)?;
         println!("Removed {} history entries.", removed);
         return Ok(0);
     }
