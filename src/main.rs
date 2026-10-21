@@ -22,6 +22,7 @@ use kget::advanced_download::{AdvancedDownloader, ResumePolicy};
 use kget::app::{DownloadCommand, WorkerToGuiMessage, spawn_download_worker};
 use kget::checksum::{ChecksumAlgorithm, compute_checksum, parse_sidecar};
 use kget::config::{Config, ProxyType};
+use kget::credentials::{CredentialResolver, SavePolicy};
 use kget::events::{FileEntry, FileProgressEntry, JsonEvent, SpeedMeter};
 use kget::ftp::FtpDownloader;
 use kget::metalink;
@@ -133,9 +134,18 @@ struct Args {
     #[arg(long = "timeout", default_value_t = kget::http::DEFAULT_TIMEOUT_SECS)]
     timeout: u64,
 
-    /// Persist the given options (proxy, limit, torrent settings) to config.json
+    /// Persist the given options (proxy, limit, torrent settings) to config.json;
+    /// the proxy password goes to the system keychain
     #[arg(long = "save-config")]
     save_config: bool,
+
+    /// Save passwords used by this download (URL or prompt) in the system keychain
+    #[arg(long = "save-credentials")]
+    save_credentials: bool,
+
+    /// Manage saved passwords: list | status | add <target> | delete <target>
+    #[arg(long = "credentials", num_args = 1..=2, value_names = ["ACTION", "TARGET"])]
+    credentials: Option<Vec<String>>,
 
     /// Print diagnostics (paths, yt-dlp, tools, features) and exit
     #[arg(long = "doctor")]
@@ -238,6 +248,8 @@ pub(crate) struct Job {
     pub extract: bool,
     /// Extra `"url"` field on JSONL events (batch mode)
     pub tag_events: bool,
+    /// Save accepted passwords in the keychain without asking (`--save-credentials`)
+    pub save_credentials: bool,
 }
 
 impl Job {
@@ -260,6 +272,7 @@ impl Job {
             timeout: kget::http::DEFAULT_TIMEOUT_SECS,
             extract: false,
             tag_events: false,
+            save_credentials: false,
         }
     }
 
@@ -311,12 +324,21 @@ pub(crate) fn run_and_record(job: &Job, ctx: &Ctx) -> Result<Outcome, BoxError> 
         output: job.output.clone().unwrap_or_default(),
     });
 
-    let result = run_job(job, ctx, proto).and_then(|outcome| {
+    // Saved passwords for user@host URLs; prompts only on a terminal.
+    let mut creds = CredentialResolver::system()
+        .quiet(job.jsonl)
+        .interactive(!job.jsonl);
+    if job.save_credentials {
+        creds = creds.save_policy(SavePolicy::Always);
+    }
+    let creds = Arc::new(creds);
+    let result = run_job(job, ctx, proto, &creds).and_then(|outcome| {
         if let Outcome::Saved(Some(path)) = &outcome {
             post_verify(job, ctx, path)?;
         }
         Ok(outcome)
     });
+    creds.finish();
 
     // History (best-effort; never fail the download over a history error)
     let output_dir = job
@@ -495,7 +517,12 @@ fn jsonl_status(job: &Job) -> impl Fn(String) + Send + Sync + 'static {
     }
 }
 
-fn run_job(job: &Job, ctx: &Ctx, proto: Protocol) -> Result<Outcome, BoxError> {
+fn run_job(
+    job: &Job,
+    ctx: &Ctx,
+    proto: Protocol,
+    creds: &Arc<CredentialResolver>,
+) -> Result<Outcome, BoxError> {
     let config = &ctx.config;
     let optimizer = Optimizer::from_config(config.optimization.clone());
     let quiet = job.quiet || job.jsonl;
@@ -571,6 +598,7 @@ fn run_job(job: &Job, ctx: &Ctx, proto: Protocol) -> Result<Outcome, BoxError> {
                 optimizer,
             )
             .with_options(options)
+            .with_credentials(creds.clone())
             .download_to_path(Some(&status))?;
             Ok(Outcome::Saved(Some(path)))
         }
@@ -595,6 +623,7 @@ fn run_job(job: &Job, ctx: &Ctx, proto: Protocol) -> Result<Outcome, BoxError> {
                 optimizer,
             )
             .with_config(config.ftp.clone())
+            .with_credentials(creds.clone())
             .with_resume(job.resume || job.overwrite != OverwritePolicy::Overwrite);
             if let Some(cb) = jsonl_progress(job) {
                 dl = dl.with_progress_callback(cb);
@@ -618,6 +647,7 @@ fn run_job(job: &Job, ctx: &Ctx, proto: Protocol) -> Result<Outcome, BoxError> {
                 optimizer,
             )
             .with_key_path(config.sftp.key_path.clone())
+            .with_credentials(creds.clone())
             .with_resume(job.resume || job.overwrite != OverwritePolicy::Overwrite);
             if let Some(cb) = jsonl_progress(job) {
                 dl = dl.with_progress_callback(cb);
@@ -838,6 +868,12 @@ fn real_main() -> Result<i32, BoxError> {
         return Ok(0);
     }
 
+    if let Some(cmd) = &args.credentials {
+        let parts: Vec<&str> = cmd.iter().map(String::as_str).collect();
+        println!("{}", kget::credentials::command(&parts)?);
+        return Ok(0);
+    }
+
     if args.interactive {
         interactive::interactive_mode();
         return Ok(0);
@@ -894,8 +930,13 @@ fn real_main() -> Result<i32, BoxError> {
         apply_cli_overrides(&mut config, &args);
         if args.save_config {
             let mut to_save = config.clone();
-            // Never persist the proxy password.
-            to_save.proxy.password = None;
+            // The proxy password goes to the keychain, never to config.json.
+            if to_save.proxy.password.take().is_some() {
+                match kget::credentials::store_proxy_password(&config.proxy) {
+                    Ok(t) => println!("Proxy password saved in the system keychain ({t})."),
+                    Err(e) => eprintln!("Warning: proxy password not saved: {e}"),
+                }
+            }
             to_save.save()?;
             println!("Configuration saved to {}", Config::path()?.display());
             if !wants_cli {
@@ -982,6 +1023,7 @@ fn real_main() -> Result<i32, BoxError> {
             }
         });
     }
+    kget::credentials::fill_proxy_password(&mut config.proxy);
     let ctx = Ctx { config, cancel };
 
     let checksum = match args.checksum.as_deref() {
@@ -1009,6 +1051,7 @@ fn real_main() -> Result<i32, BoxError> {
     template.retries = args.retries.max(1);
     template.timeout = args.timeout;
     template.extract = args.extract;
+    template.save_credentials = args.save_credentials;
 
     // Scheduled start (applies to both batch and single-URL)
     if let Some(ref at_time) = args.at {
@@ -1269,11 +1312,13 @@ pub(crate) fn print_doctor(config: &Config) {
         }
     }
     println!(
-        "Features: gui={} torrent-native={} torrent-transmission={}",
+        "Features: gui={} torrent-native={} torrent-transmission={} keychain={}",
         cfg!(feature = "gui"),
         cfg!(feature = "torrent-native"),
-        cfg!(feature = "torrent-transmission")
+        cfg!(feature = "torrent-transmission"),
+        cfg!(feature = "keychain")
     );
+    println!("Keychain: {}", kget::credentials::status());
     println!(
         "Proxy:    {}",
         if config.proxy.enabled {

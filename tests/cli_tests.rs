@@ -12,10 +12,11 @@ fn test_config_dir() -> std::path::PathBuf {
     dir
 }
 
-/// Get the kget command for testing
+/// Get the kget command for testing (never touches the real keychain)
 fn kget() -> Command {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("kget"));
     cmd.env("KGET_CONFIG_DIR", test_config_dir());
+    cmd.env("KGET_KEYCHAIN", "off");
     cmd
 }
 
@@ -23,6 +24,7 @@ fn kget() -> Command {
 fn kget_in(dir: &std::path::Path) -> Command {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("kget"));
     cmd.env("KGET_CONFIG_DIR", dir);
+    cmd.env("KGET_KEYCHAIN", "off");
     cmd
 }
 
@@ -409,6 +411,90 @@ fn save_config_never_stores_proxy_password() {
     assert_eq!(v["proxy"]["username"], "me");
     assert_eq!(v["proxy"]["proxy_type"], "Socks5");
     assert_eq!(v["optimization"]["speed_limit"], 2048);
+}
+
+#[test]
+fn save_config_puts_proxy_password_in_keychain() {
+    let dir = tempfile::tempdir().unwrap();
+    // In-memory keychain: nothing reaches the real credential store.
+    kget_in(dir.path())
+        .env("KGET_KEYCHAIN", "mock")
+        .args([
+            "--save-config",
+            "--proxy",
+            "http://proxy.local:3128",
+            "--proxy-user",
+            "me",
+            "--proxy-pass",
+            "secret",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Proxy password saved in the system keychain (http://me@proxy.local:3128)",
+        ))
+        .stdout(predicate::str::contains("secret").not());
+    let text = std::fs::read_to_string(dir.path().join("config.json")).unwrap();
+    assert!(!text.contains("secret"), "password leaked into config.json");
+}
+
+#[test]
+fn save_config_without_keychain_warns_and_drops_password() {
+    let dir = tempfile::tempdir().unwrap();
+    kget_in(dir.path())
+        .args([
+            "--save-config",
+            "--proxy",
+            "http://proxy.local:3128",
+            "--proxy-user",
+            "me",
+            "--proxy-pass",
+            "secret",
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("proxy password not saved"));
+    let text = std::fs::read_to_string(dir.path().join("config.json")).unwrap();
+    assert!(!text.contains("secret"));
+}
+
+#[test]
+fn credentials_commands() {
+    kget()
+        .env("KGET_KEYCHAIN", "mock")
+        .args(["--credentials", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No saved credentials"));
+    kget()
+        .env("KGET_KEYCHAIN", "mock")
+        .args(["--credentials", "add", "sftp://alice@example.com"])
+        .write_stdin("pw-from-stdin\n")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("sftp://alice@example.com"))
+        .stdout(predicate::str::contains("pw-from-stdin").not());
+    kget()
+        .env("KGET_KEYCHAIN", "mock")
+        .args(["--credentials", "delete", "sftp://alice@example.com"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No saved password"));
+    kget()
+        .args(["--credentials", "status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("disabled by KGET_KEYCHAIN"));
+    kget()
+        .args(["--credentials", "list"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unavailable"));
+    kget()
+        .env("KGET_KEYCHAIN", "mock")
+        .args(["--credentials", "delete", "not-a-target"])
+        .assert()
+        .failure();
 }
 
 #[test]

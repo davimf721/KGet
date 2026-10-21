@@ -10,6 +10,7 @@
 use crate::DownloadOptions;
 use crate::advanced_download::{AdvancedDownloader, ResumePolicy};
 use crate::config::Config;
+use crate::credentials::CredentialResolver;
 use crate::download::download_to_path as simple_download;
 use crate::events::{JsonEvent, SpeedMeter};
 use crate::optimization::Optimizer;
@@ -198,7 +199,10 @@ fn run_job(
     });
 
     let optimizer = Optimizer::from_config(config.optimization.clone());
-    let proxy = config.proxy.clone();
+    let mut proxy = config.proxy.clone();
+    crate::credentials::fill_proxy_password(&mut proxy);
+    // Saved passwords for user@host URLs (no prompts in a GUI worker).
+    let creds = Arc::new(CredentialResolver::system().quiet(true));
 
     let status = {
         let tx = tx.clone();
@@ -282,6 +286,7 @@ fn run_job(
             proxy,
             optimizer,
         )
+        .with_credentials(creds.clone())
         .download()
         .map(|_| job.output_path.clone()),
         Protocol::Sftp => crate::sftp::SftpDownloader::new(
@@ -292,6 +297,7 @@ fn run_job(
             optimizer,
         )
         .with_key_path(config.sftp.key_path.clone())
+        .with_credentials(creds.clone())
         .download()
         .map(|_| job.output_path.clone()),
         Protocol::Metalink => {
@@ -346,6 +352,7 @@ fn run_job(
                 optimizer,
             )
             .with_options(options)
+            .with_credentials(creds.clone())
             .download_to_path(Some(&*status))
             .map(|p| p.to_string_lossy().into_owned())
         }
