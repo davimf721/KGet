@@ -1,14 +1,15 @@
 //! Interactive REPL (`kget -i`).
 //!
 //! Every download goes through the same dispatcher as the CLI
-//! (`crate::run_and_record`), so all protocols, resume, checksums, history and
-//! extraction behave exactly like `kget <url>`.
+//! ([`kget::runner::run_job`]), so all protocols, resume, checksums, history
+//! and extraction behave exactly like `kget <url>`.
 
-use crate::{CANCEL_AWARE, Ctx, Job, Outcome};
 use kget::checksum::{ChecksumAlgorithm, compute_checksum};
+use kget::cli::{self, ConfigOverrides};
 use kget::config::{Config, ProxyType};
 use kget::protocol::{self, Protocol};
 use kget::queue::{DownloadHistory, EntryStatus, HistoryEntry};
+use kget::runner::{self, DownloadJob, Outcome, Reporter, RunContext};
 use kget::utils;
 use kget::ytdlp::VideoQuality;
 use kget::{OverwritePolicy, http};
@@ -98,14 +99,14 @@ static BUSY: AtomicBool = AtomicBool::new(false);
 /// Ctrl+C presses during the current download.
 static PRESSES: AtomicU8 = AtomicU8::new(0);
 
-fn install_ctrlc(cancel: Arc<AtomicBool>) {
+fn install_ctrlc(cancel: Arc<AtomicBool>, cancel_aware: Arc<AtomicBool>) {
     let _ = ctrlc::set_handler(move || {
         // At the prompt rustyline reads ^C itself; this only fires mid-download.
         if !BUSY.load(Ordering::SeqCst) {
             return;
         }
         let n = PRESSES.fetch_add(1, Ordering::SeqCst);
-        if n == 0 && CANCEL_AWARE.load(Ordering::SeqCst) {
+        if n == 0 && cancel_aware.load(Ordering::SeqCst) {
             cancel.store(true, Ordering::SeqCst);
             eprintln!("\nStopping… partial data is kept (press Ctrl+C again to quit KGet).");
         } else if n == 0 {
@@ -123,6 +124,8 @@ fn install_ctrlc(cancel: Arc<AtomicBool>) {
 struct Session {
     config: Config,
     cancel: Arc<AtomicBool>,
+    /// Whether the running download stops cleanly on Ctrl+C
+    cancel_aware: Arc<AtomicBool>,
     /// Default output directory for this session (`cd`)
     dir: Option<String>,
     turbo: bool,
@@ -137,6 +140,7 @@ impl Session {
         Self {
             config,
             cancel: Arc::new(AtomicBool::new(false)),
+            cancel_aware: Arc::new(AtomicBool::new(true)),
             dir: None,
             turbo: false,
             quality: "best".into(),
@@ -263,18 +267,17 @@ fn parse_download_args(parts: &[&str]) -> Result<DownloadArgs, String> {
 // Running downloads
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Configuration for one run: saved config + per-download overrides.
-fn effective_config(s: &Session, a: &DownloadArgs) -> Config {
-    let mut config = s.config.clone();
-    if let Some(l) = a.limit {
-        config.optimization.speed_limit = (l > 0).then_some(l);
-    }
-    if let Some(p) = &a.proxy {
-        config.proxy.enabled = true;
-        config.proxy.url = Some(p.clone());
-        config.proxy.proxy_type = ProxyType::from_url(p);
-    }
-    config
+/// Context for one run: saved config + per-download overrides, wired to the
+/// session's Ctrl+C handling.
+fn run_context(s: &Session, a: &DownloadArgs) -> RunContext {
+    let overrides = ConfigOverrides {
+        speed_limit: a.limit,
+        proxy: a.proxy.clone(),
+        ..Default::default()
+    };
+    let mut ctx = RunContext::new(overrides.applied_to(&s.config)).with_cancel(s.cancel.clone());
+    ctx.cancel_aware = Some(s.cancel_aware.clone());
+    ctx
 }
 
 /// Relative `-o` paths are resolved against the session's `cd` directory.
@@ -298,22 +301,21 @@ fn local_path(s: &Session, path: &str) -> PathBuf {
     PathBuf::from(session_path(s, &utils::expand_tilde(path)))
 }
 
-fn build_job(s: &Session, a: &DownloadArgs, url: &str) -> Result<Job, BoxError> {
-    let mut job = Job::new(url);
+fn build_job(s: &Session, a: &DownloadArgs, url: &str) -> Result<DownloadJob, BoxError> {
+    let mut job = DownloadJob::new(url);
     job.output = match &a.output {
         Some(o) => Some(session_path(s, o)),
         None => s.dir.clone().map(|d| format!("{d}/")),
     };
-    job.quiet = a.quiet;
     job.advanced = a.advanced.unwrap_or(s.turbo);
-    job.forced = a.forced;
+    job.protocol = a.forced;
     job.sha256 = a.sha256.clone();
     job.checksum = match &a.checksum {
-        Some(spec) => Some(crate::parse_checksum_spec(spec)?),
+        Some(spec) => Some(runner::parse_checksum_spec(spec)?),
         None => None,
     };
     job.checksum_url = a.checksum_url.clone();
-    job.headers = crate::parse_extra_headers(&a.headers);
+    job.headers = runner::parse_extra_headers(&a.headers);
     job.quality = VideoQuality::parse(a.quality.as_deref().unwrap_or(&s.quality));
     job.resume = a.resume;
     job.overwrite = if a.no_clobber {
@@ -343,39 +345,21 @@ fn run_download(s: &mut Session, a: DownloadArgs) -> Result<(), BoxError> {
     }
 
     if let Some(at) = &a.at {
-        CANCEL_AWARE.store(false, Ordering::SeqCst);
-        busy(s, || crate::wait_until(at, a.quiet))?;
+        s.cancel_aware.store(false, Ordering::SeqCst);
+        busy(s, || runner::wait_until(at, a.quiet))?;
     }
-
-    let ctx = Ctx {
-        config: effective_config(s, &a),
-        cancel: s.cancel.clone(),
-    };
 
     if a.urls.len() > 1 {
-        let dir = match &a.output {
-            Some(o) => session_path(s, o),
-            None => s.dir.clone().unwrap_or_else(|| ".".into()),
-        };
-        let template = build_job(s, &a, &a.urls[0])?;
-        let (_, failed) = busy(s, || {
-            crate::run_urls(
-                a.urls.clone(),
-                Path::new(&dir),
-                a.jobs,
-                &template,
-                &ctx,
-                false,
-            )
-        })?;
-        if failed > 0 {
-            return Err(format!("{failed} download(s) failed").into());
-        }
-        return Ok(());
+        return run_many(s, &a);
     }
 
+    let ctx = run_context(s, &a);
     let job = build_job(s, &a, &a.urls[0])?;
-    let result = busy(s, || crate::run_and_record(&job, &ctx));
+    let reporter = Reporter {
+        quiet: a.quiet,
+        ..Reporter::default()
+    };
+    let result = busy(s, || runner::run_job(&job, &ctx, &reporter));
     match result {
         Ok(Outcome::Saved(Some(path))) => {
             println!("✓ Saved to {}", path.display());
@@ -401,39 +385,17 @@ fn run_download(s: &mut Session, a: DownloadArgs) -> Result<(), BoxError> {
     }
 }
 
-fn run_batch(s: &mut Session, parts: &[&str]) -> Result<(), BoxError> {
-    let mut a = parse_download_args(parts)?;
-    let mut urls = Vec::new();
-    for item in std::mem::take(&mut a.urls) {
-        if item.contains("://") || item.starts_with("magnet:?") {
-            urls.push(item);
-        } else {
-            let path = local_path(s, &item);
-            let text = std::fs::read_to_string(&path)
-                .map_err(|e| format!("Cannot read batch file '{}': {e}", path.display()))?;
-            urls.extend(
-                text.lines()
-                    .map(str::trim)
-                    .filter(|l| !l.is_empty() && !l.starts_with('#'))
-                    .map(str::to_string),
-            );
-        }
-    }
-    if urls.is_empty() {
-        return Err("No URLs. Usage: batch <file|url…> [-j N] [-o dir] [flags]".into());
-    }
-    a.urls = urls;
-    let ctx = Ctx {
-        config: effective_config(s, &a),
-        cancel: s.cancel.clone(),
-    };
+/// Several URLs: download them into the output (or `cd`) directory,
+/// `-j` at a time.
+fn run_many(s: &Session, a: &DownloadArgs) -> Result<(), BoxError> {
+    let ctx = run_context(s, a);
     let dir = match &a.output {
         Some(o) => session_path(s, o),
         None => s.dir.clone().unwrap_or_else(|| ".".into()),
     };
-    let template = build_job(s, &a, &a.urls[0])?;
+    let template = build_job(s, a, &a.urls[0])?;
     let (_, failed) = busy(s, || {
-        crate::run_urls(
+        runner::run_urls(
             a.urls.clone(),
             Path::new(&dir),
             a.jobs,
@@ -446,6 +408,26 @@ fn run_batch(s: &mut Session, parts: &[&str]) -> Result<(), BoxError> {
         return Err(format!("{failed} download(s) failed").into());
     }
     Ok(())
+}
+
+fn run_batch(s: &mut Session, parts: &[&str]) -> Result<(), BoxError> {
+    let mut a = parse_download_args(parts)?;
+    let mut urls = Vec::new();
+    for item in std::mem::take(&mut a.urls) {
+        if looks_like_url(&item) {
+            urls.push(item);
+        } else {
+            let path = local_path(s, &item);
+            let text = std::fs::read_to_string(&path)
+                .map_err(|e| format!("Cannot read batch file '{}': {e}", path.display()))?;
+            urls.extend(runner::parse_url_list(&text));
+        }
+    }
+    if urls.is_empty() {
+        return Err("No URLs. Usage: batch <file|url…> [-j N] [-o dir] [flags]".into());
+    }
+    a.urls = urls;
+    run_many(s, &a)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -582,16 +564,7 @@ fn cmd_history(parts: &[&str]) -> Result<(), BoxError> {
     match parts.first().copied() {
         Some("clear") => {
             let scope = parts.get(1).copied().unwrap_or("all");
-            let mut removed = 0usize;
-            DownloadHistory::update(|entries| {
-                let before = entries.len();
-                match scope {
-                    "completed" | "done" => entries.retain(|e| e.status == EntryStatus::Failed),
-                    "failed" => entries.retain(|e| e.status != EntryStatus::Failed),
-                    _ => entries.clear(),
-                }
-                removed = before - entries.len();
-            })?;
+            let removed = cli::clear_history(scope)?;
             println!("Removed {removed} history entries.");
         }
         Some("failed") => {
@@ -780,7 +753,7 @@ fn cmd_verify(s: &Session, parts: &[&str]) -> Result<(), BoxError> {
         _ => return Err("Usage: verify <file> <alg:hex | hex>".into()),
     };
     let path = local_path(s, file);
-    let (algo, want) = crate::parse_checksum_spec(spec)?;
+    let (algo, want) = runner::parse_checksum_spec(spec)?;
     let got = compute_checksum(&path, &algo)?;
     if got == want {
         println!("✓ {} OK  {}", algo.name(), got);
@@ -1254,7 +1227,7 @@ fn execute(s: &mut Session, parts: &[&str]) -> Result<bool, BoxError> {
                 .map(|d| d.display().to_string())
                 .unwrap_or_default())
         ),
-        "doctor" => crate::print_doctor(&s.config),
+        "doctor" => cli::print_doctor(&s.config),
         "checksum" | "hash" => cmd_checksum(s, rest)?,
         "verify" => cmd_verify(s, rest)?,
         "extract" => cmd_extract(s, rest)?,
@@ -1294,7 +1267,7 @@ pub fn interactive_mode() {
     }));
     // After Editor::new(): on a terminal rustyline installs its own SIGINT
     // handler, which would otherwise swallow Ctrl+C during downloads.
-    install_ctrlc(session.cancel.clone());
+    install_ctrlc(session.cancel.clone(), session.cancel_aware.clone());
     let history_file = kget::config::config_dir()
         .ok()
         .map(|d| d.join("repl_history.txt"));
