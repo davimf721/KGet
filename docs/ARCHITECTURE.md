@@ -26,7 +26,7 @@ commands and events instead of reimplementing download behavior.
 | `src/ytdlp/mod.rs` | yt-dlp integration — `is_video_url()`, `VideoQuality` enum, `download_video()`, `ytdlp_binary()` |
 | `src/torrent/` | Torrent support: `native.rs` (librqbit, `torrent-native` feature), `transmission.rs` (Transmission RPC, `torrent-transmission` feature), `external.rs`, `mod.rs` dispatcher |
 | `src/metalink/mod.rs` | Metalink RFC 5854 parser + `download_metalink()` — tries mirrors in priority order, SHA-256 verification |
-| `src/queue.rs` | Persistent download history (`DownloadHistory`, `HistoryEntry`, `EntryStatus`) backed by `history.json` |
+| `src/queue.rs` | Persistent download history (`DownloadHistory`, `HistoryEntry`, `EntryStatus`, `HistoryQuery`, `HistoryStore`) backed by SQLite (`history.db`; `history.json` is migrated) |
 | `src/config.rs` | JSON config persisted to the OS config dir; owns proxy, optimization, torrent, yt-dlp settings |
 | `src/optimization.rs` | `Optimizer` selects connection count/strategy based on file type/size |
 | `src/progress.rs` | indicatif progress bar factory |

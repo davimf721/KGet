@@ -487,14 +487,19 @@ DownloadHistory::update(|entries| entries.retain(|e| e.status == EntryStatus::Fa
 # Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 ```
 
-User names and passwords are stripped from stored URLs, the file keeps the last
-1000 entries, and a corrupt file is moved to `history.json.corrupt`.
-Set `KGET_CONFIG_DIR` to store `config.json` and `history.json` elsewhere.
+The history is a SQLite database (WAL mode, safe with several `kget`
+processes). `DownloadHistory::query(&HistoryQuery)` filters by status, domain,
+file type, protocol, date range and text, with sorting and paging;
+`DownloadHistory::count` / `DownloadHistory::delete` take the same query.
+User names and passwords are stripped from stored URLs, the database keeps the
+last 1000 entries, and a corrupt database is moved to `history.db.corrupt`. A
+`history.json` from KGet ≤ 1.7 is imported once and kept as `history.json.bak`.
+Set `KGET_CONFIG_DIR` to store `config.json` and `history.db` elsewhere.
 
 History is stored at:
-- macOS: `~/Library/Application Support/kget/history.json`
-- Linux: `~/.config/kget/history.json`
-- Windows: `%APPDATA%\kget\history.json`
+- macOS: `~/Library/Application Support/kget/history.db`
+- Linux: `~/.config/kget/history.db`
+- Windows: `%APPDATA%\kget\history.db`
 
 ## Async API
 

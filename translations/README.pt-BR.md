@@ -59,7 +59,7 @@ A maioria das ferramentas de download é simples demais (clones de wget com cone
 - **Eventos JSONL** (`--jsonl`) — eventos versionados (`"v":1`) legíveis por máquina para todos os protocolos
 
 ### Histórico e Persistência
-- **Histórico de downloads** — todo download gravado em `history.json`; `--history` / `--history-clear`
+- **Histórico de downloads** — todo download gravado em SQLite (`history.db`); `--history` / `--history-clear`
 - **REPL interativo** (`--interactive`) — todas as opções de download da CLI, lote, retry, checksums, Tab para completar, histórico persistente, Ctrl+C para pausar
 
 ### GUIs

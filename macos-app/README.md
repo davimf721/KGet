@@ -16,7 +16,7 @@ A native macOS frontend for KGet built with SwiftUI, providing deep system integ
 - **Drag-and-drop URLs** — drag any HTTP/HTTPS/FTP/magnet link into the window
 - **Clipboard monitor** — detects new URLs every 1.5s, shows dismissable banner with one-click download
 - **Speed sparkline** — 44×16pt real-time speed graph per active download (last 30 samples)
-- **History tab** — full download history from `history.json`; hover to re-download
+- **History tab** — full download history from `kget-bin --history --json`; hover to re-download
 - **yt-dlp auto-detection** — video URLs routed through yt-dlp; quality picker in Settings
 - **WebDAV support** — `webdav://` and `webdavs://` auto-detected from URL scheme
 - **Auto-extract archives** — toggle in Settings → Downloads

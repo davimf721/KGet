@@ -5,7 +5,7 @@
 //! arguments and launches modes.
 
 use crate::config::{Config, ProxyType};
-use crate::queue::{DownloadHistory, EntryStatus};
+use crate::queue::{DownloadHistory, EntryStatus, HistoryQuery};
 use crate::utils;
 use crate::ytdlp::ytdlp_binary;
 
@@ -154,43 +154,131 @@ pub fn save_config(config: &Config) -> Result<std::path::PathBuf, BoxError> {
     Ok(Config::path()?)
 }
 
-/// Print the `limit` most recent history entries (`kget --history`).
-pub fn print_history(limit: usize) {
-    let history = DownloadHistory::load();
-    let entries = history.recent(limit);
-    if entries.is_empty() {
-        println!("No download history.");
-    } else {
-        println!("{:<16} {:<22} {:<12} File", "ID", "Date (UTC)", "Status");
-        println!("{}", "-".repeat(86));
-        for e in entries {
-            println!(
-                "{:<16} {:<22} {:<12} {}",
-                e.id,
-                e.created_at_display(),
-                e.status,
-                e.filename
-            );
+/// `kget --history` filter flags, as given on the command line.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HistoryFilter {
+    /// Statuses (`completed`, `failed`, …); each item may be comma-separated
+    pub status: Vec<String>,
+    /// Domain (also matches subdomains)
+    pub domain: Option<String>,
+    /// File type (`video`, `archive`, …) or extensions (`iso,zip`)
+    pub file_type: Option<String>,
+    /// Protocol (`http`, `ftp`, …)
+    pub protocol: Option<String>,
+    /// Lower date bound (`YYYY-MM-DD`, `today`, `7d`, …; UTC)
+    pub since: Option<String>,
+    /// Upper date bound (a bare `YYYY-MM-DD` includes that day; UTC)
+    pub until: Option<String>,
+    /// Text in the URL or file name
+    pub search: Option<String>,
+    /// Sort order (`newest`, `oldest`, `largest`, `smallest`, `name`, `fastest`);
+    /// empty = newest
+    pub sort: String,
+    /// Maximum number of entries (0 = all)
+    pub limit: usize,
+    /// Entries to skip (paging)
+    pub offset: usize,
+}
+
+impl HistoryFilter {
+    /// The history query described by the flags.
+    pub fn query(&self) -> Result<HistoryQuery, BoxError> {
+        let mut q = HistoryQuery::new().offset(self.offset);
+        if !self.sort.is_empty() {
+            q = q.sort(self.sort.parse()?);
         }
+        if self.limit > 0 {
+            q = q.limit(self.limit);
+        }
+        for s in self.status.iter().flat_map(|s| s.split(',')) {
+            q = q.status(s.parse()?);
+        }
+        if let Some(d) = &self.domain {
+            q = q.domain(d);
+        }
+        if let Some(t) = &self.file_type {
+            q = q.file_type(t);
+        }
+        if let Some(p) = &self.protocol {
+            q = q.protocol(p);
+        }
+        if let Some(s) = &self.since {
+            q = q.since(crate::queue::parse_date_bound(s, false)?);
+        }
+        if let Some(s) = &self.until {
+            q = q.until(crate::queue::parse_date_bound(s, true)?);
+        }
+        if let Some(s) = &self.search {
+            q = q.search(s);
+        }
+        Ok(q)
     }
 }
 
-/// Remove history entries and return how many were removed.
-///
-/// `scope`: `completed` (or `done`) keeps only failures, `failed` removes
-/// failures, anything else clears the whole history.
-pub fn clear_history(scope: &str) -> Result<usize, BoxError> {
-    let mut removed = 0usize;
-    DownloadHistory::update(|entries| {
-        let before = entries.len();
-        match scope {
-            "completed" | "done" => entries.retain(|e| e.status == EntryStatus::Failed),
-            "failed" => entries.retain(|e| e.status != EntryStatus::Failed),
-            _ => entries.clear(),
+/// Print the history entries matching `query` (`kget --history`): a table,
+/// or with `json` a JSON array (one object per line when `jsonl` is also set).
+pub fn print_history(query: &HistoryQuery, json: bool, jsonl: bool) -> Result<(), BoxError> {
+    let entries = DownloadHistory::query(query)?;
+    if json && jsonl {
+        for e in &entries {
+            println!("{}", serde_json::to_string(e)?);
         }
-        removed = before - entries.len();
-    })?;
-    Ok(removed)
+    } else if json {
+        println!("{}", serde_json::to_string_pretty(&entries)?);
+    } else if entries.is_empty() {
+        println!("No download history.");
+    } else {
+        println!(
+            "{:<16} {:<22} {:<12} {:>10}  File",
+            "ID", "Date (UTC)", "Status", "Size"
+        );
+        println!("{}", "-".repeat(98));
+        for e in &entries {
+            let size = e
+                .bytes_total
+                .map(|b| humansize::format_size(b, humansize::BINARY))
+                .unwrap_or_default();
+            println!(
+                "{:<16} {:<22} {:<12} {:>10}  {}",
+                e.id,
+                e.created_at_display(),
+                e.status,
+                size,
+                e.filename
+            );
+        }
+        let total = DownloadHistory::count(query)?;
+        if total > entries.len() {
+            println!(
+                "\nShowing {} of {} entries (use --history-limit/--history-offset).",
+                entries.len(),
+                total
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Remove history entries and return how many were removed
+/// (`kget --history-clear`, interactive `history clear`).
+///
+/// `scope`: `completed` (or `done`) removes everything except failures (so
+/// they can still be retried), `failed` removes only failures, anything else
+/// clears the whole history.
+pub fn clear_history(scope: &str) -> Result<usize, BoxError> {
+    DownloadHistory::delete(&clear_scope_query(scope))
+}
+
+/// The entries `--history-clear <scope>` removes.
+fn clear_scope_query(scope: &str) -> HistoryQuery {
+    match scope {
+        "completed" | "done" => HistoryQuery::new()
+            .status(EntryStatus::Completed)
+            .status(EntryStatus::Cancelled)
+            .status(EntryStatus::HandedOff),
+        "failed" => HistoryQuery::new().status(EntryStatus::Failed),
+        _ => HistoryQuery::new(),
+    }
 }
 
 #[cfg(test)]

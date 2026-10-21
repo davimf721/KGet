@@ -59,7 +59,7 @@ La mayoría de las herramientas de descarga son demasiado simples (clones de wge
 - **Eventos JSONL** (`--jsonl`) — eventos versionados (`"v":1`) legibles por máquina para todos los protocolos
 
 ### Historial y Persistencia
-- **Historial de descargas** — cada descarga registrada en `history.json`; `--history` / `--history-clear`
+- **Historial de descargas** — cada descarga registrada en SQLite (`history.db`); `--history` / `--history-clear`
 - **REPL interactivo** (`--interactive`) — todas las opciones de descarga de la CLI, lotes, retry, checksums, autocompletado con Tab, historial persistente, Ctrl+C para pausar
 
 ### GUIs

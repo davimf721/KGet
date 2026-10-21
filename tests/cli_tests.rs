@@ -597,9 +597,195 @@ fn history_redacts_credentials_from_cli_downloads() {
         ])
         .assert()
         .failure();
-    let history = std::fs::read_to_string(dir.path().join("history.json")).unwrap();
+    let out = kget_in(dir.path())
+        .args(["--history", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let history = String::from_utf8(out.stdout).unwrap();
     assert!(!history.contains("hunter2"));
     assert!(history.contains("127.0.0.1"));
+    let raw = std::fs::read(dir.path().join("history.db")).unwrap();
+    assert!(!raw.windows(7).any(|w| w == b"hunter2"));
+}
+
+/// Run `kget --history <args>` in `dir` and parse the JSON array.
+fn history_json(dir: &std::path::Path, args: &[&str]) -> Vec<serde_json::Value> {
+    let out = kget_in(dir)
+        .arg("--history")
+        .arg("--json")
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).unwrap()
+}
+
+fn names(v: &[serde_json::Value]) -> Vec<&str> {
+    v.iter().map(|e| e["filename"].as_str().unwrap()).collect()
+}
+
+#[test]
+fn history_filters_and_json_output() {
+    let dir = tempfile::tempdir().unwrap();
+    // A history.json from KGet 1.7 in KGET_CONFIG_DIR is migrated on first use
+    std::fs::write(
+        dir.path().join("history.json"),
+        r#"[
+ {"id":"1","url":"https://example.com/a.iso","filename":"a.iso","output_dir":"/d","status":"completed",
+  "bytes_total":10,"sha256":null,"expected_sha256":null,"created_at":1790812800,"finished_at":null,"error":null},
+ {"id":"2","url":"https://cdn.example.com/b.mp4","filename":"b.mp4","output_dir":"/d","status":"failed",
+  "bytes_total":null,"sha256":null,"expected_sha256":null,"created_at":1791504000,"finished_at":null,"error":"x"},
+ {"id":"3","url":"https://other.org/c.zip","filename":"c.zip","output_dir":"/d","status":"failed",
+  "bytes_total":99,"sha256":null,"expected_sha256":null,"created_at":1791590400,"finished_at":null,"error":"y"}
+]"#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        names(&history_json(dir.path(), &[])),
+        ["c.zip", "b.mp4", "a.iso"]
+    );
+    assert!(dir.path().join("history.json.bak").exists());
+    assert_eq!(
+        names(&history_json(dir.path(), &["--status", "failed"])),
+        ["c.zip", "b.mp4"]
+    );
+    assert_eq!(
+        names(&history_json(dir.path(), &["--domain", "example.com"])),
+        ["b.mp4", "a.iso"]
+    );
+    assert_eq!(
+        names(&history_json(
+            dir.path(),
+            &["--status", "failed", "--domain", "example.com"]
+        )),
+        ["b.mp4"]
+    );
+    // 2026-10-01 = 1790812800, 2026-10-09 = 1791504000, 2026-10-10 = 1791590400
+    assert_eq!(
+        names(&history_json(dir.path(), &["--since", "2026-10-02"])),
+        ["c.zip", "b.mp4"]
+    );
+    assert_eq!(
+        names(&history_json(dir.path(), &["--until", "2026-10-09"])),
+        ["b.mp4", "a.iso"]
+    );
+    assert_eq!(
+        names(&history_json(dir.path(), &["--search", "C.ZIP"])),
+        ["c.zip"]
+    );
+    assert_eq!(
+        names(&history_json(dir.path(), &["--type", "video"])),
+        ["b.mp4"]
+    );
+    assert_eq!(
+        names(&history_json(
+            dir.path(),
+            &["--sort", "largest", "--history-limit", "1"]
+        )),
+        ["c.zip"]
+    );
+    assert_eq!(
+        names(&history_json(dir.path(), &["--history-offset", "2"])),
+        ["a.iso"]
+    );
+    let entry = &history_json(dir.path(), &["--search", "a.iso"])[0];
+    assert_eq!(entry["status"], "completed");
+    assert_eq!(entry["output_dir"], "/d");
+    assert_eq!(entry["bytes_total"], 10);
+
+    // --jsonl: one object per line
+    let out = kget_in(dir.path())
+        .args(["--history", "--json", "--jsonl"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(text.lines().count(), 3);
+    for line in text.lines() {
+        serde_json::from_str::<serde_json::Value>(line).unwrap();
+    }
+
+    // Human table
+    kget_in(dir.path())
+        .args(["--history", "--status", "failed"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("c.zip"))
+        .stdout(predicate::str::contains("a.iso").not());
+
+    // Bad values are reported
+    kget_in(dir.path())
+        .args(["--history", "--status", "bogus"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown status"));
+    kget_in(dir.path())
+        .args(["--history", "--since", "someday"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid date"));
+    // Filters need --history
+    kget_in(dir.path())
+        .args(["--status", "failed"])
+        .assert()
+        .failure();
+
+    // --history-clear failed removes only failures
+    kget_in(dir.path())
+        .args(["--history-clear", "failed"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Removed 2"));
+    assert_eq!(names(&history_json(dir.path(), &[])), ["a.iso"]);
+}
+
+#[test]
+fn history_survives_concurrent_processes() {
+    let dir = tempfile::tempdir().unwrap();
+    // Several kget processes recording at the same time (each fails fast)
+    let children: Vec<_> = (0..6)
+        .map(|i| {
+            std::process::Command::new(assert_cmd::cargo::cargo_bin!("kget"))
+                .env("KGET_CONFIG_DIR", dir.path())
+                .current_dir(dir.path())
+                .args([
+                    "-q",
+                    "--retries",
+                    "1",
+                    "--timeout",
+                    "2",
+                    &format!("http://127.0.0.1:9/file{i}.bin"),
+                ])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap()
+        })
+        .collect();
+    for mut c in children {
+        c.wait().unwrap();
+    }
+    let all = history_json(dir.path(), &["--status", "failed"]);
+    assert_eq!(all.len(), 6);
+    let mut files = names(&all);
+    files.sort();
+    assert_eq!(
+        files,
+        [
+            "file0.bin",
+            "file1.bin",
+            "file2.bin",
+            "file3.bin",
+            "file4.bin",
+            "file5.bin"
+        ]
+    );
+    assert!(all.iter().all(|e| e["protocol"] == "http"));
 }
 
 // ============================================================================

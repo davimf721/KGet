@@ -317,6 +317,7 @@ pub fn run_job(
         }
     };
     let creds = Arc::new(credential_resolver(job, ctx, reporter));
+    let started = std::time::Instant::now();
     let result = dispatch(job, ctx, reporter, proto, &creds).and_then(|outcome| {
         if let Outcome::Saved(Some(path)) = &outcome {
             post_verify(job, ctx, reporter, path)?;
@@ -328,7 +329,7 @@ pub fn run_job(
 
     let cancelled = ctx.cancelled();
     if ctx.record_history && !matches!(proto, Protocol::Metalink) {
-        record_history(job, proto, &result, cancelled);
+        record_history(job, proto, &result, cancelled, started.elapsed());
     }
 
     match &result {
@@ -413,6 +414,7 @@ fn record_history(
     proto: Protocol,
     result: &Result<Outcome, BoxError>,
     cancelled: bool,
+    elapsed: std::time::Duration,
 ) {
     let output_dir = job
         .output
@@ -446,6 +448,20 @@ fn record_history(
         Ok(Outcome::HandedOff) => (EntryStatus::HandedOff, None),
         Err(_) if cancelled => (EntryStatus::Cancelled, None),
         Err(e) => (EntryStatus::Failed, Some(e.to_string())),
+    };
+    // Duration (and so the average speed) includes checksum verification.
+    entry.set_elapsed(elapsed);
+    entry.protocol = Some(proto.as_str().to_string());
+    entry.checksum_ok = match result {
+        Err(e) if matches!(e.downcast_ref(), Some(KgetError::ChecksumMismatch { .. })) => {
+            Some(false)
+        }
+        Ok(Outcome::Saved(_))
+            if job.sha256.is_some() || job.checksum.is_some() || job.checksum_url.is_some() =>
+        {
+            Some(true)
+        }
+        _ => None,
     };
     let _ = DownloadHistory::append(entry, status, error_msg);
 }

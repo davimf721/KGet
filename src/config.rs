@@ -307,7 +307,7 @@ pub struct Config {
     pub ytdlp_path: Option<String>,
 }
 
-/// Directory holding `config.json` and `history.json`.
+/// Directory holding `config.json` and `history.db`.
 ///
 /// Honours `KGET_CONFIG_DIR`; otherwise `<OS config dir>/kget`.
 pub fn config_dir() -> Result<PathBuf, io::Error> {

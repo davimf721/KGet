@@ -8,7 +8,7 @@ use kget::checksum::{ChecksumAlgorithm, compute_checksum};
 use kget::cli::{self, ConfigOverrides};
 use kget::config::{Config, ProxyType};
 use kget::protocol::{self, Protocol};
-use kget::queue::{DownloadHistory, EntryStatus, HistoryEntry};
+use kget::queue::{DownloadHistory, EntryStatus, HistoryEntry, HistoryQuery};
 use kget::runner::{self, DownloadJob, Outcome, Reporter, RunContext};
 use kget::utils;
 use kget::ytdlp::VideoQuality;
@@ -545,7 +545,11 @@ fn cmd_info(s: &Session, url: Option<&str>) -> Result<(), BoxError> {
 // History, retry, open
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn print_history(entries: &[&HistoryEntry]) {
+/// Ids shown by the last `history` listing, so `retry 3` / `open 3` refer
+/// to what the user just saw (also for filtered listings).
+static LAST_LISTING: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+fn print_history(entries: &[HistoryEntry], total: usize) {
     if entries.is_empty() {
         println!("No downloads in history.");
         return;
@@ -574,6 +578,9 @@ fn print_history(entries: &[&HistoryEntry]) {
             println!("     └ {}", truncate(err, 70));
         }
     }
+    if total > entries.len() {
+        println!("\nShowing {} of {total} entries.", entries.len());
+    }
     println!("\nUse 'retry <#>' to download again, 'open <#>' to open a file.");
 }
 
@@ -585,75 +592,110 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-fn cmd_history(parts: &[&str]) -> Result<(), BoxError> {
-    let history = DownloadHistory::load();
-    match parts.first().copied() {
-        Some("clear") => {
-            let scope = parts.get(1).copied().unwrap_or("all");
-            let removed = cli::clear_history(scope)?;
-            println!("Removed {removed} history entries.");
-        }
-        Some("failed") => {
-            let all = history.recent(usize::MAX);
-            let v: Vec<_> = all
-                .into_iter()
-                .filter(|e| e.status == EntryStatus::Failed)
-                .take(50)
-                .collect();
-            print_history(&v);
-        }
-        Some("completed") => {
-            let all = history.recent(usize::MAX);
-            let v: Vec<_> = all
-                .into_iter()
-                .filter(|e| e.status == EntryStatus::Completed)
-                .take(50)
-                .collect();
-            print_history(&v);
-        }
-        Some("search") => {
-            let q = parts[1..].join(" ").to_lowercase();
-            if q.is_empty() {
-                return Err("Usage: history search <text>".into());
+/// Parse `history` arguments: `[N|all] [failed|completed|…] [search <text>]`
+/// and the CLI filter flags (`--status --domain --type --protocol --since
+/// --until --search --sort -n/--limit --offset`).
+fn parse_history_query(parts: &[&str]) -> Result<HistoryQuery, BoxError> {
+    let mut q = HistoryQuery::new().limit(20);
+    let mut it = parts.iter().copied();
+    while let Some(p) = it.next() {
+        let mut value = |flag: &str| -> Result<&str, BoxError> {
+            it.next()
+                .ok_or_else(|| format!("{flag} needs a value").into())
+        };
+        match p {
+            "search" => {
+                let text = it.by_ref().collect::<Vec<_>>().join(" ");
+                if text.trim().is_empty() {
+                    return Err("Usage: history search <text>".into());
+                }
+                q = q.search(&text);
             }
-            let all = history.recent(usize::MAX);
-            let v: Vec<_> = all
-                .into_iter()
-                .filter(|e| {
-                    e.filename.to_lowercase().contains(&q) || e.url.to_lowercase().contains(&q)
-                })
-                .take(50)
-                .collect();
-            print_history(&v);
+            "--search" => q = q.search(value(p)?),
+            "all" => q.limit = None,
+            "--status" => {
+                for s in value(p)?.split(',') {
+                    q = q.status(s.parse()?);
+                }
+            }
+            "--domain" => q = q.domain(value(p)?),
+            "--type" => q = q.file_type(value(p)?),
+            "--protocol" => q = q.protocol(value(p)?),
+            "--since" => q = q.since(kget::queue::parse_date_bound(value(p)?, false)?),
+            "--until" => q = q.until(kget::queue::parse_date_bound(value(p)?, true)?),
+            "--sort" => q = q.sort(value(p)?.parse()?),
+            "-n" | "--limit" => {
+                let n: usize = value(p)?.parse().map_err(|_| "--limit needs a number")?;
+                q.limit = (n > 0).then_some(n);
+            }
+            "--offset" => {
+                q = q.offset(value(p)?.parse().map_err(|_| "--offset needs a number")?);
+            }
+            n if n.parse::<usize>().is_ok() => {
+                q.limit = n.parse().ok().filter(|n| *n > 0);
+            }
+            other => match other.parse::<EntryStatus>() {
+                Ok(status) => q = q.status(status),
+                Err(_) => {
+                    return Err(format!(
+                        "Unknown history option '{other}'. Try: history [N|all] [failed|completed|cancelled] \
+                         [search <text>] [--domain d] [--type t] [--since date] [--sort s] | clear [completed|failed]"
+                    )
+                    .into());
+                }
+            },
         }
-        Some(n) if n.parse::<usize>().is_ok() => {
-            print_history(&history.recent(n.parse().unwrap_or(20)));
-        }
-        Some(other) => {
-            return Err(format!(
-                "Unknown history option '{other}'. Try: history [N|failed|completed|search <text>|clear [completed|failed]]"
-            )
-            .into());
-        }
-        None => print_history(&history.recent(20)),
     }
+    Ok(q)
+}
+
+fn cmd_history(parts: &[&str]) -> Result<(), BoxError> {
+    if parts.first().copied() == Some("clear") {
+        let removed = cli::clear_history(parts.get(1).copied().unwrap_or("all"))?;
+        if let Ok(mut l) = LAST_LISTING.lock() {
+            l.clear();
+        }
+        println!("Removed {removed} history entries.");
+        return Ok(());
+    }
+    let query = parse_history_query(parts)?;
+    let entries = DownloadHistory::query(&query)?;
+    let total = DownloadHistory::count(&query)?;
+    if let Ok(mut l) = LAST_LISTING.lock() {
+        *l = entries.iter().map(|e| e.id.clone()).collect();
+    }
+    print_history(&entries, total);
     Ok(())
 }
 
-/// Resolve `last`, `#3` / `3` (position in `history`) or an id prefix.
+/// Resolve `last`, `#3` / `3` (position in the last `history` listing, or
+/// among all entries newest first) or an id prefix.
 fn find_entry(reference: &str) -> Option<HistoryEntry> {
-    let history = DownloadHistory::load();
-    let recent = history.recent(usize::MAX);
     let r = reference.trim_start_matches('#');
+    let store = kget::queue::HistoryStore::open_default().ok()?;
+    let newest = |offset: usize| {
+        store
+            .query(&HistoryQuery::new().offset(offset).limit(1))
+            .ok()?
+            .into_iter()
+            .next()
+    };
     if r == "last" {
-        return recent.first().map(|e| (*e).clone());
+        return newest(0);
     }
     if let Ok(n) = r.parse::<usize>()
         && n >= 1
     {
-        return recent.get(n - 1).map(|e| (*e).clone());
+        let listed = LAST_LISTING.lock().ok().and_then(|l| l.get(n - 1).cloned());
+        return match listed {
+            Some(id) => store.get(&id).ok().flatten(),
+            None => newest(n - 1),
+        };
     }
-    recent.into_iter().find(|e| e.id.starts_with(r)).cloned()
+    if r.is_empty() {
+        return None;
+    }
+    store.get(r).ok().flatten()
 }
 
 fn cmd_retry(s: &mut Session, parts: &[&str]) -> Result<(), BoxError> {
@@ -1083,10 +1125,17 @@ download [flags] <url> [url…]      (aliases: get, dl — or just paste a URL)
         Some("history") | Some("retry") | Some("open") => println!(
             r#"
 history                       Last 20 downloads (numbered #1 = newest)
-history <N>                   Last N downloads
-history failed | completed    Filter by status
+history <N> | all             Last N downloads / every download
+history failed | completed    Filter by status (also cancelled, handed_off)
 history search <text>         Search file names and URLs
 history clear [completed|failed]
+
+Filters (combine freely, also with the forms above):
+  --status <s,…>   --domain <host>   --type <video|audio|image|archive|document|disk|package|ext,…>
+  --protocol <p>   --since <date>    --until <date>     --search <text>
+  --sort <newest|oldest|largest|smallest|name|fastest>  -n <N>   --offset <N>
+  Dates: YYYY-MM-DD, 'YYYY-MM-DD HH:MM', today, yesterday, 7d, 12h (UTC)
+  Example: history failed --domain example.com --since 7d
 
 retry [#|id|last] [flags]     Download a history entry again (resumes .part)
 open [#|id|last|path]         Open a downloaded file
@@ -1194,7 +1243,10 @@ impl Completer for ReplHelper {
             ["set"] => word_candidates(SET_KEYS, word),
             ["help"] => word_candidates(&["download", "history", "config", "credentials"], word),
             ["credentials"] => word_candidates(&["list", "add", "delete", "status"], word),
-            ["history"] => word_candidates(&["failed", "completed", "search", "clear"], word),
+            ["history"] => word_candidates(
+                &["failed", "completed", "cancelled", "all", "search", "clear"],
+                word,
+            ),
             ["history", "clear"] => word_candidates(&["completed", "failed"], word),
             ["checksum", _] => {
                 word_candidates(&["sha256", "sha512", "sha1", "md5", "blake3", "all"], word)

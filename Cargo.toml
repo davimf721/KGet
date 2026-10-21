@@ -52,6 +52,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 # Credential store API; the platform stores below are enabled by the `keychain` feature
 keyring-core = "1.0.1"
 rpassword = "7.5.4"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
 
 [features]
 default = ["keychain"]

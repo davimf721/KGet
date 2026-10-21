@@ -18,7 +18,7 @@ mod interactive;
 #[cfg(feature = "gui")]
 mod gui;
 
-use kget::cli::{self, ConfigOverrides};
+use kget::cli::{self, ConfigOverrides, HistoryFilter};
 use kget::config::Config;
 use kget::protocol::Protocol;
 use kget::runner::{self, DownloadJob, Reporter, RunContext};
@@ -189,9 +189,53 @@ struct Args {
     #[arg(long = "history")]
     history: bool,
 
-    /// Clear download history (all, or --history-clear completed)
+    /// Clear download history (all, or --history-clear completed|failed)
     #[arg(long = "history-clear")]
     history_clear: Option<String>,
+
+    /// History filter: status (completed, failed, cancelled, handed_off; repeatable)
+    #[arg(long = "status", requires = "history")]
+    history_status: Vec<String>,
+
+    /// History filter: domain (also matches subdomains)
+    #[arg(long = "domain", requires = "history")]
+    history_domain: Option<String>,
+
+    /// History filter: file type (video, audio, image, archive, document, disk, package) or extensions (iso,zip)
+    #[arg(long = "type", requires = "history")]
+    history_type: Option<String>,
+
+    /// History filter: protocol (http, ftp, sftp, webdav, torrent, video)
+    #[arg(long = "protocol", requires = "history")]
+    history_protocol: Option<String>,
+
+    /// History filter: started on/after (YYYY-MM-DD, 'YYYY-MM-DD HH:MM', today, 7d, 12h; UTC)
+    #[arg(long = "since", requires = "history")]
+    history_since: Option<String>,
+
+    /// History filter: started on/before (YYYY-MM-DD includes that day; UTC)
+    #[arg(long = "until", requires = "history")]
+    history_until: Option<String>,
+
+    /// History filter: text in the URL or filename
+    #[arg(long = "search", requires = "history")]
+    history_search: Option<String>,
+
+    /// History order: newest, oldest, largest, smallest, name, fastest
+    #[arg(long = "sort", requires = "history", default_value = "newest")]
+    history_sort: String,
+
+    /// Maximum number of history entries shown (0 = all)
+    #[arg(long = "history-limit", requires = "history", default_value_t = 50)]
+    history_limit: usize,
+
+    /// Skip this many history entries (paging)
+    #[arg(long = "history-offset", requires = "history", default_value_t = 0)]
+    history_offset: usize,
+
+    /// Print the history as a JSON array (with --jsonl: one object per line)
+    #[arg(long = "json", requires = "history")]
+    history_json: bool,
 
     /// Download via WebDAV (webdav:// or webdavs:// URLs); auto-detected from scheme
     #[arg(long = "webdav")]
@@ -239,6 +283,22 @@ impl Args {
             max_seeds: self.max_seeds,
             torrent_port: self.torrent_port,
             no_dht: self.no_dht,
+        }
+    }
+
+    /// The `--history` filter flags.
+    fn history_filter(&self) -> HistoryFilter {
+        HistoryFilter {
+            status: self.history_status.clone(),
+            domain: self.history_domain.clone(),
+            file_type: self.history_type.clone(),
+            protocol: self.history_protocol.clone(),
+            since: self.history_since.clone(),
+            until: self.history_until.clone(),
+            search: self.history_search.clone(),
+            sort: self.history_sort.clone(),
+            limit: self.history_limit,
+            offset: self.history_offset,
         }
     }
 
@@ -324,7 +384,11 @@ fn real_main() -> Result<i32, BoxError> {
 
     // History commands (don't require a URL)
     if args.history {
-        cli::print_history(50);
+        cli::print_history(
+            &args.history_filter().query()?,
+            args.history_json,
+            args.jsonl,
+        )?;
         return Ok(0);
     }
 

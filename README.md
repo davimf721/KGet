@@ -64,7 +64,7 @@ Most download tools are either too simple (single-connection wget-clones) or too
 - **Diagnostics** (`--doctor`) — config path, yt-dlp location, extract tools, compiled features
 
 ### History & Persistence
-- **Download history** — every download recorded to `history.json` (atomic, multi-process safe, credentials stripped); `--history` / `--history-clear`
+- **Download history** — every download recorded in a SQLite `history.db` (multi-process safe, credentials stripped; `history.json` is migrated); `--history` with filters (`--status`, `--domain`, `--type`, `--protocol`, `--since`, `--until`, `--search`, `--sort`, `--json`) / `--history-clear`
 - **Configuration** — flags apply only to the current run; `--save-config` persists them (proxy passwords are never written). `KGET_CONFIG_DIR` overrides the config directory
 - **Interactive REPL** (`--interactive`) — every CLI download option, batch, retry, checksums, Tab completion, persistent history, Ctrl+C to pause
 
@@ -241,6 +241,10 @@ kget -H "Authorization: Bearer token123" -H "Accept: application/json" https://a
 kget --history                    # list last 50 downloads
 kget --history-clear              # remove all entries
 kget --history-clear completed    # keep only failures
+kget --history-clear failed       # remove only failures
+kget --history --status failed --domain example.com --since 7d
+kget --history --type video --sort largest --history-limit 10
+kget --history --json             # JSON array (with --jsonl: one object per line)
 ```
 
 ### Interactive REPL
@@ -328,8 +332,8 @@ Exit codes: `0` success, `1` error, `130` cancelled (Ctrl+C — partial data is 
 | `--ytdlp` | Route through yt-dlp (auto-detected for video sites) |
 | `--quality <q>` | yt-dlp quality: `best`, `1080p`, `720p`, `480p`, `360p`, `audio` |
 | `--metalink` | Download from a Metalink manifest |
-| `--history` | Show download history |
-| `--history-clear [completed]` | Clear history |
+| `--history` | Show download history (filters: `--status`, `--domain`, `--type`, `--protocol`, `--since`, `--until`, `--search`, `--sort`, `--history-limit`, `--history-offset`, `--json`) |
+| `--history-clear [completed\|failed]` | Clear history |
 | `--jsonl` | Emit JSON Lines events to stdout |
 | `--gui` | Launch egui graphical interface |
 | `-i, --interactive` | Interactive REPL mode |
