@@ -61,12 +61,14 @@ cargo fmt -- --check                           # format check
 The repository is a single Rust crate with both a `lib` and a `bin` target.
 
 **Core library** (`src/lib.rs` re-exports everything):
-- `src/download.rs` — single-stream HTTP/HTTPS download with retry, gzip/brotli/lz4 decompression, and optional SHA256 verification
+- `src/download.rs` — single-stream HTTP/HTTPS download with retry and optional SHA256 verification; bodies are saved byte-for-byte (no transparent decompression)
 - `src/advanced_download.rs` — resumable multi-connection HTTP downloader (`AdvancedDownloader`); splits file into byte ranges, parallelizes via rayon
 - `src/ftp/` and `src/sftp/` — protocol adapters for FTP (suppaftp) and SFTP (ssh2)
 - `src/torrent/` — torrent support: `native.rs` (librqbit, behind `torrent-native` feature), `transmission.rs` (Transmission RPC, behind `torrent-transmission` feature), `external.rs`, and `mod.rs` which dispatches
 - `src/config.rs` — JSON config persisted to the OS config dir; owns proxy, optimization, torrent settings
 - `src/optimization.rs` — `Optimizer` selects connection count/strategy based on file type/size
+- `src/events.rs` — `DownloadEvent` (builder channel) and `JsonEvent`, the versioned `--jsonl` protocol (`"v":1`; additive changes keep the version)
+- `src/http.rs` — shared reqwest client (proxy, timeouts, user agent) for every HTTP path
 - `src/progress.rs` — indicatif progress bar factory
 - `src/utils.rs` — filename extraction, output path resolution, print helpers
 - `src/app.rs` — `DownloadCommand`/`WorkerToGuiMessage` channel contract + `spawn_download_worker`; this is the shared orchestration layer that all frontends should use
@@ -78,7 +80,7 @@ The repository is a single Rust crate with both a `lib` and a `bin` target.
 
 **macOS native app** (`macos-app/`):
 - SwiftUI shell that spawns `kget-bin` (the Rust binary renamed)
-- Communicates via subprocess stdio; parses text output (being migrated to JSONL)
+- Runs `kget-bin <url> --jsonl` and consumes the JSONL protocol (`started`, `progress`, `phase`, `verified`, `saved`, `completed`, `error`, …); never parses human text — add a structured event/field to `src/events.rs` instead
 - `DownloadManager.swift` drives the Rust process; `ContentView.swift` is the main UI; `MenuBarView.swift` is the menu bar extra
 
 ## Feature Flags

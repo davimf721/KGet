@@ -271,7 +271,7 @@ class DownloadManager: ObservableObject {
         // Only an active download blocks a new one; finished items can be downloaded again.
         if let existing = downloads.first(where: {
             DownloadValidator.normalize($0.url) == normalizedURL
-                && [.pending, .downloading, .verifying, .paused].contains($0.status)
+                && [.pending, .downloading, .verifying, .extracting, .paused].contains($0.status)
         }) {
             selectedDownloadId = existing.id
             lastStartError = "This download is already in the list."
@@ -581,6 +581,7 @@ class DownloadManager: ObservableObject {
         
         updateDownload(download.id) { dl in
             dl.status = .verifying
+            dl.verifyingAlgorithm = "sha256"
             dl.progress = 0
             dl.verificationProgress = 0
         }
@@ -767,7 +768,7 @@ class DownloadManager: ObservableObject {
                 dl.totalSize = Formatters.formatBytes(total)
             }
         case "progress":
-            if dl.status != .paused && dl.status != .cancelled && dl.status != .verifying {
+            if ![.paused, .cancelled, .verifying, .extracting].contains(dl.status) {
                 dl.status = .downloading
             }
             if let percent = ev.double("percent"), dl.isTorrent || percent >= dl.progress {
@@ -789,10 +790,25 @@ class DownloadManager: ObservableObject {
             if let eta = ev.double("eta_secs") {
                 dl.eta = Formatters.formatTime(eta)
             }
+        case "phase":
+            // Structured post-transfer phase (kget 1.8+).
+            dl.reportsPhases = true
+            switch ev.string("phase") {
+            case "verifying":
+                dl.status = .verifying
+                dl.verifyingAlgorithm = ev.string("algorithm")
+            case "extracting":
+                dl.status = .extracting
+            default:
+                break
+            }
         case "status":
-            if let message = ev.string("message"),
+            // Fallback for binaries older than 1.8, which only announce
+            // hashing through a human-readable status message.
+            if !dl.reportsPhases, let message = ev.string("message"),
                message.contains("SHA256") || message.contains("Calculating") {
                 dl.status = .verifying
+                dl.verifyingAlgorithm = "sha256"
             }
         case "files":
             dl.torrentFiles = ev.array("files").enumerated().map { idx, file in
@@ -965,6 +981,8 @@ struct Download: Identifiable {
     var isExpanded: Bool
     var speedRaw: Double          // current bytes/s (for sparkline)
     var speedHistory: [Double]    // last 30 readings in bytes/s
+    var verifyingAlgorithm: String?  // from `phase` events, e.g. "sha256"
+    var reportsPhases: Bool          // the binary sends structured `phase` events
 
     init(id: UUID, url: String, outputPath: String, fullFilePath: String, status: DownloadStatus,
          progress: Double, speed: String, eta: String, totalSize: String = "", downloadedSize: String = "",
@@ -996,6 +1014,8 @@ struct Download: Identifiable {
         self.isExpanded = isExpanded
         self.speedRaw = 0
         self.speedHistory = []
+        self.verifyingAlgorithm = nil
+        self.reportsPhases = false
     }
     
     /// Real file name (from `Content-Disposition`/yt-dlp once the binary reports it).
@@ -1011,7 +1031,7 @@ struct Download: Identifiable {
 }
 
 enum DownloadStatus: String, CaseIterable {
-    case pending, downloading, paused, verifying, completed, failed, cancelled
+    case pending, downloading, paused, verifying, extracting, completed, failed, cancelled
 
     var displayName: String { rawValue.capitalized }
 
@@ -1021,6 +1041,7 @@ enum DownloadStatus: String, CaseIterable {
         case .downloading: return "arrow.down.circle"
         case .paused: return "pause.circle"
         case .verifying: return "checkmark.shield"
+        case .extracting: return "archivebox"
         case .completed: return "checkmark.circle.fill"
         case .failed: return "exclamationmark.circle.fill"
         case .cancelled: return "xmark.circle.fill"
@@ -1033,6 +1054,7 @@ enum DownloadStatus: String, CaseIterable {
         case .downloading: return "blue"
         case .paused: return "yellow"
         case .verifying: return "purple"
+        case .extracting: return "teal"
         case .completed: return "green"
         case .failed: return "red"
         case .cancelled: return "orange"

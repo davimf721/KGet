@@ -34,7 +34,7 @@
 //! ```
 
 use crate::config::Config;
-use crate::events::JsonEvent;
+use crate::events::{JsonEvent, Phase};
 use crate::protocol::Protocol;
 use crate::runner::{self, DownloadJob, Outcome, Reporter, RunContext};
 use serde::{Deserialize, Serialize};
@@ -602,10 +602,6 @@ impl Inner {
                 let inner = self.clone();
                 Arc::new(move |ev: &JsonEvent| inner.on_event(id, ev))
             }),
-            on_verifying: Some({
-                let inner = self.clone();
-                Arc::new(move || inner.set_verifying(id))
-            }),
         };
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             runner::run_job(&job, &ctx, &reporter)
@@ -645,19 +641,24 @@ impl Inner {
             id,
             event: ev.clone(),
         });
-    }
-
-    fn set_verifying(&self, id: JobId) {
-        let mut st = self.lock();
-        match st.jobs.get_mut(&id) {
-            Some(entry) if entry.info.state == DownloadState::Running => {
-                entry.info.state = DownloadState::Verifying;
+        // The runner announces checksum verification with a `phase` event
+        // (both its own `--checksum` pass and the engine's `--sha256` hash).
+        let verifying = matches!(
+            ev,
+            JsonEvent::Phase {
+                phase: Phase::Verifying,
+                ..
             }
-            _ => return,
+        );
+        if verifying
+            && let Some(entry) = st.jobs.get_mut(&id)
+            && entry.info.state == DownloadState::Running
+        {
+            entry.info.state = DownloadState::Verifying;
+            self.broadcast(state_event(id, DownloadState::Verifying, None));
+            drop(st);
+            self.changed.notify_all();
         }
-        self.broadcast(state_event(id, DownloadState::Verifying, None));
-        drop(st);
-        self.changed.notify_all();
     }
 
     /// Record the result of a job, free its slot and start the next one.

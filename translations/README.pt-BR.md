@@ -32,31 +32,31 @@ A maioria das ferramentas de download é simples demais (clones de wget com cone
 ### Protocolos de Download
 | Protocolo | Flag | Notas |
 |-----------|------|-------|
-| HTTP / HTTPS | *(auto)* | Multi-conexão, retomável, gzip/brotli/lz4, proxy |
-| FTP | `--ftp` | Autenticado ou anônimo |
-| SFTP | `--sftp` | Senha ou chave; verificação de host-key |
+| HTTP / HTTPS | *(auto)* | Multi-conexão, retomável, proxy HTTP/HTTPS/SOCKS5, arquivos idênticos ao do servidor (sem descompressão) |
+| FTP | `ftp://` *(auto)* ou `--ftp` | Autenticado ou anônimo, retomável (`REST`) |
+| SFTP | `sftp://` *(auto)* ou `--sftp` | Senha ou chave; verificação de host-key; retomável |
 | WebDAV | `--webdav` ou `webdav://` | HTTP Basic auth embutido na URL |
 | Magnet / BitTorrent | *(auto-detectado)* | Cliente torrent nativo (feature `torrent-native`) |
-| Metalink `.meta4` | `--metalink` | Múltiplos mirrors com fallback, SHA-256 verificado (RFC 5854) |
+| Metalink `.meta4` / `.metalink` | *(auto)* ou `--metalink` | Múltiplos mirrors com fallback, SHA-256/512/MD5 verificado (RFC 5854) |
 | Sites de vídeo | `--ytdlp` ou *(auto-detectado)* | YouTube, Vimeo, Twitch, TikTok, Instagram… via yt-dlp |
 
 ### Motor de Download
 - **Modo turbo** (`-a`) — conexões paralelas por faixas de bytes, retomável
-- **Download em lote** (`--batch urls.txt`) — uma URL por linha, `#` = comentário, todas em paralelo
+- **Download em lote** (`--batch urls.txt`) — uma URL por linha, `#` = comentário, `-j/--jobs N` downloads simultâneos (padrão 4)
 - **Agendamento** (`--at "HH:MM"`) — dorme até o horário local especificado
 - **Limite de velocidade** (`-l <bytes/s>`) — throttle global por token-bucket
 - **Headers HTTP customizados** (`-H "Nome: Valor"`) — injeta headers arbitrários
 - **Auto-extração de arquivos** (`--extract`) — descompacta após o download (`.zip`, `.tar.gz`, `.7z`, …)
 - **Verificação SHA-256** (`--sha256 <hash>`) — erro se não corresponder; nunca aceita arquivos corrompidos
-- **Arquivos de checksum sidecar** — verifica contra arquivos GNU/BSD `.sha256sum`
+- **Qualquer checksum** (`--checksum sha512:<hex>`) e **arquivos sidecar** (`--checksum-url …/SHA256SUMS`) — formatos GNU, BSD e só-hash
 - **Content-Disposition** — usa nomes de arquivo sugeridos pelo servidor
 - **Segurança de nomes de arquivo** — rejeita bytes nulos, path traversal, nomes reservados do Windows e nomes >255 bytes
 
 ### Integridade e Segurança
 - **Checksums multi-algoritmo** — SHA-256, SHA-512, SHA-1, MD5, BLAKE3
 - **Verificação de host-key SFTP** — checa `~/.ssh/known_hosts`; erro em caso de divergência
-- **Política de retry** — tenta novamente apenas em 5xx e erros de rede; falha imediata em 4xx
-- **Eventos JSONL** (`--jsonl`) — progresso legível por máquina para scripts e agentes
+- **Política de retry** — tenta novamente em 408/429/5xx e erros de rede (respeita `Retry-After`); falha imediata nos demais 4xx
+- **Eventos JSONL** (`--jsonl`) — eventos versionados (`"v":1`) legíveis por máquina para todos os protocolos
 
 ### Histórico e Persistência
 - **Histórico de downloads** — todo download gravado em `history.json`; `--history` / `--history-clear`
@@ -232,8 +232,15 @@ Tab completa comandos, flags, chaves de config e caminhos; ↑/↓ navegam pelos
 ### Eventos JSONL (para scripts e agentes)
 
 ```bash
-kget --jsonl -a https://example.com/arquivo.iso | jq '.percent'
+kget --jsonl -a https://example.com/arquivo.iso | jq -c 'select(.event=="progress") | .percent'
 ```
+
+Cada linha é um objeto JSON com `"v": 1` e um campo `event` (`started`, `progress`, `status`,
+`files`, `file_progress`, `phase`, `verified`, `saved`, `completed`, `error`). O evento `phase` indica
+verificação (`{"event":"phase","phase":"verifying","algorithm":"sha256"}`) ou extração
+(`{"event":"phase","phase":"extracting"}`). Use os campos estruturados, nunca o texto de `status`.
+Novos eventos e campos não mudam `"v"`; ignore os que não conhecer. Veja o formato completo no
+[README em inglês](../README.md#jsonl-events-for-scripts-and-agents).
 
 ### Todas as flags CLI
 

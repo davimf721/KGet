@@ -293,3 +293,68 @@ async fn events_fan_out_to_every_subscriber() {
             .any(|e| e.contains(r#""type":"state""#) && e.contains(r#""state":"failed""#))
     );
 }
+
+/// A `phase: verifying` event moves the job to `Verifying`, whether the hash
+/// is computed by the runner (`--checksum`) or by the engine (`--sha256`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn checksum_phase_drives_verifying_state() {
+    use kget::checksum::ChecksumAlgorithm;
+    use kget::events::Phase;
+    use sha2::Digest;
+
+    let server = MockServer::start().await;
+    let body = b"verify me please".to_vec();
+    mount(&server, "c.bin", &body, 0).await;
+    mount(&server, "s.bin", &body, 0).await;
+    let dir = TempDir::new().unwrap();
+    let hash = hex::encode(sha2::Sha256::digest(&body));
+
+    let mut by_checksum = job(&server, "c.bin", &dir);
+    by_checksum.checksum = Some((ChecksumAlgorithm::Sha256, hash.clone()));
+    let mut by_sha256 = job(&server, "s.bin", &dir);
+    by_sha256.sha256 = Some(hash);
+
+    for job in [by_checksum, by_sha256] {
+        let (info, events) = tokio::task::spawn_blocking(move || {
+            let m = manager(1);
+            let rx = m.subscribe();
+            let id = m.submit(job);
+            let info = m.wait(id, WAIT).expect("job finishes");
+            let events = collect_until(
+                &rx,
+                |e| matches!(e, JobEvent::State { state, .. } if state.is_finished()),
+            );
+            (info, events)
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(info.state, DownloadState::Completed, "{:?}", info.error);
+        assert_eq!(
+            states(&events, info.id),
+            vec![
+                DownloadState::Queued,
+                DownloadState::Running,
+                DownloadState::Verifying,
+                DownloadState::Completed
+            ]
+        );
+        // The phase event precedes the state change it causes.
+        let phase_at = events.iter().position(|e| {
+            matches!(
+                e,
+                JobEvent::Download {
+                    event: JsonEvent::Phase {
+                        phase: Phase::Verifying,
+                        ..
+                    },
+                    ..
+                }
+            )
+        });
+        let state_at = events.iter().position(
+            |e| matches!(e, JobEvent::State { state, .. } if *state == DownloadState::Verifying),
+        );
+        assert!(phase_at.is_some() && phase_at < state_at, "{events:?}");
+    }
+}

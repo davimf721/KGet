@@ -675,7 +675,7 @@ impl AdvancedDownloader {
         self.send_status(&format!("File size verified: {len} bytes"));
 
         if self.expected_sha256.is_some() || (is_iso && self.should_verify_iso()) {
-            self.send_status("Calculating SHA256 hash...");
+            // verify_file_sha256 announces the verifying phase itself.
             let status_cb = self.status_callback.clone();
             let cb = move |msg: String| {
                 if let Some(cb) = &status_cb {

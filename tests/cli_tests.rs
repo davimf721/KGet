@@ -515,3 +515,225 @@ fn history_redacts_credentials_from_cli_downloads() {
     assert!(!history.contains("hunter2"));
     assert!(history.contains("127.0.0.1"));
 }
+
+// ============================================================================
+// JSONL `phase` events (verification / extraction)
+// ============================================================================
+
+/// Tiny blocking HTTP server that answers every request with `body`
+/// (honouring `Range` requests, so turbo mode uses parallel chunks).
+fn serve_body(body: Vec<u8>) -> String {
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let body = std::sync::Arc::new(body);
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let body = body.clone();
+            std::thread::spawn(move || {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut request_line = String::new();
+                if reader.read_line(&mut request_line).is_err() {
+                    return;
+                }
+                let mut range: Option<(usize, usize)> = None;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("range:")
+                        && let Some((a, b)) = v.trim().trim_start_matches("bytes=").split_once('-')
+                    {
+                        let last = body.len() - 1;
+                        let start = a.parse().unwrap_or(0);
+                        let end = b.parse().unwrap_or(last).min(last);
+                        range = Some((start, end));
+                    }
+                }
+                let (status, slice, extra) = match range {
+                    Some((s, e)) => (
+                        "206 Partial Content",
+                        &body[s..=e],
+                        format!("Content-Range: bytes {s}-{e}/{}\r\n", body.len()),
+                    ),
+                    None => ("200 OK", &body[..], String::new()),
+                };
+                let head = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\n{extra}Connection: close\r\n\r\n",
+                    slice.len()
+                );
+                let _ = stream.write_all(head.as_bytes());
+                if !request_line.starts_with("HEAD") {
+                    let _ = stream.write_all(slice);
+                }
+            });
+        }
+    });
+    base
+}
+
+fn sha256_hex(data: &[u8]) -> String {
+    use sha2::Digest;
+    hex::encode(sha2::Sha256::digest(data))
+}
+
+/// Run kget with `args` in `dir`; return the parsed JSONL events.
+fn jsonl_events(dir: &std::path::Path, args: &[&str]) -> Vec<serde_json::Value> {
+    let out = kget_in(dir).current_dir(dir).args(args).output().unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        out.status.success(),
+        "kget failed: {stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    stdout
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("not JSON: {l:?} ({e})")))
+        .collect()
+}
+
+fn event_index(events: &[serde_json::Value], pred: impl Fn(&serde_json::Value) -> bool) -> usize {
+    events
+        .iter()
+        .position(pred)
+        .unwrap_or_else(|| panic!("event not found in {events:#?}"))
+}
+
+/// A verifying `phase` event for `algorithm` arrives before `completed`.
+fn assert_verifying_phase(events: &[serde_json::Value], algorithm: &str) -> usize {
+    let phase = event_index(events, |e| {
+        e["event"] == "phase" && e["phase"] == "verifying" && e["algorithm"] == algorithm
+    });
+    assert_eq!(events[phase]["v"], 1);
+    let completed = event_index(events, |e| e["event"] == "completed");
+    assert!(phase < completed);
+    phase
+}
+
+#[test]
+fn jsonl_checksum_emits_verifying_phase() {
+    let body = b"kget phase event test body".repeat(1000);
+    let base = serve_body(body.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let checksum = format!("sha512:{}", {
+        use sha2::Digest;
+        hex::encode(sha2::Sha512::digest(&body))
+    });
+    let url = format!("{base}/file.bin");
+    let events = jsonl_events(dir.path(), &["--jsonl", "--checksum", &checksum, &url]);
+    let phase = assert_verifying_phase(&events, "sha512");
+    let verified = event_index(&events, |e| e["event"] == "verified" && e["ok"] == true);
+    assert!(phase < verified);
+}
+
+#[test]
+fn jsonl_sha256_emits_verifying_phase_simple_and_turbo() {
+    let body = b"0123456789abcdef".repeat(64 * 1024);
+    let base = serve_body(body.clone());
+    let hash = sha256_hex(&body);
+    for advanced in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!("{base}/image.bin");
+        let mut args = vec!["--jsonl", "--sha256", &hash, &url];
+        if advanced {
+            args.push("-a");
+        }
+        let events = jsonl_events(dir.path(), &args);
+        assert_verifying_phase(&events, "sha256");
+        // The engine's status message is kept for older consumers.
+        assert!(
+            events.iter().any(|e| e["event"] == "status"
+                && e["message"].as_str().unwrap_or("").contains("SHA256")),
+            "advanced={advanced}: {events:#?}"
+        );
+        if advanced {
+            // Parallel ranges were used, not the single-stream fallback.
+            assert!(
+                events.iter().any(|e| e["message"]
+                    .as_str()
+                    .is_some_and(|m| m.starts_with("File size verified"))),
+                "{events:#?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn jsonl_metalink_emits_verifying_phase() {
+    let body = b"metalink body".repeat(500);
+    let base = serve_body(body.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = dir.path().join("files.meta4");
+    std::fs::write(
+        &manifest,
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<metalink xmlns="urn:ietf:params:xml:ns:metalink">
+  <file name="data.bin">
+    <size>{}</size>
+    <hash type="sha-256">{}</hash>
+    <url priority="1">{base}/data.bin</url>
+  </file>
+</metalink>"#,
+            body.len(),
+            sha256_hex(&body)
+        ),
+    )
+    .unwrap();
+    let out_dir = dir.path().join("out");
+    let events = jsonl_events(
+        dir.path(),
+        &[
+            "--jsonl",
+            "-O",
+            out_dir.to_str().unwrap(),
+            manifest.to_str().unwrap(),
+        ],
+    );
+    assert_verifying_phase(&events, "sha256");
+    assert_eq!(std::fs::read(out_dir.join("data.bin")).unwrap(), body);
+}
+
+#[test]
+fn jsonl_batch_phase_events_carry_url() {
+    let body = b"batch body".repeat(100);
+    let base = serve_body(body.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!("{base}/one.bin");
+    let list = dir.path().join("urls.txt");
+    std::fs::write(&list, format!("{url}\n")).unwrap();
+    let checksum = format!("sha256:{}", sha256_hex(&body));
+    let out_dir = dir.path().join("out");
+    let events = jsonl_events(
+        dir.path(),
+        &[
+            "--jsonl",
+            "--checksum",
+            &checksum,
+            "--batch",
+            list.to_str().unwrap(),
+            "-O",
+            out_dir.to_str().unwrap(),
+        ],
+    );
+    let phase = assert_verifying_phase(&events, "sha256");
+    assert_eq!(events[phase]["url"], url.as_str());
+}
+
+#[test]
+fn jsonl_extract_emits_extracting_phase() {
+    // Not a real archive: the phase is announced before the tool runs, and a
+    // failed extraction is only a warning.
+    let base = serve_body(b"not really a tarball".to_vec());
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!("{base}/archive.tar.gz");
+    let events = jsonl_events(dir.path(), &["--jsonl", "--extract", &url]);
+    let phase = event_index(&events, |e| e["event"] == "phase");
+    assert_eq!(events[phase]["phase"], "extracting");
+    assert!(events[phase].get("algorithm").is_none());
+    let saved = event_index(&events, |e| e["event"] == "saved");
+    assert!(phase < saved);
+}

@@ -56,6 +56,6 @@
 ## Platform Expansion
 
 - **iPhone/iPad:** shared SwiftUI app, Rust engine via UniFFI/C ABI, share sheet, Files integration, background-safe downloads.
-- **macOS:** replace process-output parsing with structured JSONL events; add menu bar queue controls.
+- **macOS:** add menu bar queue controls (the app already speaks only the JSONL protocol).
 - **Windows:** Tauri or egui AppImage/installer with tray integration and file associations.
 - **Linux:** egui/Tauri AppImage/deb/rpm; xdg-open, desktop files, tray notifications.

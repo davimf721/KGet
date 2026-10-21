@@ -28,7 +28,7 @@
 use crate::advanced_download::{AdvancedDownloader, ResumePolicy};
 use crate::checksum::{ChecksumAlgorithm, compute_checksum, parse_sidecar};
 use crate::config::Config;
-use crate::events::{FileEntry, FileProgressEntry, JsonEvent, SpeedMeter};
+use crate::events::{FileEntry, FileProgressEntry, JsonEvent, Phase, SpeedMeter};
 use crate::ftp::FtpDownloader;
 use crate::metalink;
 use crate::optimization::Optimizer;
@@ -185,10 +185,12 @@ pub struct Reporter {
     /// Suppress human-readable output (progress bars, messages)
     pub quiet: bool,
     /// Structured events; `Some` means a machine consumer is listening (JSONL,
-    /// GUI, job manager), which also implies non-interactive behaviour
+    /// GUI, job manager), which also implies non-interactive behaviour.
+    ///
+    /// Checksum verification and archive extraction are announced with a
+    /// [`JsonEvent::Phase`] event, whether the hash is computed by the runner
+    /// (`--checksum`) or inside the engine (`--sha256`, ISO verification).
     pub events: Option<EventSink>,
-    /// Called when post-download checksum verification starts
-    pub on_verifying: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl std::fmt::Debug for Reporter {
@@ -196,7 +198,6 @@ impl std::fmt::Debug for Reporter {
         f.debug_struct("Reporter")
             .field("quiet", &self.quiet)
             .field("events", &self.events.is_some())
-            .field("on_verifying", &self.on_verifying.is_some())
             .finish()
     }
 }
@@ -220,7 +221,6 @@ impl Reporter {
         Self {
             quiet: true,
             events: Some(sink),
-            on_verifying: None,
         }
     }
 
@@ -304,11 +304,14 @@ pub fn run_job(
     match &result {
         Ok(Outcome::Saved(path)) => {
             if let Some(p) = path {
-                if job.extract
-                    && utils::is_extractable(p)
-                    && let Err(e) = crate::auto_extract(p, reporter.quiet)
-                {
-                    eprintln!("Warning: auto-extract: {e}");
+                if job.extract && utils::is_extractable(p) {
+                    reporter.emit(&JsonEvent::Phase {
+                        phase: Phase::Extracting,
+                        algorithm: None,
+                    });
+                    if let Err(e) = crate::auto_extract(p, reporter.quiet) {
+                        eprintln!("Warning: auto-extract: {e}");
+                    }
                 }
                 let bytes = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
                 reporter.emit(&JsonEvent::Saved {
@@ -445,12 +448,13 @@ fn post_verify(
         }
         return Ok(());
     };
-    if let Some(cb) = &reporter.on_verifying {
-        cb();
-    }
     if !reporter.quiet {
         println!("Verifying {}...", algo.name());
     }
+    reporter.emit(&JsonEvent::Phase {
+        phase: Phase::Verifying,
+        algorithm: Some(algo.name().into()),
+    });
     let got = compute_checksum(path, &algo)?;
     let want = want.trim().to_ascii_lowercase();
     let ok = got == want;
@@ -483,7 +487,8 @@ fn event_progress(reporter: &Reporter) -> Option<ByteProgressCallback> {
     }))
 }
 
-/// Status callback that emits `status` events.
+/// Status callback that emits `status` events, preceded by a `phase` event
+/// when the engine announces a checksum computation.
 fn event_status(reporter: &Reporter) -> impl Fn(String) + Send + Sync + 'static {
     let sink = reporter.events.clone();
     move |message: String| {
@@ -491,6 +496,9 @@ fn event_status(reporter: &Reporter) -> impl Fn(String) + Send + Sync + 'static 
         if let Some(sink) = &sink
             && !message.starts_with("PROGRESS:")
         {
+            if let Some(phase) = JsonEvent::phase_from_status(&message) {
+                sink(&phase);
+            }
             sink(&JsonEvent::Status { message });
         }
     }
@@ -583,12 +591,13 @@ fn dispatch(
         }
         Protocol::Metalink => {
             let output_dir = job.output.as_deref().unwrap_or(".");
-            metalink::download_metalink(
+            metalink::download_metalink_with_status(
                 &job.url,
                 output_dir,
                 quiet,
                 config.proxy.clone(),
                 optimizer,
+                jsonl.then_some(&status as &(dyn Fn(String) + Send + Sync)),
             )?;
             Ok(Outcome::Saved(None))
         }
