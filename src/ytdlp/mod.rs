@@ -182,11 +182,39 @@ impl std::str::FromStr for VideoQuality {
     }
 }
 
+/// Serialized as its preset name (`"best"`, `"720p"`, `"audio"`, …).
+impl serde::Serialize for VideoQuality {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for VideoQuality {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        Ok(VideoQuality::parse(&s))
+    }
+}
+
 impl VideoQuality {
     /// Parse a quality name (`best`, `1080p`, `720p`, `480p`, `360p`, `audio`,
     /// or a raw yt-dlp format string).
     pub fn parse(s: &str) -> Self {
         s.parse().unwrap_or_default()
+    }
+
+    /// The preset name accepted by [`VideoQuality::parse`] (`best`, `720p`,
+    /// `audio`, … or the raw format string).
+    pub fn as_str(&self) -> &str {
+        match self {
+            VideoQuality::Best => "best",
+            VideoQuality::P1080 => "1080p",
+            VideoQuality::P720 => "720p",
+            VideoQuality::P480 => "480p",
+            VideoQuality::P360 => "360p",
+            VideoQuality::AudioOnly => "audio",
+            VideoQuality::Custom(f) => f,
+        }
     }
 
     pub fn yt_dlp_format(&self) -> &str {

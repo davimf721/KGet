@@ -646,7 +646,7 @@ impl KGetGui {
                 let final_output_path = if is_magnet {
                     self.output_path.clone()
                 } else {
-                    crate::utils::resolve_output_path(
+                    kget::utils::resolve_output_path(
                         Some(self.output_path.clone()),
                         &self.url,
                         "downloaded_file",

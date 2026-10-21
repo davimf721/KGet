@@ -15,7 +15,10 @@
 use std::fmt;
 
 /// Download protocol / backend for a URL.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Serialized as the lowercase name used in JSONL events (`"http"`, `"ftp"`, …).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Protocol {
     /// Plain HTTP/HTTPS download
     Http,

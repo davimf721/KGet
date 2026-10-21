@@ -78,16 +78,19 @@ pub mod advanced_download;
 pub mod app;
 pub mod builder;
 pub mod checksum;
+pub mod cli;
 pub mod config;
 pub mod download;
 pub mod error;
 pub mod events;
 pub mod http;
+pub mod jobs;
 pub mod metalink;
 pub mod optimization;
 pub mod progress;
 pub mod protocol;
 pub mod queue;
+pub mod runner;
 pub mod utils;
 
 // Protocol modules
@@ -129,6 +132,10 @@ pub use checksum::ChecksumAlgorithm;
 pub use error::KgetError;
 pub use events::{DownloadEvent, JsonEvent};
 
+// Re-exports: Job service shared by every frontend (v1.8.0+)
+pub use jobs::{DownloadState, JobError, JobEvent, JobId, JobInfo, JobManager, JobProgress};
+pub use runner::{DownloadJob, Reporter, RunContext};
+
 /// Create a [`DownloadBuilder`] for a single URL — the recommended API entry point.
 ///
 /// # Example
@@ -162,7 +169,8 @@ pub fn batch(urls: impl IntoIterator<Item = impl Into<String>>) -> BatchBuilder 
 }
 
 /// What to do when the destination file already exists.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum OverwritePolicy {
     /// Replace the existing file (default, wget-compatible).
     #[default]
