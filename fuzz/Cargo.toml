@@ -1,0 +1,84 @@
+[package]
+name = "kget-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+kget = { package = "Kget", path = ".." }
+
+# Own workspace: `cargo test` / `cargo build` at the repository root never
+# build this crate (it needs nightly and libFuzzer). Run with
+# `cargo +nightly fuzz run <target>` from the repository root.
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "metalink"
+path = "fuzz_targets/metalink.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "magnet"
+path = "fuzz_targets/magnet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "content_disposition"
+path = "fuzz_targets/content_disposition.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "filename"
+path = "fuzz_targets/filename.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "url"
+path = "fuzz_targets/url.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "resume_state"
+path = "fuzz_targets/resume_state.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "checksum_sidecar"
+path = "fuzz_targets/checksum_sidecar.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config"
+path = "fuzz_targets/config.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jsonl"
+path = "fuzz_targets/jsonl.rs"
+test = false
+doc = false
+bench = false

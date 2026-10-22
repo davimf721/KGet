@@ -153,10 +153,10 @@ struct ChunkState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct ResumeState {
+pub(crate) struct ResumeState {
     version: u32,
     url: String,
-    total_size: u64,
+    pub(crate) total_size: u64,
     etag: Option<String>,
     last_modified: Option<String>,
     chunks: Vec<ChunkState>,
@@ -165,7 +165,11 @@ struct ResumeState {
 impl ResumeState {
     fn load(path: &Path) -> Option<Self> {
         let bytes = std::fs::read(path).ok()?;
-        serde_json::from_slice(&bytes).ok()
+        Self::parse(&bytes)
+    }
+
+    pub(crate) fn parse(bytes: &[u8]) -> Option<Self> {
+        serde_json::from_slice(bytes).ok()
     }
 
     /// Atomic write: temporary file + rename, never a half-written JSON.
@@ -181,11 +185,27 @@ impl ResumeState {
             && Some(self.total_size) == remote.size
             && (self.etag.is_none() || self.etag == remote.etag)
             && (self.last_modified.is_none() || self.last_modified == remote.last_modified)
-            && self.chunks.iter().all(|c| c.start + c.done <= c.end)
+            && self.is_consistent()
     }
 
-    fn done_bytes(&self) -> u64 {
-        self.chunks.iter().map(|c| c.done).sum()
+    /// The chunks must tile `0..total_size` in order and no chunk may claim
+    /// more bytes than it holds. A corrupted `.kget` such as `"chunks": []`
+    /// used to match, and the zero-filled `.part` was renamed as complete.
+    pub(crate) fn is_consistent(&self) -> bool {
+        let mut next = 0u64;
+        for c in &self.chunks {
+            if c.start != next || c.end <= c.start || c.done > c.end - c.start {
+                return false;
+            }
+            next = c.end;
+        }
+        next == self.total_size
+    }
+
+    pub(crate) fn done_bytes(&self) -> u64 {
+        self.chunks
+            .iter()
+            .fold(0u64, |acc, c| acc.saturating_add(c.done))
     }
 }
 
@@ -211,6 +231,23 @@ enum ChunkError {
     Transient(String),
     Fatal(BoxError),
 }
+
+/// A chunk request was answered with `200` (range ignored, or `If-Range`
+/// says the file changed) or `416`: restart as a single stream.
+#[derive(Debug)]
+struct RangeNotHonored(u16);
+
+impl std::fmt::Display for RangeNotHonored {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Server answered a range request with HTTP {} (no range support or the remote file changed)",
+            self.0
+        )
+    }
+}
+
+impl Error for RangeNotHonored {}
 
 /// High-performance downloader with parallel connections and resume support.
 ///
@@ -582,6 +619,15 @@ impl AdvancedDownloader {
         let result = self.download_chunks_parallel(&file, state, &state_path, &remote);
         match result {
             Ok(()) => {}
+            Err(e) if e.is::<RangeNotHonored>() => {
+                // Never splice two versions: drop the partial data and fetch
+                // the whole (possibly new) file in one stream.
+                drop(file);
+                self.log(&format!("{e}; restarting with a single connection"));
+                let _ = std::fs::remove_file(&part);
+                let _ = std::fs::remove_file(&state_path);
+                return self.download_single_stream(is_iso);
+            }
             Err(e) => {
                 if matches!(e.downcast_ref::<KgetError>(), Some(KgetError::Cancelled)) {
                     self.log("Download paused; run the same command again to resume.");
@@ -938,12 +984,12 @@ impl AdvancedDownloader {
                     .send()
                     .map_err(|e| ChunkError::Transient(e.to_string()))?;
                 let status = resp.status();
-                if status == reqwest::StatusCode::OK {
-                    let _ = std::fs::remove_file(self.state_path());
-                    return Err(ChunkError::Fatal(
-                        "Server ignored the range request or the remote file changed; restart the download"
-                            .into(),
-                    ));
+                if status == reqwest::StatusCode::OK
+                    || status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE
+                {
+                    return Err(ChunkError::Fatal(Box::new(RangeNotHonored(
+                        status.as_u16(),
+                    ))));
                 }
                 if http::is_transient_status(status.as_u16()) {
                     if let Some(delay) = http::retry_after(&resp) {

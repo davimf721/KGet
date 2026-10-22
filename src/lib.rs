@@ -82,6 +82,8 @@ pub mod config;
 pub mod download;
 pub mod error;
 pub mod events;
+#[doc(hidden)]
+pub mod fuzz_api;
 pub mod http;
 pub mod metalink;
 pub mod optimization;

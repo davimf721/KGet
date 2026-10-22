@@ -105,17 +105,18 @@ pub fn sanitize_filename(name: &str) -> String {
             }
         })
         .collect();
-    let cleaned = cleaned.trim().trim_matches('.').trim();
-    let cleaned = if cleaned.is_empty() {
-        "download"
-    } else {
-        cleaned
-    };
+    // Truncate first, then trim: truncating last could leave a trailing dot
+    // or space, and trimming spaces and dots in one pass handles ". . a".
     let mut end = cleaned.len().min(255);
     while !cleaned.is_char_boundary(end) {
         end -= 1;
     }
-    cleaned[..end].to_string()
+    let cleaned = cleaned[..end].trim_matches(|c: char| c == '.' || c.is_whitespace());
+    if cleaned.is_empty() {
+        "download".to_string()
+    } else {
+        cleaned.to_string()
+    }
 }
 
 /// Expand a leading `~` / `~/` to the user's home directory.

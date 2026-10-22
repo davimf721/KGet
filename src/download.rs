@@ -40,6 +40,7 @@ use crate::{DownloadOptions, OverwritePolicy};
 use humansize::{DECIMAL, format_size};
 use mime::Mime;
 use reqwest::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
+use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use std::error::Error;
 use std::fs::File;
@@ -210,6 +211,29 @@ pub fn download_to_path(
     } else {
         0
     };
+    // Validators of the version the `.part` holds (from `<file>.kget`).
+    let mut validators: Option<SingleStreamState> = None;
+    if downloaded > 0 {
+        let state = SingleStreamState::load(&state_path_for(&pre_path));
+        match state {
+            // No state: a `.part` from an older version, resumed as is.
+            Ok(None) => {}
+            Ok(Some(s)) if s.url == target => {
+                if let Some(prefix) = s.trusted_prefix() {
+                    // Interrupted turbo download: the preallocated `.part`
+                    // has holes, only its completed prefix is usable.
+                    downloaded = downloaded.min(prefix);
+                    std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(part_path_for(&pre_path))
+                        .and_then(|f| f.set_len(downloaded))?;
+                }
+                validators = Some(s);
+            }
+            // State of another URL, or unreadable: never trust the `.part`.
+            _ => downloaded = 0,
+        }
+    }
     if downloaded > 0 {
         print(
             &format!("Resuming {} from byte {}", pre_path.display(), downloaded),
@@ -234,6 +258,10 @@ pub fn download_to_path(
         let mut req = http::apply_headers(client.get(target), &options.extra_headers);
         if downloaded > 0 {
             req = req.header(reqwest::header::RANGE, format!("bytes={downloaded}-"));
+            // If the file changed on the server it answers 200 instead of 206.
+            if let Some(v) = validators.as_ref().and_then(SingleStreamState::if_range) {
+                req = req.header(reqwest::header::IF_RANGE, v);
+            }
         }
 
         let response = match req.send() {
@@ -259,6 +287,31 @@ pub fn download_to_path(
         };
 
         let status = response.status();
+        let changed = downloaded > 0
+            && matches!(status.as_u16(), 206 | 416)
+            && validators.as_ref().is_some_and(|old| {
+                let mut now = SingleStreamState::from_response(target, &response, downloaded);
+                if status.as_u16() == 416 {
+                    // A 416 has no body: its Content-Length is not the size.
+                    now.total_size = response
+                        .headers()
+                        .get(reqwest::header::CONTENT_RANGE)
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(parse_content_range_total);
+                }
+                old.conflicts_with(&now)
+            });
+        if changed {
+            // The server ignored If-Range: never splice two versions.
+            print(
+                "The remote file changed since the partial download; restarting",
+                quiet_mode,
+            );
+            downloaded = 0;
+            session_start_bytes = 0;
+            validators = None;
+            continue;
+        }
         let append = match status.as_u16() {
             206 if downloaded > 0 => true,
             416 if downloaded > 0 => {
@@ -267,7 +320,8 @@ pub fn download_to_path(
                     .headers()
                     .get(reqwest::header::CONTENT_RANGE)
                     .and_then(|v| v.to_str().ok())
-                    .and_then(parse_content_range_total);
+                    .and_then(parse_content_range_total)
+                    .or(validators.as_ref().and_then(|v| v.total_size));
                 if total.is_none_or(|t| t == downloaded) {
                     if final_path.is_none() {
                         final_path = Some(pre_path.clone());
@@ -385,6 +439,10 @@ pub fn download_to_path(
         };
         let part_path = part_path_for(&dest_path);
         let expected_total = response.content_length().map(|l| l + downloaded);
+        let now = SingleStreamState::from_response(target, &response, downloaded)
+            .merged_with(validators.as_ref().filter(|_| append));
+        now.save(&state_path_for(&dest_path));
+        validators = Some(now);
 
         let bar = progress_bar.get_or_insert_with(|| {
             create_progress_bar(
@@ -414,19 +472,16 @@ pub fn download_to_path(
         let mut source = response;
         let mut buffer = vec![0u8; READ_BUF];
 
-        let copy_result: Result<(), std::io::Error> = (|| {
+        let copy_result: Result<(), CopyError> = (|| {
             loop {
                 if cancelled() {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Interrupted,
-                        "cancelled",
-                    ));
+                    return Err(CopyError::Cancelled);
                 }
-                let n = source.read(&mut buffer)?;
+                let n = source.read(&mut buffer).map_err(CopyError::Read)?;
                 if n == 0 {
                     return Ok(());
                 }
-                dest.write_all(&buffer[..n])?;
+                dest.write_all(&buffer[..n]).map_err(CopyError::Write)?;
                 downloaded += n as u64;
                 bar.set_position(downloaded);
 
@@ -457,9 +512,13 @@ pub fn download_to_path(
                 );
             }
         })();
-        let flushed = dest.flush();
+        // Flush even after a read error so `downloaded` matches the file.
+        let outcome = match dest.flush() {
+            Err(e) => Err(CopyError::Write(e)),
+            Ok(()) => copy_result,
+        };
 
-        match copy_result.and(flushed) {
+        match outcome {
             Ok(()) => {
                 if let Some(total) = expected_total
                     && downloaded < total
@@ -482,10 +541,23 @@ pub fn download_to_path(
                 }
                 break;
             }
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted && cancelled() => {
+            Err(CopyError::Cancelled) => {
                 return Err(Box::new(KgetError::Cancelled));
             }
-            Err(e) => {
+            Err(CopyError::Write(e)) => {
+                // Disk full, quota, permissions: retrying cannot help, and
+                // the buffered bytes that never reached the disk would make
+                // `downloaded` run ahead of the file (a hole on resume). What
+                // is on disk is a valid prefix, so `.part` stays resumable.
+                return Err(Box::new(KgetError::Io(std::io::Error::new(
+                    e.kind(),
+                    format!(
+                        "failed to write {}: {e}; partial data kept, run again with -c to resume",
+                        part_path.display()
+                    ),
+                ))));
+            }
+            Err(CopyError::Read(e)) => {
                 attempt += 1;
                 if attempt >= max_attempts {
                     return Err(format!(
@@ -525,6 +597,7 @@ pub fn download_to_path(
         )
     {
         let _ = std::fs::remove_file(&part_path);
+        let _ = std::fs::remove_file(state_path_for(&final_path));
         return Err(e);
     }
 
@@ -536,7 +609,139 @@ pub fn download_to_path(
             e
         )
     })?;
+    let _ = std::fs::remove_file(state_path_for(&final_path));
     Ok(final_path)
+}
+
+/// `<file>.kget`, the resume state saved next to `<file>.part`.
+pub(crate) fn state_path_for(final_path: &Path) -> PathBuf {
+    let mut name = final_path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_else(|| "download".into());
+    name.push(".kget");
+    final_path.with_file_name(name)
+}
+
+/// Validators of the remote file, saved as `<file>.kget` next to a
+/// simple-mode `.part` so a later resume can tell whether the file changed
+/// on the server. A turbo-mode state (with `chunks`) is understood too.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub(crate) struct SingleStreamState {
+    #[serde(default)]
+    pub(crate) url: String,
+    #[serde(default)]
+    pub(crate) total_size: Option<u64>,
+    #[serde(default)]
+    pub(crate) etag: Option<String>,
+    #[serde(default)]
+    pub(crate) last_modified: Option<String>,
+    /// Only in turbo-mode states, whose `.part` is preallocated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) chunks: Option<Vec<StateChunk>>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct StateChunk {
+    start: u64,
+    end: u64,
+    done: u64,
+}
+
+impl SingleStreamState {
+    /// `Ok(None)` when there is no state file, `Err` when it is unreadable.
+    fn load(path: &Path) -> Result<Option<Self>, ()> {
+        match std::fs::read(path) {
+            Ok(bytes) => Self::parse(&bytes).map(Some).ok_or(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(_) => Err(()),
+        }
+    }
+
+    pub(crate) fn parse(bytes: &[u8]) -> Option<Self> {
+        serde_json::from_slice(bytes).ok()
+    }
+
+    fn save(&self, path: &Path) {
+        // Best effort: without it a resume is merely unvalidated.
+        if let Ok(json) = serde_json::to_vec(self) {
+            let _ = crate::config::write_atomic(path, &json, false);
+        }
+    }
+
+    fn from_response(url: &str, resp: &reqwest::blocking::Response, offset: u64) -> Self {
+        let header = |name| {
+            resp.headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+        };
+        let total_size = header(reqwest::header::CONTENT_RANGE)
+            .as_deref()
+            .and_then(parse_content_range_total)
+            .or_else(|| resp.content_length().map(|l| l + offset));
+        Self {
+            url: url.to_string(),
+            total_size,
+            etag: header(reqwest::header::ETAG),
+            last_modified: header(reqwest::header::LAST_MODIFIED),
+            chunks: None,
+        }
+    }
+
+    /// Validator for `If-Range` (weak ETags are not allowed there).
+    fn if_range(&self) -> Option<&str> {
+        self.etag
+            .as_deref()
+            .filter(|e| !e.starts_with("W/"))
+            .or(self.last_modified.as_deref())
+    }
+
+    /// `true` when `other` describes a different version of the file.
+    pub(crate) fn conflicts_with(&self, other: &Self) -> bool {
+        fn differ<T: PartialEq>(a: &Option<T>, b: &Option<T>) -> bool {
+            matches!((a, b), (Some(a), Some(b)) if a != b)
+        }
+        differ(&self.etag, &other.etag)
+            || differ(&self.last_modified, &other.last_modified)
+            || differ(&self.total_size, &other.total_size)
+    }
+
+    /// Bytes of a turbo `.part` that are known to be written from offset 0
+    /// (`None` for a simple-mode state, where the file length is the truth).
+    pub(crate) fn trusted_prefix(&self) -> Option<u64> {
+        let chunks = self.chunks.as_ref()?;
+        let mut prefix = 0u64;
+        for c in chunks {
+            if c.start != prefix || c.end < c.start {
+                break;
+            }
+            let len = c.end - c.start;
+            let done = c.done.min(len);
+            prefix += done;
+            if done < len {
+                break;
+            }
+        }
+        Some(prefix)
+    }
+
+    /// Keep validators the new response did not repeat.
+    fn merged_with(mut self, old: Option<&Self>) -> Self {
+        if let Some(old) = old {
+            self.etag = self.etag.or_else(|| old.etag.clone());
+            self.last_modified = self.last_modified.or_else(|| old.last_modified.clone());
+            self.total_size = self.total_size.or(old.total_size);
+        }
+        self
+    }
+}
+
+/// Failure while copying the body to `.part`.
+enum CopyError {
+    Cancelled,
+    Read(std::io::Error),
+    Write(std::io::Error),
 }
 
 /// `<file>.part`, the temporary name used while a download is in progress.

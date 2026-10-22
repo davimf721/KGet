@@ -51,6 +51,32 @@ jobs:
           sudo apt-get install -y libxkbcommon-dev libgtk-3-dev libdbus-1-dev
           cargo check --features gui
 
+  fuzz:
+    name: Fuzz (smoke)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Build fuzz targets
+        run: cargo fuzz build
+      - name: Run each target for 30 s
+        run: |
+          for t in $(cargo fuzz list); do
+            mkdir -p "fuzz/corpus/$t"
+            cargo fuzz run "$t" "fuzz/corpus/$t" "fuzz/seeds/$t" -- -max_total_time=30 -max_len=4096
+          done
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
+
   macos-app:
     name: macOS app (SwiftPM)
     runs-on: macos-latest

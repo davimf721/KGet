@@ -1,0 +1,1 @@
+<metalink version="3.0"><files><file name="dir/ex.iso"><verification><hash type="sha512">AB</hash><pieces><hash type="sha1">cd</hash></pieces></verification><resources><url preference="100">http://fast/ex.iso</url></resources></file></files></metalink>

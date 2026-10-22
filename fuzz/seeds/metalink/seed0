@@ -1,0 +1,1 @@
+<?xml version="1.0"?><metalink xmlns="urn:ietf:params:xml:ns:metalink"><file name="a.bin"><size>42</size><hash type="sha-256">00ff</hash><url priority="2">http://b/a.bin</url><url priority="1">http://a/a.bin</url></file></metalink>

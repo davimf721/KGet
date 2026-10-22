@@ -383,7 +383,7 @@ fn discard_partial(dest: &Path) {
 }
 
 /// Remove characters that are unsafe in filenames across platforms.
-fn sanitise_filename(name: &str) -> String {
+pub(crate) fn sanitise_filename(name: &str) -> String {
     // Manifest names may contain directories ("dir/file"); keep only the file name.
     let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
     crate::utils::sanitize_filename(base)

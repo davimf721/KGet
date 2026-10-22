@@ -1,0 +1,1 @@
+{"proxy":{"enabled":true,"url":"127.0.0.1:8080","proxy_type":"Socks5"},"optimization":{"max_connections":0}}

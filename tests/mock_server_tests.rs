@@ -563,7 +563,7 @@ async fn test_advanced_download_parallel_ranges_write_expected_file() {
 }
 
 #[tokio::test]
-async fn test_advanced_download_rejects_range_ignored_by_server() {
+async fn test_advanced_download_falls_back_when_server_ignores_range() {
     use kget::{AdvancedDownloader, Optimizer, ProxyConfig};
 
     let mock_server = MockServer::start().await;
@@ -593,7 +593,7 @@ async fn test_advanced_download_rejects_range_ignored_by_server() {
 
     let url = format!("{}/ignored-range.bin", mock_server.uri());
     let output_path_str = output_path.to_string_lossy().to_string();
-    let err = tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || {
         let downloader = AdvancedDownloader::new(
             url,
             output_path_str,
@@ -602,11 +602,15 @@ async fn test_advanced_download_rejects_range_ignored_by_server() {
             Optimizer::new(),
         )
         .unwrap();
-        downloader.download().unwrap_err().to_string()
+        downloader.download().unwrap();
     })
     .await
     .unwrap();
-    assert!(err.contains("ignored the range request"));
+    // The range was ignored: restarted as one stream, never spliced.
+    assert_eq!(
+        std::fs::read(&output_path).unwrap(),
+        vec![7u8; 5 * 1024 * 1024]
+    );
 }
 
 // ============================================================================

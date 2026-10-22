@@ -40,6 +40,16 @@ impl ChecksumAlgorithm {
         }
     }
 
+    /// Length of a hex digest of this algorithm.
+    pub fn hex_len(&self) -> usize {
+        match self {
+            ChecksumAlgorithm::Md5 => 32,
+            ChecksumAlgorithm::Sha1 => 40,
+            ChecksumAlgorithm::Sha256 | ChecksumAlgorithm::Blake3 => 64,
+            ChecksumAlgorithm::Sha512 => 128,
+        }
+    }
+
     /// Parse an algorithm name (`sha256`, `sha-256`, `SHA512`, `md5`, `blake3`…).
     pub fn parse(name: &str) -> Option<Self> {
         match name.trim().to_ascii_lowercase().replace('-', "").as_str() {
@@ -178,6 +188,7 @@ pub fn parse_sidecar(content: &str, filename: &str) -> Option<(ChecksumAlgorithm
             let hash = hash_part.trim();
             let file = file_part.trim().trim_start_matches('*').trim();
             if matches_filename(file, filename)
+                && is_hex(hash)
                 && let Some(algo) = ChecksumAlgorithm::from_hex_len(hash)
             {
                 return Some((algo, hash.to_lowercase()));
@@ -188,7 +199,10 @@ pub fn parse_sidecar(content: &str, filename: &str) -> Option<(ChecksumAlgorithm
         if let Some(eq_pos) = line.find(" = ") {
             let hash = line[eq_pos + 3..].trim().to_lowercase();
             let prefix = &line[..eq_pos];
-            if let (Some(lp), Some(rp)) = (prefix.find('('), prefix.rfind(')')) {
+            // `rp > lp`: a line like ") (x = …" used to panic on slicing.
+            if let (Some(lp), Some(rp)) = (prefix.find('('), prefix.rfind(')'))
+                && rp > lp
+            {
                 let file = prefix[lp + 1..rp].trim();
                 if matches_filename(file, filename) {
                     let algo_str = prefix[..lp].trim().to_uppercase();
@@ -200,7 +214,10 @@ pub fn parse_sidecar(content: &str, filename: &str) -> Option<(ChecksumAlgorithm
                         "BLAKE3" => Some(ChecksumAlgorithm::Blake3),
                         _ => None,
                     };
-                    if let Some(algo) = algo {
+                    if let Some(algo) = algo
+                        && is_hex(&hash)
+                        && hash.len() == algo.hex_len()
+                    {
                         return Some((algo, hash));
                     }
                 }
@@ -208,6 +225,10 @@ pub fn parse_sidecar(content: &str, filename: &str) -> Option<(ChecksumAlgorithm
         }
     }
     None
+}
+
+fn is_hex(s: &str) -> bool {
+    s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// Match file names flexibly — either exact or suffix match.
