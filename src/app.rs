@@ -59,6 +59,11 @@ pub enum WorkerToGuiMessage {
     },
     /// Human-readable status message.
     StatusUpdate { id: JobId, text: String },
+    /// Swarm statistics of a torrent (peers, upload speed, ratio, seeding).
+    TorrentStats {
+        id: JobId,
+        stats: crate::events::TorrentStats,
+    },
     /// The job finished; `path` is where the data was saved.
     Completed { id: JobId, path: String },
     /// The job failed.
@@ -73,6 +78,7 @@ impl WorkerToGuiMessage {
         match self {
             WorkerToGuiMessage::Progress { id, .. }
             | WorkerToGuiMessage::StatusUpdate { id, .. }
+            | WorkerToGuiMessage::TorrentStats { id, .. }
             | WorkerToGuiMessage::Completed { id, .. }
             | WorkerToGuiMessage::Error { id, .. }
             | WorkerToGuiMessage::Cancelled { id } => *id,
@@ -87,6 +93,11 @@ impl fmt::Display for WorkerToGuiMessage {
                 write!(f, "[{id}] Progress({fraction:.2})")
             }
             WorkerToGuiMessage::StatusUpdate { id, text } => write!(f, "[{id}] Status: {text}"),
+            WorkerToGuiMessage::TorrentStats { id, stats } => write!(
+                f,
+                "[{id}] Torrent: {} peers, ratio {:.2}",
+                stats.peers, stats.ratio
+            ),
             WorkerToGuiMessage::Completed { id, path } => write!(f, "[{id}] Completed: {path}"),
             WorkerToGuiMessage::Error { id, message } => write!(f, "[{id}] Error: {message}"),
             WorkerToGuiMessage::Cancelled { id } => write!(f, "[{id}] Cancelled"),
@@ -256,6 +267,9 @@ fn translate(
                 JsonEvent::Saved { path, .. } => {
                     tracked.saved = Some(path);
                     None
+                }
+                JsonEvent::TorrentStats(stats) => {
+                    Some(WorkerToGuiMessage::TorrentStats { id, stats: *stats })
                 }
                 _ => None,
             };

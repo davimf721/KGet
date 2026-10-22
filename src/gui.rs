@@ -173,6 +173,8 @@ pub struct DownloadItem {
     pub expected_sha256: Option<String>,
     pub connections: u8,
     pub start_time: Option<Instant>,
+    /// Torrent swarm summary ("12 peers · ↑ 40 KiB/s · ratio 0.40")
+    pub torrent_info: String,
 }
 
 impl DownloadItem {
@@ -222,6 +224,7 @@ impl DownloadItem {
             expected_sha256,
             connections: if is_advanced { 4 } else { 1 },
             start_time: None,
+            torrent_info: String::new(),
         }
     }
 }
@@ -406,6 +409,18 @@ impl KGetGui {
                         download.total_size = size_str;
                     }
                     self.status_text = text;
+                }
+                WorkerToGuiMessage::TorrentStats { stats, .. } => {
+                    let mut info = format!(
+                        "{} peers · ↑ {}/s · ratio {:.2}",
+                        stats.peers,
+                        format_bytes(stats.upload_bps),
+                        stats.ratio
+                    );
+                    if stats.seeding {
+                        info.push_str(" · seeding");
+                    }
+                    download.torrent_info = info;
                 }
                 WorkerToGuiMessage::Completed { path, .. } => {
                     download.status = DownloadStatus::Completed;
@@ -1499,6 +1514,14 @@ impl KGetGui {
                                         ))
                                         .size(11.0)
                                         .color(c.warning),
+                                    );
+                                    ui.add_space(10.0);
+                                }
+                                if download.is_torrent && !download.torrent_info.is_empty() {
+                                    ui.label(
+                                        egui::RichText::new(&download.torrent_info)
+                                            .size(11.0)
+                                            .color(c.success),
                                     );
                                     ui.add_space(10.0);
                                 }
