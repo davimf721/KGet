@@ -46,13 +46,16 @@ reqwest = { version = "0.13.2", default-features = false, features = ["blocking"
 rustyline = "17.0.2"
 urlencoding = "2.1"
 roxmltree = "0.20"
-ctrlc = "3.4"
+# `termination`: SIGTERM/SIGHUP also stop the daemon (and CLI downloads) cleanly
+ctrlc = { version = "3.4", features = ["termination"] }
 shlex = "1.3"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # Credential store API; the platform stores below are enabled by the `keychain` feature
 keyring-core = "1.0.1"
 rpassword = "7.5.4"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
+# OS randomness for the daemon's loopback TCP auth token
+getrandom = "0.3"
 
 [features]
 default = ["keychain"]

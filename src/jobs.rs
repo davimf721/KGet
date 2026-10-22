@@ -358,6 +358,48 @@ impl JobManager {
         id
     }
 
+    /// Re-create a job saved by an earlier process (the daemon's persistent
+    /// queue), keeping its id. A `Queued`, `Running` or `Verifying` snapshot
+    /// is queued again and continues from its partial data; any other state
+    /// is restored as is. Ids handed out later are greater than `info.id`.
+    ///
+    /// Returns `false` (and changes nothing) when the id is already in use.
+    pub fn restore(&self, mut info: JobInfo) -> bool {
+        let id = info.id;
+        let queued = matches!(
+            info.state,
+            DownloadState::Queued | DownloadState::Running | DownloadState::Verifying
+        );
+        if queued {
+            info.state = DownloadState::Queued;
+            info.job.resume = true;
+            info.finished_at = None;
+            info.error = None;
+        }
+        {
+            let mut st = self.inner.lock();
+            if st.jobs.contains_key(&id) {
+                return false;
+            }
+            self.inner.next_id.fetch_max(id + 1, Ordering::Relaxed);
+            st.jobs.insert(
+                id,
+                Entry {
+                    info,
+                    cancel: Arc::new(AtomicBool::new(false)),
+                    stop: None,
+                },
+            );
+            if queued {
+                st.queue.push_back(id);
+                self.inner
+                    .broadcast(state_event(id, DownloadState::Queued, None));
+            }
+        }
+        self.inner.schedule();
+        true
+    }
+
     /// Cancel a queued or running job. Partial data is kept, so the job can
     /// be [resumed](Self::resume) later.
     pub fn cancel(&self, id: JobId) -> Result<(), JobError> {

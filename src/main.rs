@@ -20,6 +20,8 @@ mod gui;
 
 use kget::cli::{self, ConfigOverrides, HistoryFilter};
 use kget::config::Config;
+use kget::daemon::cli as daemon_cli;
+use kget::daemon::protocol::SubmitParams;
 use kget::protocol::Protocol;
 use kget::runner::{self, DownloadJob, Reporter, RunContext};
 use kget::utils;
@@ -35,6 +37,13 @@ struct Args {
     /// Show version information
     #[arg(short = 'v', long = "version", action = clap::ArgAction::Version)]
     version: (),
+
+    #[command(subcommand)]
+    command: Option<Command>,
+
+    /// Run the download through the background daemon (started if needed)
+    #[arg(long = "via-daemon")]
+    via_daemon: bool,
 
     /// URL file for the download
     #[arg(default_value_t = String::new())]
@@ -250,6 +259,305 @@ struct Args {
     quality: String,
 }
 
+/// Subcommands (`kget <url>` keeps working without one).
+#[derive(clap::Subcommand, Debug)]
+enum Command {
+    /// Run the background download daemon (`daemon status`, `daemon stop`)
+    Daemon(DaemonArgs),
+    /// Manage the daemon's download queue
+    Queue {
+        #[command(subcommand)]
+        action: QueueAction,
+    },
+    /// Serve the Model Context Protocol on stdin/stdout for AI agents
+    Mcp(McpArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct DaemonArgs {
+    #[command(subcommand)]
+    action: Option<DaemonAction>,
+
+    /// Stay in the foreground (log to stderr too) instead of detaching
+    #[arg(long = "foreground")]
+    foreground: bool,
+
+    /// Directory downloads are saved in (default: daemon.download_dir, else ~/Downloads)
+    #[arg(long = "download-dir")]
+    download_dir: Option<PathBuf>,
+
+    /// Let clients write outside the download directory
+    #[arg(long = "allow-outside-download-dir")]
+    allow_outside: bool,
+
+    /// Number of downloads running at the same time
+    #[arg(short = 'j', long = "max-concurrent")]
+    max_concurrent: Option<usize>,
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum DaemonAction {
+    /// Show whether the daemon is running (exit code 3 if not)
+    Status {
+        /// Print JSON
+        #[arg(long = "json")]
+        json: bool,
+    },
+    /// Stop the daemon; unfinished jobs resume on the next start
+    Stop,
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum QueueAction {
+    /// Add a download to the queue (starts the daemon if needed)
+    Add(Box<QueueAddArgs>),
+    /// List jobs
+    List {
+        /// Print JSON
+        #[arg(long = "json")]
+        json: bool,
+    },
+    /// Show one job
+    Status {
+        /// Job id
+        id: u64,
+        /// Print JSON
+        #[arg(long = "json")]
+        json: bool,
+    },
+    /// Cancel a job (partial data is kept)
+    Cancel {
+        /// Job id
+        id: u64,
+    },
+    /// Pause a job
+    Pause {
+        /// Job id
+        id: u64,
+    },
+    /// Resume a paused, cancelled or failed job
+    Resume {
+        /// Job id
+        id: u64,
+    },
+    /// Remove a finished job from the queue
+    #[command(alias = "remove")]
+    Rm {
+        /// Job id
+        id: u64,
+    },
+    /// Print job events as they happen (until the given jobs finish)
+    Watch {
+        /// Job ids (none = every job, until Ctrl+C)
+        ids: Vec<u64>,
+        /// Print JSON lines
+        #[arg(long = "json")]
+        json: bool,
+    },
+}
+
+#[derive(clap::Args, Debug)]
+struct QueueAddArgs {
+    /// URL, magnet link or .torrent/.meta4 file
+    url: String,
+    /// Output file or directory (must be inside the daemon's download directory)
+    #[arg(short = 'O', long = "output")]
+    output: Option<String>,
+    /// Parallel, resumable HTTP download
+    #[arg(short = 'a', long = "advanced")]
+    advanced: bool,
+    /// Expected SHA256 hash
+    #[arg(long = "sha256")]
+    sha256: Option<String>,
+    /// Expected checksum as <algorithm>:<hex>
+    #[arg(long = "checksum")]
+    checksum: Option<String>,
+    /// URL of a checksum file
+    #[arg(long = "checksum-url")]
+    checksum_url: Option<String>,
+    /// Extra HTTP header (repeatable)
+    #[arg(short = 'H', long = "header")]
+    header: Vec<String>,
+    /// Continue a partially downloaded file
+    #[arg(short = 'c', long = "continue")]
+    continue_download: bool,
+    /// Skip the download when the file exists
+    #[arg(long = "no-clobber", conflicts_with = "rename")]
+    no_clobber: bool,
+    /// Save under a free name ("file (1).zip") when the file exists
+    #[arg(long = "rename")]
+    rename: bool,
+    /// Maximum attempts per request
+    #[arg(long = "retries", default_value_t = kget::http::DEFAULT_RETRIES)]
+    retries: u32,
+    /// I/O timeout in seconds
+    #[arg(long = "timeout", default_value_t = kget::http::DEFAULT_TIMEOUT_SECS)]
+    timeout: u64,
+    /// Extract the archive after downloading
+    #[arg(long = "extract")]
+    extract: bool,
+    /// Video quality for yt-dlp downloads
+    #[arg(long = "quality", default_value = "best")]
+    quality: String,
+    /// Force FTP
+    #[arg(long = "ftp")]
+    ftp: bool,
+    /// Force SFTP
+    #[arg(long = "sftp")]
+    sftp: bool,
+    /// Force torrent
+    #[arg(short = 't', long = "torrent")]
+    torrent: bool,
+    /// Force WebDAV
+    #[arg(long = "webdav")]
+    webdav: bool,
+    /// Force yt-dlp
+    #[arg(long = "ytdlp")]
+    ytdlp: bool,
+    /// Force Metalink
+    #[arg(long = "metalink")]
+    metalink: bool,
+    /// Wait for the download to finish, showing progress
+    #[arg(short = 'w', long = "wait")]
+    wait: bool,
+    /// Print JSON
+    #[arg(long = "json")]
+    json: bool,
+    /// Fail instead of starting the daemon when it is not running
+    #[arg(long = "no-start")]
+    no_start: bool,
+}
+
+impl QueueAddArgs {
+    fn params(&self) -> Result<SubmitParams, BoxError> {
+        let mut job = DownloadJob::new(absolute_source(&self.url));
+        job.output = self.output.clone();
+        job.protocol = if self.ytdlp {
+            Some(Protocol::Video)
+        } else if self.webdav {
+            Some(Protocol::WebDav)
+        } else if self.metalink {
+            Some(Protocol::Metalink)
+        } else if self.ftp {
+            Some(Protocol::Ftp)
+        } else if self.sftp {
+            Some(Protocol::Sftp)
+        } else if self.torrent {
+            Some(Protocol::Torrent)
+        } else {
+            None
+        };
+        job.advanced = self.advanced;
+        job.sha256 = self.sha256.clone();
+        job.checksum = match self.checksum.as_deref() {
+            Some(spec) => Some(runner::parse_checksum_spec(spec)?),
+            None => None,
+        };
+        job.checksum_url = self.checksum_url.clone();
+        job.headers = runner::parse_extra_headers(&self.header);
+        job.quality = VideoQuality::parse(&self.quality);
+        job.resume = self.continue_download;
+        job.overwrite = if self.no_clobber {
+            OverwritePolicy::Skip
+        } else if self.rename {
+            OverwritePolicy::Rename
+        } else {
+            OverwritePolicy::Overwrite
+        };
+        job.retries = self.retries.max(1);
+        job.timeout = self.timeout;
+        job.extract = self.extract;
+        Ok(SubmitParams::from_job(&job, &std::env::current_dir()?))
+    }
+}
+
+#[derive(clap::Args, Debug)]
+struct McpArgs {
+    /// Directory the agent may download into (default: daemon.download_dir, else ~/Downloads)
+    #[arg(long = "root")]
+    root: Option<PathBuf>,
+    /// Never use the daemon; run downloads inside this process
+    #[arg(long = "no-daemon", conflicts_with = "start_daemon")]
+    no_daemon: bool,
+    /// Start the daemon if it is not running, and always use it
+    #[arg(long = "start-daemon")]
+    start_daemon: bool,
+}
+
+/// A local `.torrent` / `.meta4` path made absolute (the daemon has its own
+/// working directory); URLs are returned unchanged.
+fn absolute_source(url: &str) -> String {
+    let p = std::path::Path::new(url);
+    if !url.contains("://")
+        && !url.starts_with("magnet:")
+        && p.is_relative()
+        && p.exists()
+        && let Ok(abs) = std::path::absolute(p)
+    {
+        return abs.to_string_lossy().into_owned();
+    }
+    url.to_string()
+}
+
+/// `kget daemon|queue|mcp …`.
+fn run_command(cmd: &Command) -> Result<i32, BoxError> {
+    match cmd {
+        Command::Daemon(d) => match &d.action {
+            Some(DaemonAction::Status { json }) => daemon_cli::status(*json),
+            Some(DaemonAction::Stop) => daemon_cli::stop(),
+            None if d.foreground => {
+                let options = kget::daemon::DaemonOptions {
+                    download_dir: d.download_dir.clone(),
+                    allow_outside_download_dir: d.allow_outside.then_some(true),
+                    max_concurrent: d.max_concurrent,
+                    echo_log: true,
+                    ..Default::default()
+                };
+                kget::daemon::run(options)?;
+                Ok(0)
+            }
+            None => {
+                let mut extra = Vec::new();
+                if let Some(dir) = &d.download_dir {
+                    extra.push("--download-dir".to_string());
+                    extra.push(std::path::absolute(dir)?.to_string_lossy().into_owned());
+                }
+                if d.allow_outside {
+                    extra.push("--allow-outside-download-dir".to_string());
+                }
+                if let Some(n) = d.max_concurrent {
+                    extra.push(format!("--max-concurrent={n}"));
+                }
+                daemon_cli::start_background(&extra)
+            }
+        },
+        Command::Queue { action } => match action {
+            QueueAction::Add(a) => daemon_cli::add(&a.params()?, a.wait, a.json, !a.no_start),
+            QueueAction::List { json } => daemon_cli::list(*json),
+            QueueAction::Status { id, json } => daemon_cli::job_status(*id, *json),
+            QueueAction::Cancel { id } => daemon_cli::job_action("cancel", *id, false),
+            QueueAction::Pause { id } => daemon_cli::job_action("pause", *id, false),
+            QueueAction::Resume { id } => daemon_cli::job_action("resume", *id, false),
+            QueueAction::Rm { id } => daemon_cli::job_action("remove", *id, false),
+            QueueAction::Watch { ids, json } => daemon_cli::watch(ids, *json),
+        },
+        Command::Mcp(m) => {
+            let mode = if m.no_daemon {
+                kget::mcp::BackendMode::InProcess
+            } else if m.start_daemon {
+                kget::mcp::BackendMode::Daemon
+            } else {
+                kget::mcp::BackendMode::Auto
+            };
+            kget::mcp::serve_stdio(kget::mcp::McpOptions {
+                root: m.root.clone(),
+                mode,
+            })?;
+            Ok(0)
+        }
+    }
+}
+
 impl Args {
     /// Protocol explicitly requested with a flag.
     fn forced_protocol(&self) -> Option<Protocol> {
@@ -364,6 +672,9 @@ fn main() {
 
 fn real_main() -> Result<i32, BoxError> {
     let args = Args::parse();
+    if let Some(cmd) = &args.command {
+        return run_command(cmd);
+    }
     let mut config = Config::load()?;
 
     if args.doctor {
@@ -446,6 +757,16 @@ fn run_cli(args: &Args, config: Config) -> Result<i32, BoxError> {
     ctx.credential_prompts = true;
 
     let job = args.job()?;
+
+    if args.via_daemon && args.batch.is_none() {
+        if let Some(ref at_time) = args.at {
+            runner::wait_until(at_time, args.quiet)?;
+        }
+        let mut job = job;
+        job.url = absolute_source(&job.url);
+        let params = SubmitParams::from_job(&job, &std::env::current_dir()?);
+        return daemon_cli::download_via_daemon(&params, args.quiet || args.jsonl);
+    }
 
     // Scheduled start (applies to both batch and single-URL)
     if let Some(ref at_time) = args.at {

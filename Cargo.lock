@@ -18,6 +18,7 @@ dependencies = [
  "egui",
  "egui_extras",
  "fs2",
+ "getrandom 0.3.3",
  "hex 0.4.3",
  "humansize",
  "image",
