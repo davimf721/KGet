@@ -1,7 +1,8 @@
 //! Protocol detection from a URL or path.
 //!
 //! Every frontend (CLI, interactive mode, GUI worker) uses [`detect`] so a
-//! `ftp://`, `sftp://`, `webdav://`, magnet, `.torrent`, Metalink or video URL
+//! `ftp://`, `sftp://`, `webdav://`, `hf://`, `ollama://`, magnet, `.torrent`,
+//! Metalink or video URL
 //! is routed to the right downloader without extra flags.
 //!
 //! ```rust
@@ -9,6 +10,8 @@
 //!
 //! assert_eq!(detect("ftp://ftp.gnu.org/gnu/hello.tar.gz"), Protocol::Ftp);
 //! assert_eq!(detect("magnet:?xt=urn:btih:abc"), Protocol::Torrent);
+//! assert_eq!(detect("hf://org/repo"), Protocol::HuggingFace);
+//! assert_eq!(detect("ollama://llama3.2:3b"), Protocol::Ollama);
 //! assert_eq!(detect("https://example.com/file.zip"), Protocol::Http);
 //! ```
 
@@ -34,6 +37,11 @@ pub enum Protocol {
     Metalink,
     /// Video platform handled by yt-dlp
     Video,
+    /// Hugging Face Hub (`hf://`, `https://huggingface.co/…/resolve/…`)
+    #[serde(rename = "hf")]
+    HuggingFace,
+    /// Ollama registry (`ollama://`)
+    Ollama,
 }
 
 impl Protocol {
@@ -47,6 +55,8 @@ impl Protocol {
             Protocol::Torrent => "torrent",
             Protocol::Metalink => "metalink",
             Protocol::Video => "video",
+            Protocol::HuggingFace => "hf",
+            Protocol::Ollama => "ollama",
         }
     }
 }
@@ -61,6 +71,12 @@ impl fmt::Display for Protocol {
 pub fn detect(url: &str) -> Protocol {
     let lower = url.trim().to_ascii_lowercase();
     let path_part = lower.split(['?', '#']).next().unwrap_or(&lower);
+    if crate::hf::is_hf_url(url) {
+        return Protocol::HuggingFace;
+    }
+    if crate::ollama::is_ollama_url(&lower) {
+        return Protocol::Ollama;
+    }
     if lower.starts_with("magnet:?") || path_part.ends_with(".torrent") {
         return Protocol::Torrent;
     }

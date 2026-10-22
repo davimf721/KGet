@@ -775,7 +775,8 @@ credentials delete <target>      Remove a saved password
 credentials status               Which keychain is used
 
 <target> is scheme://user@host[:port] (sftp, ftp, webdav, webdavs, or a proxy
-URL such as http://user@proxy:3128), or ssh-key:///path/to/key for a key passphrase.";
+URL such as http://user@proxy:3128), ssh-key:///path/to/key for a key passphrase,
+or hf://token@huggingface.co for a Hugging Face access token.";
 
 /// Run a credential management command (`list`, `add`, `delete`, `status`)
 /// against the system keychain and return the text to print.

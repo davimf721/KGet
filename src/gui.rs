@@ -632,10 +632,13 @@ impl KGetGui {
         match self.validate_input() {
             Ok(()) => {
                 self.validation_error = None;
-                // Torrents, Metalink and videos save into the folder itself.
+                // Torrents, Metalink, videos and AI models save into the folder itself.
                 let is_magnet = matches!(
                     kget::protocol::detect(&self.url),
-                    kget::Protocol::Torrent | kget::Protocol::Metalink
+                    kget::Protocol::Torrent
+                        | kget::Protocol::Metalink
+                        | kget::Protocol::HuggingFace
+                        | kget::Protocol::Ollama
                 );
                 let expected_sha256 = self.expected_sha256.trim().to_string();
                 let expected_sha256 = if expected_sha256.is_empty() {

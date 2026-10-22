@@ -85,6 +85,7 @@ pub mod credentials;
 pub mod download;
 pub mod error;
 pub mod events;
+pub mod fetch;
 pub mod http;
 pub mod jobs;
 pub mod metalink;
@@ -97,6 +98,8 @@ pub mod utils;
 
 // Protocol modules
 pub mod ftp;
+pub mod hf;
+pub mod ollama;
 pub mod sftp;
 pub mod torrent;
 pub mod webdav;

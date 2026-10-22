@@ -95,6 +95,17 @@ pub struct DownloadJob {
     /// Save the passwords this download used (from the URL or a prompt) in
     /// the system keychain (`--save-credentials`)
     pub save_credentials: bool,
+    /// Only download files matching one of these globs (`hf://`; `--include`)
+    pub include: Vec<String>,
+    /// Skip files matching any of these globs (`hf://`; `--exclude`)
+    pub exclude: Vec<String>,
+    /// Branch, tag or commit (`hf://`; `--revision`)
+    pub revision: Option<String>,
+    /// Write into the Hugging Face hub cache layout (`--hf-cache`)
+    pub hf_cache: bool,
+    /// Files downloaded at the same time by multi-file sources
+    /// (`hf://`, `ollama://`; `-j`)
+    pub parallel_files: usize,
 }
 
 impl Default for DownloadJob {
@@ -123,6 +134,11 @@ impl DownloadJob {
             timeout: crate::http::DEFAULT_TIMEOUT_SECS,
             extract: false,
             save_credentials: false,
+            include: Vec::new(),
+            exclude: Vec::new(),
+            revision: None,
+            hf_cache: false,
+            parallel_files: 4,
         }
     }
 
@@ -277,7 +293,12 @@ pub fn jsonl_stdout_sink(tag_url: Option<String>) -> EventSink {
 pub fn is_cancel_aware(proto: Protocol) -> bool {
     matches!(
         proto,
-        Protocol::Http | Protocol::WebDav | Protocol::Torrent | Protocol::Video
+        Protocol::Http
+            | Protocol::WebDav
+            | Protocol::Torrent
+            | Protocol::Video
+            | Protocol::HuggingFace
+            | Protocol::Ollama
     )
 }
 
@@ -319,7 +340,9 @@ pub fn run_job(
     let creds = Arc::new(credential_resolver(job, ctx, reporter));
     let started = std::time::Instant::now();
     let result = dispatch(job, ctx, reporter, proto, &creds).and_then(|outcome| {
-        if let Outcome::Saved(Some(path)) = &outcome {
+        if let Outcome::Saved(Some(path)) = &outcome
+            && path.is_file()
+        {
             post_verify(job, ctx, reporter, path)?;
         }
         Ok(outcome)
@@ -344,7 +367,11 @@ pub fn run_job(
                         eprintln!("Warning: auto-extract: {e}");
                     }
                 }
-                let bytes = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+                let bytes = if p.is_dir() {
+                    crate::fetch::dir_size(p)
+                } else {
+                    std::fs::metadata(p).map(|m| m.len()).unwrap_or(0)
+                };
                 reporter.emit(&JsonEvent::Saved {
                     path: p.to_string_lossy().into_owned(),
                     bytes,
@@ -442,6 +469,10 @@ fn record_history(
         Ok(Outcome::Saved(path)) => {
             if let Some(p) = path {
                 entry.set_saved_file(p);
+                // Multi-file downloads (hf://, ollama://) save a directory.
+                if p.is_dir() {
+                    entry.bytes_total = Some(crate::fetch::dir_size(p));
+                }
             }
             (EntryStatus::Completed, None)
         }
@@ -582,6 +613,30 @@ fn dispatch(
     let status = event_status(reporter);
 
     match proto {
+        Protocol::HuggingFace => {
+            let opts = crate::hf::HfOptions {
+                revision: job.revision.clone(),
+                include: job.include.clone(),
+                exclude: job.exclude.clone(),
+                output: job.output.clone(),
+                hf_cache: job.hf_cache,
+                expected_sha256: job.sha256.clone(),
+                ..Default::default()
+            };
+            let done = crate::hf::download(&job.url, &opts, &transfer_options(job, ctx, reporter))?;
+            report_model(&done, quiet);
+            Ok(Outcome::Saved(Some(done.path)))
+        }
+        Protocol::Ollama => {
+            let opts = crate::ollama::OllamaOptions {
+                output: job.output.clone(),
+                ..Default::default()
+            };
+            let done =
+                crate::ollama::download(&job.url, &opts, &transfer_options(job, ctx, reporter))?;
+            report_model(&done, quiet);
+            Ok(Outcome::Saved(Some(done.path)))
+        }
         Protocol::Video => {
             if ytdlp_binary().is_none() {
                 let msg = crate::ytdlp::ytdlp_not_found_message();
@@ -884,6 +939,37 @@ fn dispatch(
     }
 }
 
+/// Transfer settings of a multi-file job (`hf://`, `ollama://`).
+fn transfer_options(
+    job: &DownloadJob,
+    ctx: &RunContext,
+    reporter: &Reporter,
+) -> crate::fetch::TransferOptions {
+    crate::fetch::TransferOptions {
+        proxy: ctx.config.proxy.clone(),
+        optimizer: Optimizer::from_config(ctx.config.optimization.clone()),
+        cancel: ctx.cancel.clone(),
+        retries: job.retries,
+        timeout: job.timeout,
+        headers: job.headers.clone(),
+        parallel_files: job.parallel_files,
+        quiet: reporter.quiet || reporter.jsonl(),
+        events: reporter.events.clone(),
+    }
+}
+
+fn report_model(done: &crate::fetch::ModelDownload, quiet: bool) {
+    if !quiet {
+        println!(
+            "Downloaded {} file(s) ({} already present), {} → {}",
+            done.files,
+            done.skipped,
+            humansize::format_size(done.bytes, humansize::BINARY),
+            done.path.display()
+        );
+    }
+}
+
 fn absolute(p: &str) -> PathBuf {
     let p = PathBuf::from(p);
     if p.is_absolute() {
@@ -916,7 +1002,19 @@ pub fn batch_jobs(urls: &[String], output_dir: &Path, template: &DownloadJob) ->
             let mut job = template.clone();
             job.url = url.clone();
             let proto = job.protocol();
+            if proto == Protocol::Ollama || (proto == Protocol::HuggingFace && template.hf_cache) {
+                // Into the Ollama models directory / hub cache, where tools find it.
+                job.output = None;
+                return job;
+            }
             job.output = Some(match proto {
+                // A whole repository or folder gets its own sub-directory.
+                Protocol::HuggingFace => match crate::hf::HfRef::parse(url) {
+                    Ok(r) if r.path.is_none() => {
+                        output_dir.join(r.name()).to_string_lossy().into_owned()
+                    }
+                    _ => output_dir.to_string_lossy().into_owned(),
+                },
                 Protocol::Http | Protocol::WebDav | Protocol::Ftp | Protocol::Sftp => {
                     let name = utils::get_filename_from_url_or_default(url, "download");
                     let path = if template.overwrite == OverwritePolicy::Overwrite {

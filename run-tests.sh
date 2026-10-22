@@ -57,6 +57,7 @@ run_test "cli_tests" "cargo test --test cli_tests"
 echo ""
 echo -e "${BLUE}==> Running Mock Server Integration Tests${NC}"
 run_test "mock_server_tests" "cargo test --test mock_server_tests"
+run_test "model_tests" "cargo test --test model_tests --test model_env_tests"
 
 # ============================================================================
 # 4. Torrent Tests

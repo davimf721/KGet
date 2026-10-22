@@ -93,6 +93,10 @@ const DOWNLOAD_FLAGS: &[&str] = &[
     "--torrent",
     "--metalink",
     "--save-credentials",
+    "--include",
+    "--exclude",
+    "--revision",
+    "--hf-cache",
 ];
 
 const CONFIG_KEYS: &[&str] = &[
@@ -215,6 +219,10 @@ struct DownloadArgs {
     at: Option<String>,
     jobs: usize,
     save_credentials: bool,
+    include: Vec<String>,
+    exclude: Vec<String>,
+    revision: Option<String>,
+    hf_cache: bool,
 }
 
 fn take_value<'a>(parts: &[&'a str], i: &mut usize, flag: &str) -> Result<&'a str, String> {
@@ -248,6 +256,10 @@ fn parse_download_args(parts: &[&str]) -> Result<DownloadArgs, String> {
             "--no-clobber" => args.no_clobber = true,
             "--extract" => args.extract = true,
             "--save-credentials" => args.save_credentials = true,
+            "--hf-cache" => args.hf_cache = true,
+            "--include" => args.include.push(take_value(parts, &mut i, flag)?.into()),
+            "--exclude" => args.exclude.push(take_value(parts, &mut i, flag)?.into()),
+            "--revision" => args.revision = Some(take_value(parts, &mut i, flag)?.into()),
             "--ftp" => args.forced = Some(Protocol::Ftp),
             "--sftp" => args.forced = Some(Protocol::Sftp),
             "--webdav" => args.forced = Some(Protocol::WebDav),
@@ -330,6 +342,8 @@ fn build_job(s: &Session, a: &DownloadArgs, url: &str) -> Result<DownloadJob, Bo
     let mut job = DownloadJob::new(url);
     job.output = match &a.output {
         Some(o) => Some(session_path(s, o)),
+        // ollama:// goes to the Ollama models directory unless -o is given.
+        None if protocol::detect(url) == Protocol::Ollama => None,
         None => s.dir.clone().map(|d| format!("{d}/")),
     };
     job.advanced = a.advanced.unwrap_or(s.turbo);
@@ -352,6 +366,11 @@ fn build_job(s: &Session, a: &DownloadArgs, url: &str) -> Result<DownloadJob, Bo
     job.timeout = a.timeout.unwrap_or(s.timeout);
     job.extract = a.extract;
     job.save_credentials = a.save_credentials;
+    job.include = a.include.clone();
+    job.exclude = a.exclude.clone();
+    job.revision = a.revision.clone();
+    job.hf_cache = a.hf_cache;
+    job.parallel_files = a.jobs;
     Ok(job)
 }
 
@@ -470,6 +489,32 @@ fn cmd_info(s: &Session, url: Option<&str>) -> Result<(), BoxError> {
             match kget::ytdlp_binary() {
                 Some(p) => println!("yt-dlp        {p}"),
                 None => println!("yt-dlp        NOT FOUND (brew install yt-dlp)"),
+            }
+            return Ok(());
+        }
+        Protocol::HuggingFace => {
+            let transfer = kget::fetch::TransferOptions {
+                proxy: s.config.proxy.clone(),
+                timeout: 20,
+                ..Default::default()
+            };
+            let (listing, files) = kget::hf::list(url, &kget::hf::HfOptions::default(), &transfer)?;
+            let total: u64 = files.iter().filter_map(|f| f.size).sum();
+            println!("Commit        {}", listing.commit);
+            println!(
+                "Files         {} ({})",
+                files.len(),
+                humansize::format_size(total, humansize::BINARY)
+            );
+            for f in files.iter().take(50) {
+                let size = f
+                    .size
+                    .map(|b| humansize::format_size(b, humansize::BINARY))
+                    .unwrap_or_default();
+                println!("  {size:>10}  {}", f.path);
+            }
+            if files.len() > 50 {
+                println!("  … {} more", files.len() - 50);
             }
             return Ok(());
         }
@@ -1091,7 +1136,7 @@ fn print_help(topic: Option<&str>) {
 download [flags] <url> [url…]      (aliases: get, dl — or just paste a URL)
 
   Protocol is detected from the URL: http(s), ftp, sftp, webdav, magnet/.torrent,
-  .meta4/.metalink and video sites (yt-dlp).
+  .meta4/.metalink, video sites (yt-dlp), hf:// (Hugging Face) and ollama://.
 
   -a, --turbo / --no-turbo  Parallel connections on/off (default: 'set turbo')
   -o, --output <path>       File or directory (default: 'cd' directory)
@@ -1111,6 +1156,11 @@ download [flags] <url> [url…]      (aliases: get, dl — or just paste a URL)
       --at HH:MM            Start at a local time
       --save-credentials    Save the password used (URL or prompt) in the keychain
   -j, --jobs <n>            Parallel downloads when several URLs are given
+                            (files at a time for hf:// and ollama://)
+      --include <glob>      hf://: only files matching the glob (repeatable)
+      --exclude <glob>      hf://: skip files matching the glob (repeatable)
+      --revision <rev>      hf://: branch, tag or commit
+      --hf-cache            hf://: write into the Hugging Face hub cache
       --ftp --sftp --webdav --ytdlp --torrent --metalink   Force a protocol
 
   Ctrl+C stops the download and keeps partial data ('retry last' resumes).
@@ -1193,6 +1243,8 @@ Examples
   cd ~/Downloads
   set turbo on
   https://www.youtube.com/watch?v=…
+  download hf://org/repo --include "*.gguf" --exclude "*fp32*"
+  ollama://llama3.2:3b
   history failed
   retry 2
 "#

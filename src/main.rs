@@ -169,9 +169,25 @@ struct Args {
     #[arg(long = "batch")]
     batch: Option<String>,
 
-    /// Number of simultaneous downloads in batch mode
+    /// Number of simultaneous downloads in batch mode, and of files at a time for hf:// and ollama://
     #[arg(short = 'j', long = "jobs", default_value_t = 4)]
     jobs: usize,
+
+    /// hf://: only download files matching this glob (repeatable: --include "*.gguf")
+    #[arg(long = "include", value_name = "GLOB")]
+    include: Vec<String>,
+
+    /// hf://: skip files matching this glob (repeatable: --exclude "*fp32*")
+    #[arg(long = "exclude", value_name = "GLOB")]
+    exclude: Vec<String>,
+
+    /// hf://: branch, tag or commit to download (default: main, or the URL's @revision)
+    #[arg(long = "revision", value_name = "REV")]
+    revision: Option<String>,
+
+    /// hf://: write into the Hugging Face hub cache (HF_HUB_CACHE / HF_HOME) so transformers reuses it
+    #[arg(long = "hf-cache")]
+    hf_cache: bool,
 
     /// Extra HTTP header sent with the request (repeatable: -H "Referer: https://…")
     #[arg(short = 'H', long = "header")]
@@ -326,6 +342,11 @@ impl Args {
         job.timeout = self.timeout;
         job.extract = self.extract;
         job.save_credentials = self.save_credentials;
+        job.include = self.include.clone();
+        job.exclude = self.exclude.clone();
+        job.revision = self.revision.clone();
+        job.hf_cache = self.hf_cache;
+        job.parallel_files = self.jobs;
         Ok(job)
     }
 
