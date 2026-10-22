@@ -1,0 +1,9 @@
+# Binding generator settings (read by `uniffi-bindgen generate --library`).
+
+[bindings.swift]
+# `import KgetFFI`; the C module is `KgetFFIFFI` (header + modulemap).
+module_name = "KgetFFI"
+
+[bindings.kotlin]
+package_name = "io.github.davimf721.kget"
+cdylib_name = "kget_ffi"

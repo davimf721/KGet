@@ -10,6 +10,15 @@ readme = "README.md"
 keywords = ["download", "http", "ftp", "sftp", "torrent"]
 categories = ["network-programming", "command-line-utilities", "api-bindings"]
 
+# The root package stays the published `Kget` crate; extra crates live in
+# `crates/`. `default-members` keeps plain `cargo build/test/clippy` at the
+# root on this package only (use `--workspace` or `-p kget-ffi` for the rest).
+[workspace]
+members = [".", "crates/kget-ffi"]
+default-members = ["."]
+exclude = ["fuzz"]
+resolver = "3"
+
 # Main library
 [lib]
 name = "kget"

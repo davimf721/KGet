@@ -11,6 +11,8 @@ WORKDIR /app
 
 # Copia apenas manifestos (cache)
 COPY Cargo.toml Cargo.lock ./
+# Workspace members must exist for Cargo to load the root manifest
+COPY crates ./crates
 
 # Cria arquivos fake para satisfazer lib + bin
 RUN mkdir src \

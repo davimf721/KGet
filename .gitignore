@@ -21,3 +21,6 @@ AppIcon.iconset/
 
 dmg_assets/*.svg
 .codex/
+
+# UniFFI output (scripts/gen-bindings.sh, scripts/build-xcframework.sh)
+bindings/
