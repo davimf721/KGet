@@ -6,27 +6,27 @@
 //! Every download is identified by a [`JobId`] chosen by the frontend, so
 //! several downloads can run at the same time: messages carry the id of the
 //! job they belong to and [`DownloadCommand::Cancel`] stops only that job.
+//!
+//! The worker is a thin adapter over [`JobManager`]: commands become
+//! [`JobManager::submit`] / [`JobManager::cancel`] calls and [`JobEvent`]s are
+//! translated back into [`WorkerToGuiMessage`]s. New frontends should use the
+//! manager directly.
 
-use crate::DownloadOptions;
-use crate::advanced_download::{AdvancedDownloader, ResumePolicy};
 use crate::config::Config;
-use crate::download::download_to_path as simple_download;
-use crate::events::{JsonEvent, SpeedMeter};
-use crate::optimization::Optimizer;
+use crate::events::JsonEvent;
+use crate::jobs::{DownloadState, JobEvent, JobManager};
 use crate::protocol::{self, Protocol};
-use crate::queue::{DownloadHistory, EntryStatus, HistoryEntry};
-use crate::torrent::{TorrentCallbacks, TorrentOptions, TorrentOutcome, download_torrent};
+use crate::runner::DownloadJob;
 use std::collections::HashMap;
-use std::error::Error;
 use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver as MpscReceiver, Sender as MpscSender};
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{Receiver as MpscReceiver, RecvTimeoutError, Sender as MpscSender};
 use std::thread;
 use std::time::Duration;
 
-/// Identifier of one download job, chosen by the frontend.
-pub type JobId = u64;
+/// Identifier of one download job. In [`DownloadCommand`] and
+/// [`WorkerToGuiMessage`] it is chosen by the frontend; a [`JobManager`]
+/// assigns its own.
+pub use crate::jobs::JobId;
 
 /// Command sent from a frontend to the download worker.
 #[derive(Debug, Clone)]
@@ -95,30 +95,73 @@ impl fmt::Display for WorkerToGuiMessage {
 }
 
 /// Spawn the blocking download worker used by the desktop GUI.
+///
+/// Every started job runs immediately (no concurrency limit), as before the
+/// job manager existed.
 pub fn spawn_download_worker(
     config: Config,
     download_rx: MpscReceiver<DownloadCommand>,
     status_tx: MpscSender<WorkerToGuiMessage>,
 ) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
-        download_worker(config, download_rx, status_tx);
-    })
+    let manager = JobManager::with_concurrency(config, usize::MAX);
+    spawn_download_worker_with_manager(manager, download_rx, status_tx)
 }
 
-struct Job {
-    cancel: Arc<AtomicBool>,
-    handle: thread::JoinHandle<()>,
+/// Like [`spawn_download_worker`], but runs the jobs on an existing
+/// [`JobManager`] (shared with other clients, with its own concurrency limit).
+pub fn spawn_download_worker_with_manager(
+    manager: JobManager,
+    download_rx: MpscReceiver<DownloadCommand>,
+    status_tx: MpscSender<WorkerToGuiMessage>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || download_worker(manager, download_rx, status_tx))
+}
+
+/// The [`DownloadJob`] for a GUI [`DownloadCommand::Start`].
+pub fn gui_job(
+    url: &str,
+    output_path: &str,
+    is_advanced: bool,
+    verify_iso: bool,
+    expected_sha256: Option<String>,
+) -> DownloadJob {
+    let mut job = DownloadJob::new(url);
+    job.output = Some(match protocol::detect(url) {
+        // yt-dlp picks the file name; the GUI passes a file path.
+        Protocol::Video => std::path::Path::new(output_path)
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned())
+            .filter(|p| !p.is_empty())
+            .unwrap_or_else(|| ".".into()),
+        _ => output_path.to_string(),
+    });
+    job.advanced = is_advanced;
+    job.verify_iso = verify_iso;
+    job.sha256 = expected_sha256;
+    // Continue a `.part` left by a cancelled attempt.
+    job.resume = true;
+    job
+}
+
+/// A GUI job tracked by the worker.
+struct Tracked {
+    gui_id: JobId,
+    output_path: String,
+    saved: Option<String>,
 }
 
 fn download_worker(
-    config: Config,
+    manager: JobManager,
     download_rx: MpscReceiver<DownloadCommand>,
     status_tx: MpscSender<WorkerToGuiMessage>,
 ) {
-    let mut jobs: HashMap<JobId, Job> = HashMap::new();
+    // Subscribe before submitting anything so no event is missed.
+    let events = manager.subscribe();
+    let mut jobs: HashMap<JobId, Tracked> = HashMap::new();
+    let mut by_gui: HashMap<JobId, JobId> = HashMap::new();
 
     loop {
-        match download_rx.recv_timeout(Duration::from_millis(100)) {
+        match download_rx.recv_timeout(Duration::from_millis(50)) {
             Ok(DownloadCommand::Start {
                 id,
                 url,
@@ -127,310 +170,149 @@ fn download_worker(
                 verify_iso,
                 expected_sha256,
             }) => {
-                let cancel = Arc::new(AtomicBool::new(false));
-                let job = JobSpec {
+                let _ = status_tx.send(WorkerToGuiMessage::StatusUpdate {
                     id,
-                    url,
-                    output_path,
-                    is_advanced,
-                    verify_iso,
-                    expected_sha256,
-                };
-                let handle = {
-                    let config = config.clone();
-                    let tx = status_tx.clone();
-                    let cancel = cancel.clone();
-                    thread::spawn(move || run_job(job, config, cancel, tx))
-                };
-                jobs.insert(id, Job { cancel, handle });
+                    text: format!("Initializing: {url}"),
+                });
+                let job = gui_job(&url, &output_path, is_advanced, verify_iso, expected_sha256);
+                let job_id = manager.submit(job);
+                jobs.insert(
+                    job_id,
+                    Tracked {
+                        gui_id: id,
+                        output_path,
+                        saved: None,
+                    },
+                );
+                by_gui.insert(id, job_id);
             }
             Ok(DownloadCommand::Cancel { id }) => {
-                if let Some(job) = jobs.get(&id) {
-                    job.cancel.store(true, Ordering::SeqCst);
+                if let Some(job_id) = by_gui.get(&id)
+                    && manager.cancel(*job_id).is_ok()
+                {
                     let _ = status_tx.send(WorkerToGuiMessage::StatusUpdate {
                         id,
                         text: "Cancelling download...".into(),
                     });
                 }
             }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                for job in jobs.values() {
-                    job.cancel.store(true, Ordering::SeqCst);
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                for job_id in jobs.keys() {
+                    let _ = manager.cancel(*job_id);
                 }
                 break;
             }
         }
 
-        // Reap finished jobs.
-        let finished: Vec<JobId> = jobs
-            .iter()
-            .filter(|(_, j)| j.handle.is_finished())
-            .map(|(id, _)| *id)
-            .collect();
-        for id in finished {
-            if let Some(job) = jobs.remove(&id) {
-                let _ = job.handle.join();
+        while let Ok(event) = events.try_recv() {
+            let job_id = event.id();
+            let Some(tracked) = jobs.get_mut(&job_id) else {
+                continue;
+            };
+            let (message, finished) = translate(&manager, tracked, event);
+            if let Some(m) = message {
+                let _ = status_tx.send(m);
+            }
+            if finished {
+                if let Some(t) = jobs.remove(&job_id) {
+                    by_gui.remove(&t.gui_id);
+                }
+                let _ = manager.remove(job_id);
             }
         }
     }
 }
 
-struct JobSpec {
-    id: JobId,
-    url: String,
-    output_path: String,
-    is_advanced: bool,
-    verify_iso: bool,
-    expected_sha256: Option<String>,
-}
-
-fn run_job(
-    job: JobSpec,
-    config: Config,
-    cancel: Arc<AtomicBool>,
-    tx: MpscSender<WorkerToGuiMessage>,
-) {
-    let id = job.id;
-    let _ = tx.send(WorkerToGuiMessage::StatusUpdate {
-        id,
-        text: format!("Initializing: {}", job.url),
-    });
-
-    let optimizer = Optimizer::from_config(config.optimization.clone());
-    let proxy = config.proxy.clone();
-
-    let status = {
-        let tx = tx.clone();
-        Arc::new(move |text: String| {
-            if !text.starts_with("PROGRESS:") {
-                let _ = tx.send(WorkerToGuiMessage::StatusUpdate { id, text });
-            }
-        })
-    };
-    let meter = Arc::new(Mutex::new(SpeedMeter::new()));
-    let on_bytes = {
-        let tx = tx.clone();
-        let meter = meter.clone();
-        Arc::new(move |bytes: u64, total: Option<u64>| {
-            let ev = meter
-                .lock()
-                .expect("speed meter poisoned")
-                .progress(bytes, total);
-            if let JsonEvent::Progress {
-                percent,
-                speed_bps,
-                eta_secs,
-                ..
-            } = ev
-            {
-                let _ = tx.send(WorkerToGuiMessage::Progress {
+/// Translate one manager event into a GUI message; the flag is `true` when
+/// the job is over.
+fn translate(
+    manager: &JobManager,
+    tracked: &mut Tracked,
+    event: JobEvent,
+) -> (Option<WorkerToGuiMessage>, bool) {
+    let id = tracked.gui_id;
+    match event {
+        JobEvent::Download { event, .. } => {
+            let message = match event {
+                JsonEvent::Progress {
+                    bytes,
+                    total,
+                    percent,
+                    speed_bps,
+                    eta_secs,
+                    progress,
+                } => Some(WorkerToGuiMessage::Progress {
                     id,
-                    fraction: percent.map(|p| (p / 100.0) as f32).unwrap_or(0.0),
+                    fraction: percent.map(|p| p / 100.0).or(progress).unwrap_or(0.0) as f32,
                     bytes,
                     total,
                     speed_bps,
                     eta_secs,
-                });
-            }
-        })
-    };
-
-    let detected = protocol::detect(&job.url);
-    let result: Result<String, Box<dyn Error + Send + Sync>> = match detected {
-        Protocol::Torrent => {
-            let tx_p = tx.clone();
-            let callbacks = TorrentCallbacks {
-                status: Some(status.clone()),
-                progress: Some(Arc::new(move |p| {
-                    let _ = tx_p.send(WorkerToGuiMessage::Progress {
-                        id,
-                        fraction: p,
-                        bytes: 0,
-                        total: None,
-                        speed_bps: 0,
-                        eta_secs: None,
-                    });
-                })),
-            };
-            download_torrent(
-                &job.url,
-                &job.output_path,
-                true,
-                proxy,
-                optimizer,
-                callbacks,
-                TorrentOptions {
-                    config: config.torrent.clone(),
-                    cancel: Some(cancel.clone()),
-                    on_files: None,
-                    on_file_progress: None,
-                },
-            )
-            .map(|outcome| match outcome {
-                TorrentOutcome::Downloaded => job.output_path.clone(),
-                TorrentOutcome::HandedOff => {
-                    status("Opened in the system torrent client".into());
-                    job.output_path.clone()
+                }),
+                JsonEvent::Status { message } => {
+                    Some(WorkerToGuiMessage::StatusUpdate { id, text: message })
                 }
-            })
-        }
-        Protocol::Ftp => crate::ftp::FtpDownloader::new(
-            job.url.clone(),
-            job.output_path.clone(),
-            true,
-            proxy,
-            optimizer,
-        )
-        .download()
-        .map(|_| job.output_path.clone()),
-        Protocol::Sftp => crate::sftp::SftpDownloader::new(
-            job.url.clone(),
-            job.output_path.clone(),
-            true,
-            proxy,
-            optimizer,
-        )
-        .with_key_path(config.sftp.key_path.clone())
-        .download()
-        .map(|_| job.output_path.clone()),
-        Protocol::Metalink => {
-            let dir = std::path::Path::new(&job.output_path)
-                .parent()
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_else(|| ".".into());
-            crate::metalink::download_metalink(&job.url, &dir, true, proxy, optimizer).map(|_| dir)
-        }
-        Protocol::Video => {
-            let dir = std::path::Path::new(&job.output_path)
-                .parent()
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_else(|| ".".into());
-            let quality = crate::ytdlp::VideoQuality::default();
-            let tx_v = tx.clone();
-            crate::ytdlp::download_video_with_cancel(
-                &job.url,
-                &dir,
-                &quality,
-                Some(cancel.clone()),
-                move |ev| match ev {
-                    crate::ytdlp::VideoEvent::Progress(p) => {
-                        let _ = tx_v.send(WorkerToGuiMessage::Progress {
-                            id,
-                            fraction: (p.percent / 100.0) as f32,
-                            bytes: 0,
-                            total: None,
-                            speed_bps: 0,
-                            eta_secs: None,
-                        });
-                    }
-                    crate::ytdlp::VideoEvent::Log(line) => {
-                        let _ = tx_v.send(WorkerToGuiMessage::StatusUpdate { id, text: line });
-                    }
-                    crate::ytdlp::VideoEvent::Saved(_) => {}
-                },
-            )
-        }
-        Protocol::WebDav => {
-            let options = DownloadOptions {
-                cancel: Some(cancel.clone()),
-                progress_callback: Some(on_bytes.clone()),
-                expected_sha256: job.expected_sha256.clone(),
-                ..Default::default()
+                JsonEvent::Saved { path, .. } => {
+                    tracked.saved = Some(path);
+                    None
+                }
+                _ => None,
             };
-            crate::webdav::WebDavDownloader::new(
-                job.url.clone(),
-                job.output_path.clone(),
-                true,
-                proxy,
-                optimizer,
-            )
-            .with_options(options)
-            .download_to_path(Some(&*status))
-            .map(|p| p.to_string_lossy().into_owned())
+            (message, false)
         }
-        Protocol::Http if job.is_advanced => AdvancedDownloader::new(
-            job.url.clone(),
-            job.output_path.clone(),
-            true,
-            proxy,
-            optimizer,
-        )
-        .and_then(|mut downloader| {
-            downloader.set_cancel_token(cancel.clone());
-            downloader.set_resume_policy(if job.verify_iso {
-                ResumePolicy::AlwaysResume
-            } else {
-                ResumePolicy::AlwaysRestart
-            });
-            if let Some(expected_sha256) = job.expected_sha256.clone() {
-                downloader.set_expected_sha256(expected_sha256);
-            }
-            let on_bytes = on_bytes.clone();
-            downloader.set_byte_progress_callback(move |b, t| on_bytes(b, t));
-            let status = status.clone();
-            downloader.set_status_callback(move |msg| status(msg));
-            downloader.download().map(|_| job.output_path.clone())
-        }),
-        Protocol::Http => {
-            let options = DownloadOptions {
-                quiet_mode: true,
-                output_path: Some(job.output_path.clone()),
-                verify_iso: job.verify_iso,
-                expected_sha256: job.expected_sha256.clone(),
-                resume: true,
-                cancel: Some(cancel.clone()),
-                progress_callback: Some(on_bytes.clone()),
-                ..Default::default()
-            };
-            simple_download(&job.url, proxy, optimizer, options, Some(&*status))
-                .map(|p| p.to_string_lossy().into_owned())
-        }
-    };
-
-    record_history(&job, &result, cancel.load(Ordering::SeqCst));
-
-    if cancel.load(Ordering::SeqCst) {
-        let _ = tx.send(WorkerToGuiMessage::Cancelled { id });
-        return;
-    }
-    match result {
-        Ok(path) => {
-            let _ = tx.send(WorkerToGuiMessage::Completed { id, path });
-        }
-        Err(e) => {
-            if matches!(
-                e.downcast_ref::<crate::KgetError>(),
-                Some(crate::KgetError::Cancelled)
-            ) {
-                let _ = tx.send(WorkerToGuiMessage::Cancelled { id });
-            } else {
-                let _ = tx.send(WorkerToGuiMessage::Error {
+        JobEvent::State {
+            id: job_id,
+            state,
+            error,
+        } => match state {
+            DownloadState::Queued | DownloadState::Running => (None, false),
+            DownloadState::Verifying => (
+                Some(WorkerToGuiMessage::StatusUpdate {
                     id,
-                    message: e.to_string(),
-                });
+                    text: "Verifying checksum...".into(),
+                }),
+                false,
+            ),
+            DownloadState::Completed => {
+                let path = tracked
+                    .saved
+                    .clone()
+                    .or_else(|| manager.get(job_id).and_then(|i| i.path))
+                    .unwrap_or_else(|| tracked.output_path.clone());
+                (Some(WorkerToGuiMessage::Completed { id, path }), true)
             }
-        }
+            DownloadState::Failed => (
+                Some(WorkerToGuiMessage::Error {
+                    id,
+                    message: error.unwrap_or_else(|| "Download failed".into()),
+                }),
+                true,
+            ),
+            DownloadState::Paused | DownloadState::Cancelled => {
+                (Some(WorkerToGuiMessage::Cancelled { id }), true)
+            }
+        },
+        JobEvent::Removed { .. } => (None, true),
     }
 }
 
-fn record_history(
-    job: &JobSpec,
-    result: &Result<String, Box<dyn Error + Send + Sync>>,
-    cancelled: bool,
-) {
-    let dir = std::path::Path::new(&job.output_path)
-        .parent()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| ".".into());
-    let mut entry = HistoryEntry::new(&job.url, &dir, job.expected_sha256.as_deref());
-    let (status, error) = match result {
-        _ if cancelled => (EntryStatus::Cancelled, None),
-        Ok(path) => {
-            entry.set_saved_file(std::path::Path::new(path));
-            (EntryStatus::Completed, None)
-        }
-        Err(e) => (EntryStatus::Failed, Some(e.to_string())),
-    };
-    let _ = DownloadHistory::append(entry, status, error);
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gui_jobs_resume_and_use_folders_for_video() {
+        let job = gui_job("https://example.com/a.iso", "/tmp/a.iso", true, true, None);
+        assert_eq!(job.output.as_deref(), Some("/tmp/a.iso"));
+        assert!(job.advanced && job.verify_iso && job.resume);
+        let video = gui_job(
+            "https://www.youtube.com/watch?v=x",
+            "/tmp/dl/watch",
+            false,
+            false,
+            None,
+        );
+        assert_eq!(video.output.as_deref(), Some("/tmp/dl"));
+    }
 }

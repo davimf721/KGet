@@ -10,9 +10,17 @@
 //! # Authentication Order
 //!
 //! 1. Password embedded in URL (`sftp://user:pass@host/path`, percent-encoded)
-//! 2. SSH agent (if running)
-//! 3. The configured key (`sftp.key_path` in `config.json`)
-//! 4. Default key files (`~/.ssh/id_ed25519`, `~/.ssh/id_rsa`, `~/.ssh/id_ecdsa`)
+//! 2. Password saved in the system keychain for `sftp://user@host`
+//! 3. SSH agent (if running)
+//! 4. The configured key (`sftp.key_path` in `config.json`)
+//! 5. Default key files (`~/.ssh/id_ed25519`, `~/.ssh/id_rsa`, `~/.ssh/id_ecdsa`);
+//!    passphrase-protected keys use a passphrase saved in the keychain or,
+//!    on a terminal, a prompt
+//! 6. On a terminal, a password prompt
+//!
+//! Steps 2, 5 (passphrases) and 6 need a
+//! [`CredentialResolver`](crate::credentials::CredentialResolver) attached
+//! with [`SftpDownloader::with_credentials`].
 //!
 //! # Paths
 //!
@@ -53,12 +61,14 @@
 
 use crate::ByteProgressCallback;
 use crate::config::ProxyConfig;
+use crate::credentials::{CredentialResolver, Target, ssh_key_is_encrypted};
 use crate::optimization::Optimizer;
 use crate::progress::{Throttle, create_progress_bar};
 use std::error::Error;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::ToSocketAddrs;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 use url::Url;
 
@@ -68,8 +78,10 @@ use url::Url;
 ///
 /// Authentication tries, in order:
 /// 1. Password from the URL (`sftp://user:pass@host/path`)
-/// 2. Running SSH agent
-/// 3. Default key files in `~/.ssh/`
+/// 2. Password saved in the system keychain (with [`with_credentials`](Self::with_credentials))
+/// 3. Running SSH agent
+/// 4. Default key files in `~/.ssh/`
+/// 5. Password prompt (interactive resolver only)
 pub struct SftpDownloader {
     url: String,
     output: String,
@@ -81,6 +93,7 @@ pub struct SftpDownloader {
     key_path: Option<PathBuf>,
     resume: bool,
     progress_callback: Option<ByteProgressCallback>,
+    credentials: Option<Arc<CredentialResolver>>,
 }
 
 impl SftpDownloader {
@@ -109,6 +122,7 @@ impl SftpDownloader {
             key_path: None,
             resume: true,
             progress_callback: None,
+            credentials: None,
         }
     }
 
@@ -129,6 +143,13 @@ impl SftpDownloader {
     /// Structured progress callback `(bytes, total)`.
     pub fn with_progress_callback(mut self, cb: ByteProgressCallback) -> Self {
         self.progress_callback = Some(cb);
+        self
+    }
+
+    /// Use saved passwords/key passphrases from the system keychain, prompt
+    /// for missing ones (interactive resolver) and report accepted ones.
+    pub fn with_credentials(mut self, credentials: Arc<CredentialResolver>) -> Self {
+        self.credentials = Some(credentials);
         self
     }
 
@@ -190,13 +211,39 @@ impl SftpDownloader {
         // Verify host key against ~/.ssh/known_hosts
         self.check_host_key(&sess, host, port)?;
 
-        // Authenticate: password from URL → SSH agent → default key files
+        // Authenticate: password from URL → keychain → SSH agent → key files → prompt
+        let creds = self.credentials.as_deref();
+        let target = Target::from_url(&self.url);
         if let Some(password) = parsed.password() {
             let password = urlencoding::decode(password)?.into_owned();
             sess.userauth_password(&username, &password)
                 .map_err(|e| format!("Password authentication for '{}' failed: {}", username, e))?;
+            if let (Some(r), Some(t)) = (creds, &target) {
+                r.provided(t, &password);
+                r.accepted(t);
+            }
         } else {
-            self.try_key_auth(&sess, &username)?;
+            if let (Some(r), Some(t)) = (creds, &target)
+                && let Some(saved) = r.lookup(t)
+                && (sess.userauth_password(&username, &saved).is_err() || !sess.authenticated())
+                && !self.quiet
+            {
+                eprintln!("Warning: the password saved for {t} was rejected");
+            }
+            if !sess.authenticated() {
+                self.try_key_auth(&sess, &username)?;
+            }
+            if !sess.authenticated()
+                && let (Some(r), Some(t)) = (creds, &target)
+                && let Some(password) = r.prompt(t, "SSH password")
+            {
+                sess.userauth_password(&username, &password).map_err(|e| {
+                    format!("Password authentication for '{}' failed: {}", username, e)
+                })?;
+                if sess.authenticated() {
+                    r.accepted(t);
+                }
+            }
         }
 
         if !sess.authenticated() {
@@ -445,12 +492,37 @@ impl SftpDownloader {
         ]);
 
         for key_path in key_candidates {
-            if key_path.exists()
-                && sess
-                    .userauth_pubkey_file(username, None, &key_path, None)
-                    .is_ok()
+            if !key_path.exists() {
+                continue;
+            }
+            if sess
+                .userauth_pubkey_file(username, None, &key_path, None)
+                .is_ok()
                 && sess.authenticated()
             {
+                return Ok(());
+            }
+            // Passphrase-protected key: saved passphrase, then a prompt.
+            let Some(r) = self.credentials.as_deref() else {
+                continue;
+            };
+            if !ssh_key_is_encrypted(&key_path) {
+                continue;
+            }
+            let target = Target::ssh_key(&key_path);
+            let try_passphrase = |passphrase: &str| {
+                sess.userauth_pubkey_file(username, None, &key_path, Some(passphrase))
+                    .is_ok()
+                    && sess.authenticated()
+            };
+            if r.lookup(&target).is_some_and(|p| try_passphrase(&p)) {
+                return Ok(());
+            }
+            let what = format!("Passphrase for key '{}'", key_path.display());
+            if let Some(passphrase) = r.prompt(&target, &what)
+                && try_passphrase(&passphrase)
+            {
+                r.accepted(&target);
                 return Ok(());
             }
         }

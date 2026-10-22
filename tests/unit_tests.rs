@@ -756,6 +756,37 @@ mod release_171_tests {
     }
 
     #[test]
+    fn jsonl_phase_events() {
+        use kget::events::{Phase, verifying_status};
+        let line = kget::JsonEvent::Phase {
+            phase: Phase::Extracting,
+            algorithm: None,
+        }
+        .to_line();
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["v"], 1);
+        assert_eq!(v["event"], "phase");
+        assert_eq!(v["phase"], "extracting");
+        assert!(v.get("algorithm").is_none());
+
+        // Engine status messages announcing a hash become `phase` events.
+        for (message, algo) in [
+            (verifying_status("sha512"), "sha512"),
+            (
+                "Calculating SHA256 hash... (this may take a while for large ISOs)".to_string(),
+                "sha256",
+            ),
+        ] {
+            let ev = kget::JsonEvent::phase_from_status(&message).expect("phase");
+            let v: serde_json::Value = serde_json::from_str(&ev.to_line()).unwrap();
+            assert_eq!(v["phase"], "verifying");
+            assert_eq!(v["algorithm"], algo);
+        }
+        assert!(kget::JsonEvent::phase_from_status("Connecting...").is_none());
+        assert!(kget::JsonEvent::phase_from_status("Calculating the total size").is_none());
+    }
+
+    #[test]
     fn throttle_limits_rate_but_reports_completion() {
         let mut t = kget::Throttle::new(10_000);
         assert!(t.ready(1.0));

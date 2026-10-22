@@ -442,9 +442,11 @@ download_metalink(
 ```
 
 `download_metalink` parses the RFC 5854 manifest, sorts mirrors by `priority`
-(lowest first), tries each in order, and verifies SHA-256 after a successful
-download. A corrupted mirror (hash mismatch) is deleted and the next mirror is
-tried automatically.
+(lowest first), tries each in order, and verifies the strongest hash it lists
+(SHA-256, then SHA-512, then MD5) after a successful download. A corrupted
+mirror (hash mismatch) is deleted and the next mirror is tried automatically.
+`download_metalink_with_status` takes an extra status callback that receives a
+`kget::events::verifying_status` message before each hash is computed.
 
 Parse the manifest yourself:
 
@@ -485,14 +487,19 @@ DownloadHistory::update(|entries| entries.retain(|e| e.status == EntryStatus::Fa
 # Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 ```
 
-User names and passwords are stripped from stored URLs, the file keeps the last
-1000 entries, and a corrupt file is moved to `history.json.corrupt`.
-Set `KGET_CONFIG_DIR` to store `config.json` and `history.json` elsewhere.
+The history is a SQLite database (WAL mode, safe with several `kget`
+processes). `DownloadHistory::query(&HistoryQuery)` filters by status, domain,
+file type, protocol, date range and text, with sorting and paging;
+`DownloadHistory::count` / `DownloadHistory::delete` take the same query.
+User names and passwords are stripped from stored URLs, the database keeps the
+last 1000 entries, and a corrupt database is moved to `history.db.corrupt`. A
+`history.json` from KGet ≤ 1.7 is imported once and kept as `history.json.bak`.
+Set `KGET_CONFIG_DIR` to store `config.json` and `history.db` elsewhere.
 
 History is stored at:
-- macOS: `~/Library/Application Support/kget/history.json`
-- Linux: `~/.config/kget/history.json`
-- Windows: `%APPDATA%\kget\history.json`
+- macOS: `~/Library/Application Support/kget/history.db`
+- Linux: `~/.config/kget/history.db`
+- Windows: `%APPDATA%\kget\history.db`
 
 ## Async API
 
@@ -546,7 +553,13 @@ println!("saved to {}", saved.display());
 HTTP errors are returned as boxed `KgetError::Http { status, url }` /
 `KgetError::NotFound`, so `KgetError::from(err)` lets you match them.
 `kget::protocol::detect(url)` tells which downloader a URL needs, and
-`kget::JsonEvent` is the serializable type behind `kget --jsonl`.
+`kget::JsonEvent` is the serializable type behind `kget --jsonl`
+(`"v": 1`; new events and fields are additive and keep the version, so ignore
+unknown ones). `JsonEvent::Phase` announces post-transfer work —
+`{"event":"phase","phase":"verifying","algorithm":"sha256"}` or
+`{"event":"phase","phase":"extracting"}` — and
+`JsonEvent::phase_from_status` maps the engine's hashing status message
+(`kget::events::verifying_status`) to it, for your own status callbacks.
 
 ## Library Guarantees
 

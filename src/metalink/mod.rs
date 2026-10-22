@@ -199,6 +199,21 @@ pub fn download_metalink(
     proxy: ProxyConfig,
     optimizer: Optimizer,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
+    download_metalink_with_status(source, output_dir, quiet, proxy, optimizer, None)
+}
+
+/// [`download_metalink`] with a status callback.
+///
+/// The callback receives a [`verifying_status`](crate::events::verifying_status)
+/// message before each checksum is computed.
+pub fn download_metalink_with_status(
+    source: &str,
+    output_dir: &str,
+    quiet: bool,
+    proxy: ProxyConfig,
+    optimizer: Optimizer,
+    status: Option<&(dyn Fn(String) + Send + Sync)>,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     let xml = fetch_manifest(source, quiet, &proxy)?;
     let manifest = parse(&xml)?;
 
@@ -212,7 +227,7 @@ pub fn download_metalink(
     }
 
     for file in &manifest.files {
-        download_one_file(file, &out_dir, quiet, &proxy, &optimizer)?;
+        download_one_file(file, &out_dir, quiet, &proxy, &optimizer, status)?;
     }
 
     Ok(())
@@ -255,6 +270,7 @@ fn download_one_file(
     quiet: bool,
     proxy: &ProxyConfig,
     optimizer: &Optimizer,
+    status: Option<&(dyn Fn(String) + Send + Sync)>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let safe_name = sanitise_filename(&file.name);
     let dest = output_dir.join(&safe_name);
@@ -309,6 +325,9 @@ fn download_one_file(
                 {
                     if !quiet {
                         println!("  Verifying {}...", algo.name());
+                    }
+                    if let Some(cb) = status {
+                        cb(crate::events::verifying_status(algo.name()));
                     }
                     let got = compute_checksum(&dest, &algo)?;
                     if got != expected {

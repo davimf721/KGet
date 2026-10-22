@@ -57,7 +57,37 @@ pub enum DownloadEvent {
 }
 
 /// Version of the JSONL protocol (the `"v"` field of every event).
+///
+/// The version changes only on breaking changes: an event or field removed,
+/// renamed or given a different meaning. New event types and new fields are
+/// additive and keep the version, so consumers must ignore events and fields
+/// they do not know.
 pub const JSONL_VERSION: u32 = 1;
+
+/// Start of the status message the engine sends right before it hashes a file.
+///
+/// Built with [`verifying_status`]; `kget --jsonl` turns it into a
+/// [`JsonEvent::Phase`] event (see [`JsonEvent::phase_from_status`]).
+pub const VERIFYING_STATUS_PREFIX: &str = "Calculating ";
+
+/// Status message announcing a checksum computation, e.g.
+/// `"Calculating SHA256 hash..."` for `algorithm = "sha256"`.
+pub fn verifying_status(algorithm: &str) -> String {
+    format!(
+        "{VERIFYING_STATUS_PREFIX}{} hash...",
+        algorithm.to_ascii_uppercase()
+    )
+}
+
+/// Post-transfer phase announced by a `phase` event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Phase {
+    /// A checksum of the downloaded file is being computed
+    Verifying,
+    /// The downloaded archive is being unpacked (`--extract`)
+    Extracting,
+}
 
 /// One file inside a torrent (`files` event).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -88,6 +118,9 @@ pub struct FileProgressEntry {
 /// ```text
 /// {"v":1,"event":"started","url":"…","protocol":"http","advanced":false,"output":"/abs/x.iso"}
 /// {"v":1,"event":"progress","bytes":524288,"total":1048576,"percent":50.0,"speed_bps":3145728,"eta_secs":12}
+/// {"v":1,"event":"phase","phase":"verifying","algorithm":"sha256"}
+/// {"v":1,"event":"verified","algorithm":"sha256","hash":"…","ok":true}
+/// {"v":1,"event":"phase","phase":"extracting"}
 /// {"v":1,"event":"saved","path":"/abs/x.iso","bytes":1048576}
 /// {"v":1,"event":"completed"}
 /// {"v":1,"event":"error","code":"http_404","message":"…","retryable":false}
@@ -124,6 +157,14 @@ pub enum JsonEvent {
     Files { files: Vec<FileEntry> },
     /// Per-file progress of a torrent (about once per second).
     FileProgress { files: Vec<FileProgressEntry> },
+    /// A post-transfer phase started: checksum verification (`algorithm` is
+    /// the lowercase name, e.g. `"sha256"`) or archive extraction. The phase
+    /// ends with the next `verified`, `saved`, `completed` or `error` event.
+    Phase {
+        phase: Phase,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        algorithm: Option<String>,
+    },
     /// Result of a checksum verification.
     Verified {
         algorithm: String,
@@ -150,6 +191,21 @@ impl JsonEvent {
             obj.insert("v".into(), JSONL_VERSION.into());
         }
         v.to_string()
+    }
+
+    /// The `phase` event announced by an engine status message, if any.
+    ///
+    /// Recognizes messages built with [`verifying_status`].
+    pub fn phase_from_status(message: &str) -> Option<JsonEvent> {
+        let rest = message.strip_prefix(VERIFYING_STATUS_PREFIX)?;
+        let (algorithm, _) = rest.split_once(" hash...")?;
+        if algorithm.is_empty() || !algorithm.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return None;
+        }
+        Some(JsonEvent::Phase {
+            phase: Phase::Verifying,
+            algorithm: Some(algorithm.to_ascii_lowercase()),
+        })
     }
 
     /// Print the event to stdout as one line.

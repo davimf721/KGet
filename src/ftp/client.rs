@@ -2,6 +2,7 @@
 
 use crate::ByteProgressCallback;
 use crate::config::{FtpConfig, ProxyConfig};
+use crate::credentials::{CredentialResolver, Target};
 use crate::optimization::Optimizer;
 use crate::progress::{Throttle, create_progress_bar};
 use crate::utils::print;
@@ -9,6 +10,7 @@ use std::error::Error;
 use std::io::Write;
 use std::net::ToSocketAddrs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 use suppaftp::FtpStream;
 use url::Url;
@@ -20,7 +22,9 @@ const IO_TIMEOUT: Duration = Duration::from_secs(60);
 ///
 /// Supports:
 /// - Anonymous FTP (use "anonymous" as username)
-/// - Authenticated FTP with username/password in URL (percent-encoded)
+/// - Authenticated FTP with username/password in URL (percent-encoded), or a
+///   user name only with the password from the system keychain or a prompt
+///   (see [`with_credentials`](Self::with_credentials))
 /// - Binary transfer mode (safe for all file types)
 /// - SOCKS5 proxy connections (with optional credentials)
 /// - Resuming an interrupted transfer (`REST`) from `<file>.part`
@@ -67,6 +71,7 @@ pub struct FtpDownloader {
     config: FtpConfig,
     resume: bool,
     progress_callback: Option<ByteProgressCallback>,
+    credentials: Option<Arc<CredentialResolver>>,
 }
 
 impl FtpDownloader {
@@ -95,6 +100,7 @@ impl FtpDownloader {
             config: FtpConfig::default(),
             resume: true,
             progress_callback: None,
+            credentials: None,
         }
     }
 
@@ -116,6 +122,13 @@ impl FtpDownloader {
         self
     }
 
+    /// Look up (or prompt for) the password when the URL has a user but no
+    /// password, and report accepted passwords back to the resolver.
+    pub fn with_credentials(mut self, credentials: Arc<CredentialResolver>) -> Self {
+        self.credentials = Some(credentials);
+        self
+    }
+
     /// Download the file.
     pub fn download(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
         let url = Url::parse(&self.url)?;
@@ -131,9 +144,20 @@ impl FtpDownloader {
         } else {
             urlencoding::decode(url.username())?.into_owned()
         };
+        let anonymous = matches!(username.as_str(), "anonymous" | "ftp");
+        let target = Target::from_url(&self.url).filter(|_| !anonymous);
+        let creds = self.credentials.as_deref().zip(target.as_ref());
         let password = match url.password() {
-            Some(p) => urlencoding::decode(p)?.into_owned(),
-            None => "anonymous".to_string(),
+            Some(p) => {
+                let p = urlencoding::decode(p)?.into_owned();
+                if let Some((r, t)) = creds {
+                    r.provided(t, &p);
+                }
+                p
+            }
+            None => creds
+                .and_then(|(r, t)| r.resolve(t, "FTP password"))
+                .unwrap_or_else(|| "anonymous".to_string()),
         };
 
         print(
@@ -158,6 +182,9 @@ impl FtpDownloader {
 
         print(&format!("Logging in as {}...", username), self.quiet_mode);
         ftp.login(&username, &password)?;
+        if let Some((r, t)) = creds {
+            r.accepted(t);
+        }
 
         ftp.transfer_type(suppaftp::types::FileType::Binary)?;
 

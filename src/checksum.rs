@@ -14,7 +14,10 @@ use std::path::Path;
 // ── Algorithm enum ────────────────────────────────────────────────────────────
 
 /// Checksum algorithm used to verify a downloaded file.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Serialized as its lowercase name (`"sha256"`, `"md5"`, …).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ChecksumAlgorithm {
     Sha256,
     Sha512,

@@ -32,34 +32,34 @@ La mayoría de las herramientas de descarga son demasiado simples (clones de wge
 ### Protocolos de Descarga
 | Protocolo | Flag | Notas |
 |-----------|------|-------|
-| HTTP / HTTPS | *(auto)* | Multi-conexión, reanudable, gzip/brotli/lz4, proxy |
-| FTP | `--ftp` | Autenticado o anónimo |
-| SFTP | `--sftp` | Contraseña o clave; verificación de host-key |
+| HTTP / HTTPS | *(auto)* | Multi-conexión, reanudable, proxy HTTP/HTTPS/SOCKS5, archivos idénticos a los del servidor (sin descompresión) |
+| FTP | `ftp://` *(auto)* o `--ftp` | Autenticado o anónimo, reanudable (`REST`) |
+| SFTP | `sftp://` *(auto)* o `--sftp` | Contraseña o clave; verificación de host-key; reanudable |
 | WebDAV | `--webdav` o `webdav://` | HTTP Basic auth en la URL |
 | Magnet / BitTorrent | *(auto-detectado)* | Cliente torrent nativo (feature `torrent-native`) |
-| Metalink `.meta4` | `--metalink` | Múltiples mirrors con fallback, SHA-256 verificado (RFC 5854) |
+| Metalink `.meta4` / `.metalink` | *(auto)* o `--metalink` | Múltiples mirrors con fallback, SHA-256/512/MD5 verificado (RFC 5854) |
 | Sitios de video | `--ytdlp` o *(auto-detectado)* | YouTube, Vimeo, Twitch, TikTok, Instagram… via yt-dlp |
 
 ### Motor de Descarga
 - **Modo turbo** (`-a`) — conexiones paralelas por rangos de bytes, reanudable
-- **Descarga en lote** (`--batch urls.txt`) — una URL por línea, `#` = comentario, todas en paralelo
+- **Descarga en lote** (`--batch urls.txt`) — una URL por línea, `#` = comentario, `-j/--jobs N` descargas simultáneas (4 por defecto)
 - **Programación** (`--at "HH:MM"`) — espera hasta la hora local especificada
 - **Límite de velocidad** (`-l <bytes/s>`) — throttle global por token-bucket
 - **Headers HTTP personalizados** (`-H "Nombre: Valor"`) — inyecta headers arbitrarios
 - **Auto-extracción de archivos** (`--extract`) — descomprime después de la descarga (`.zip`, `.tar.gz`, `.7z`, …)
 - **Verificación SHA-256** (`--sha256 <hash>`) — error si no coincide; nunca acepta archivos corruptos
-- **Archivos de checksum sidecar** — verifica contra archivos GNU/BSD `.sha256sum`
+- **Cualquier checksum** (`--checksum sha512:<hex>`) y **archivos sidecar** (`--checksum-url …/SHA256SUMS`) — formatos GNU, BSD y solo-hash
 - **Content-Disposition** — usa nombres de archivo sugeridos por el servidor
 - **Seguridad de nombres de archivo** — rechaza bytes nulos, path traversal, nombres reservados de Windows y nombres >255 bytes
 
 ### Integridad y Seguridad
 - **Checksums multi-algoritmo** — SHA-256, SHA-512, SHA-1, MD5, BLAKE3
 - **Verificación de host-key SFTP** — comprueba `~/.ssh/known_hosts`; error ante divergencia
-- **Política de reintentos** — solo reintenta en 5xx y errores de red; falla inmediata en 4xx
-- **Eventos JSONL** (`--jsonl`) — progreso legible por máquina para scripts y agentes
+- **Política de reintentos** — reintenta en 408/429/5xx y errores de red (respeta `Retry-After`); falla inmediata en los demás 4xx
+- **Eventos JSONL** (`--jsonl`) — eventos versionados (`"v":1`) legibles por máquina para todos los protocolos
 
 ### Historial y Persistencia
-- **Historial de descargas** — cada descarga registrada en `history.json`; `--history` / `--history-clear`
+- **Historial de descargas** — cada descarga registrada en SQLite (`history.db`); `--history` / `--history-clear`
 - **REPL interactivo** (`--interactive`) — todas las opciones de descarga de la CLI, lotes, retry, checksums, autocompletado con Tab, historial persistente, Ctrl+C para pausar
 
 ### GUIs
@@ -232,8 +232,15 @@ Tab completa comandos, flags, claves de config y rutas; ↑/↓ recorren los com
 ### Eventos JSONL (para scripts y agentes)
 
 ```bash
-kget --jsonl -a https://example.com/archivo.iso | jq '.percent'
+kget --jsonl -a https://example.com/archivo.iso | jq -c 'select(.event=="progress") | .percent'
 ```
+
+Cada línea es un objeto JSON con `"v": 1` y un campo `event` (`started`, `progress`, `status`,
+`files`, `file_progress`, `phase`, `verified`, `saved`, `completed`, `error`). El evento `phase` indica
+verificación (`{"event":"phase","phase":"verifying","algorithm":"sha256"}`) o extracción
+(`{"event":"phase","phase":"extracting"}`). Use los campos estructurados, nunca el texto de `status`.
+Los nuevos eventos y campos no cambian `"v"`; ignore los que no conozca. Vea el formato completo en el
+[README en inglés](../README.md#jsonl-events-for-scripts-and-agents).
 
 ### Todas las flags CLI
 

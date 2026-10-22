@@ -64,7 +64,7 @@ Most download tools are either too simple (single-connection wget-clones) or too
 - **Diagnostics** (`--doctor`) — config path, yt-dlp location, extract tools, compiled features
 
 ### History & Persistence
-- **Download history** — every download recorded to `history.json` (atomic, multi-process safe, credentials stripped); `--history` / `--history-clear`
+- **Download history** — every download recorded in a SQLite `history.db` (multi-process safe, credentials stripped; `history.json` is migrated); `--history` with filters (`--status`, `--domain`, `--type`, `--protocol`, `--since`, `--until`, `--search`, `--sort`, `--json`) / `--history-clear`
 - **Configuration** — flags apply only to the current run; `--save-config` persists them (proxy passwords are never written). `KGET_CONFIG_DIR` overrides the config directory
 - **Interactive REPL** (`--interactive`) — every CLI download option, batch, retry, checksums, Tab completion, persistent history, Ctrl+C to pause
 
@@ -241,6 +241,10 @@ kget -H "Authorization: Bearer token123" -H "Accept: application/json" https://a
 kget --history                    # list last 50 downloads
 kget --history-clear              # remove all entries
 kget --history-clear completed    # keep only failures
+kget --history-clear failed       # remove only failures
+kget --history --status failed --domain example.com --since 7d
+kget --history --type video --sort largest --history-limit 10
+kget --history --json             # JSON array (with --jsonl: one object per line)
 ```
 
 ### Interactive REPL
@@ -280,13 +284,21 @@ Every line is one JSON object with `"v": 1` and an `event` field:
 ```jsonc
 {"v":1,"event":"started","url":"…","protocol":"http","advanced":true,"output":"…"}
 {"v":1,"event":"progress","bytes":524288,"total":1048576,"percent":50.0,"speed_bps":3145728,"eta_secs":12}
-{"v":1,"event":"status","message":"Calculating SHA256..."}
+{"v":1,"event":"status","message":"Calculating SHA256 hash..."}           // human text, may change
 {"v":1,"event":"files","files":[{"name":"a.mkv","size":123}]}            // torrents
+{"v":1,"event":"file_progress","files":[{"idx":0,"downloaded":64,"size":123,"pct":52.0}]}
+{"v":1,"event":"phase","phase":"verifying","algorithm":"sha256"}         // hashing started
 {"v":1,"event":"verified","algorithm":"sha256","hash":"…","ok":true}
+{"v":1,"event":"phase","phase":"extracting"}                             // --extract
 {"v":1,"event":"saved","path":"/abs/path/file.iso","bytes":1048576}
 {"v":1,"event":"completed"}
 {"v":1,"event":"error","code":"http_404","message":"…","retryable":false}
 ```
+
+Match on `event` and the structured fields, never on `status` messages. New event types and fields
+are added without changing `"v"`, so ignore the ones you don't know; `"v"` is bumped only when an
+existing event or field is removed or changes meaning. In `--batch` mode every event also carries
+the `url` it belongs to.
 
 Exit codes: `0` success, `1` error, `130` cancelled (Ctrl+C — partial data is kept for resume).
 
@@ -320,8 +332,8 @@ Exit codes: `0` success, `1` error, `130` cancelled (Ctrl+C — partial data is 
 | `--ytdlp` | Route through yt-dlp (auto-detected for video sites) |
 | `--quality <q>` | yt-dlp quality: `best`, `1080p`, `720p`, `480p`, `360p`, `audio` |
 | `--metalink` | Download from a Metalink manifest |
-| `--history` | Show download history |
-| `--history-clear [completed]` | Clear history |
+| `--history` | Show download history (filters: `--status`, `--domain`, `--type`, `--protocol`, `--since`, `--until`, `--search`, `--sort`, `--history-limit`, `--history-offset`, `--json`) |
+| `--history-clear [completed\|failed]` | Clear history |
 | `--jsonl` | Emit JSON Lines events to stdout |
 | `--gui` | Launch egui graphical interface |
 | `-i, --interactive` | Interactive REPL mode |

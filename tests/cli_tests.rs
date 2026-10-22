@@ -12,10 +12,11 @@ fn test_config_dir() -> std::path::PathBuf {
     dir
 }
 
-/// Get the kget command for testing
+/// Get the kget command for testing (never touches the real keychain)
 fn kget() -> Command {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("kget"));
     cmd.env("KGET_CONFIG_DIR", test_config_dir());
+    cmd.env("KGET_KEYCHAIN", "off");
     cmd
 }
 
@@ -23,6 +24,7 @@ fn kget() -> Command {
 fn kget_in(dir: &std::path::Path) -> Command {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("kget"));
     cmd.env("KGET_CONFIG_DIR", dir);
+    cmd.env("KGET_KEYCHAIN", "off");
     cmd
 }
 
@@ -412,6 +414,90 @@ fn save_config_never_stores_proxy_password() {
 }
 
 #[test]
+fn save_config_puts_proxy_password_in_keychain() {
+    let dir = tempfile::tempdir().unwrap();
+    // In-memory keychain: nothing reaches the real credential store.
+    kget_in(dir.path())
+        .env("KGET_KEYCHAIN", "mock")
+        .args([
+            "--save-config",
+            "--proxy",
+            "http://proxy.local:3128",
+            "--proxy-user",
+            "me",
+            "--proxy-pass",
+            "secret",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Proxy password saved in the system keychain (http://me@proxy.local:3128)",
+        ))
+        .stdout(predicate::str::contains("secret").not());
+    let text = std::fs::read_to_string(dir.path().join("config.json")).unwrap();
+    assert!(!text.contains("secret"), "password leaked into config.json");
+}
+
+#[test]
+fn save_config_without_keychain_warns_and_drops_password() {
+    let dir = tempfile::tempdir().unwrap();
+    kget_in(dir.path())
+        .args([
+            "--save-config",
+            "--proxy",
+            "http://proxy.local:3128",
+            "--proxy-user",
+            "me",
+            "--proxy-pass",
+            "secret",
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("proxy password not saved"));
+    let text = std::fs::read_to_string(dir.path().join("config.json")).unwrap();
+    assert!(!text.contains("secret"));
+}
+
+#[test]
+fn credentials_commands() {
+    kget()
+        .env("KGET_KEYCHAIN", "mock")
+        .args(["--credentials", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No saved credentials"));
+    kget()
+        .env("KGET_KEYCHAIN", "mock")
+        .args(["--credentials", "add", "sftp://alice@example.com"])
+        .write_stdin("pw-from-stdin\n")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("sftp://alice@example.com"))
+        .stdout(predicate::str::contains("pw-from-stdin").not());
+    kget()
+        .env("KGET_KEYCHAIN", "mock")
+        .args(["--credentials", "delete", "sftp://alice@example.com"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No saved password"));
+    kget()
+        .args(["--credentials", "status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("disabled by KGET_KEYCHAIN"));
+    kget()
+        .args(["--credentials", "list"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unavailable"));
+    kget()
+        .env("KGET_KEYCHAIN", "mock")
+        .args(["--credentials", "delete", "not-a-target"])
+        .assert()
+        .failure();
+}
+
+#[test]
 fn config_with_missing_fields_still_starts() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -511,7 +597,415 @@ fn history_redacts_credentials_from_cli_downloads() {
         ])
         .assert()
         .failure();
-    let history = std::fs::read_to_string(dir.path().join("history.json")).unwrap();
+    let out = kget_in(dir.path())
+        .args(["--history", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let history = String::from_utf8(out.stdout).unwrap();
     assert!(!history.contains("hunter2"));
     assert!(history.contains("127.0.0.1"));
+    let raw = std::fs::read(dir.path().join("history.db")).unwrap();
+    assert!(!raw.windows(7).any(|w| w == b"hunter2"));
+}
+
+/// Run `kget --history <args>` in `dir` and parse the JSON array.
+fn history_json(dir: &std::path::Path, args: &[&str]) -> Vec<serde_json::Value> {
+    let out = kget_in(dir)
+        .arg("--history")
+        .arg("--json")
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).unwrap()
+}
+
+fn names(v: &[serde_json::Value]) -> Vec<&str> {
+    v.iter().map(|e| e["filename"].as_str().unwrap()).collect()
+}
+
+#[test]
+fn history_filters_and_json_output() {
+    let dir = tempfile::tempdir().unwrap();
+    // A history.json from KGet 1.7 in KGET_CONFIG_DIR is migrated on first use
+    std::fs::write(
+        dir.path().join("history.json"),
+        r#"[
+ {"id":"1","url":"https://example.com/a.iso","filename":"a.iso","output_dir":"/d","status":"completed",
+  "bytes_total":10,"sha256":null,"expected_sha256":null,"created_at":1790812800,"finished_at":null,"error":null},
+ {"id":"2","url":"https://cdn.example.com/b.mp4","filename":"b.mp4","output_dir":"/d","status":"failed",
+  "bytes_total":null,"sha256":null,"expected_sha256":null,"created_at":1791504000,"finished_at":null,"error":"x"},
+ {"id":"3","url":"https://other.org/c.zip","filename":"c.zip","output_dir":"/d","status":"failed",
+  "bytes_total":99,"sha256":null,"expected_sha256":null,"created_at":1791590400,"finished_at":null,"error":"y"}
+]"#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        names(&history_json(dir.path(), &[])),
+        ["c.zip", "b.mp4", "a.iso"]
+    );
+    assert!(dir.path().join("history.json.bak").exists());
+    assert_eq!(
+        names(&history_json(dir.path(), &["--status", "failed"])),
+        ["c.zip", "b.mp4"]
+    );
+    assert_eq!(
+        names(&history_json(dir.path(), &["--domain", "example.com"])),
+        ["b.mp4", "a.iso"]
+    );
+    assert_eq!(
+        names(&history_json(
+            dir.path(),
+            &["--status", "failed", "--domain", "example.com"]
+        )),
+        ["b.mp4"]
+    );
+    // 2026-10-01 = 1790812800, 2026-10-09 = 1791504000, 2026-10-10 = 1791590400
+    assert_eq!(
+        names(&history_json(dir.path(), &["--since", "2026-10-02"])),
+        ["c.zip", "b.mp4"]
+    );
+    assert_eq!(
+        names(&history_json(dir.path(), &["--until", "2026-10-09"])),
+        ["b.mp4", "a.iso"]
+    );
+    assert_eq!(
+        names(&history_json(dir.path(), &["--search", "C.ZIP"])),
+        ["c.zip"]
+    );
+    assert_eq!(
+        names(&history_json(dir.path(), &["--type", "video"])),
+        ["b.mp4"]
+    );
+    assert_eq!(
+        names(&history_json(
+            dir.path(),
+            &["--sort", "largest", "--history-limit", "1"]
+        )),
+        ["c.zip"]
+    );
+    assert_eq!(
+        names(&history_json(dir.path(), &["--history-offset", "2"])),
+        ["a.iso"]
+    );
+    let entry = &history_json(dir.path(), &["--search", "a.iso"])[0];
+    assert_eq!(entry["status"], "completed");
+    assert_eq!(entry["output_dir"], "/d");
+    assert_eq!(entry["bytes_total"], 10);
+
+    // --jsonl: one object per line
+    let out = kget_in(dir.path())
+        .args(["--history", "--json", "--jsonl"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(text.lines().count(), 3);
+    for line in text.lines() {
+        serde_json::from_str::<serde_json::Value>(line).unwrap();
+    }
+
+    // Human table
+    kget_in(dir.path())
+        .args(["--history", "--status", "failed"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("c.zip"))
+        .stdout(predicate::str::contains("a.iso").not());
+
+    // Bad values are reported
+    kget_in(dir.path())
+        .args(["--history", "--status", "bogus"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown status"));
+    kget_in(dir.path())
+        .args(["--history", "--since", "someday"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid date"));
+    // Filters need --history
+    kget_in(dir.path())
+        .args(["--status", "failed"])
+        .assert()
+        .failure();
+
+    // --history-clear failed removes only failures
+    kget_in(dir.path())
+        .args(["--history-clear", "failed"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Removed 2"));
+    assert_eq!(names(&history_json(dir.path(), &[])), ["a.iso"]);
+}
+
+#[test]
+fn history_survives_concurrent_processes() {
+    let dir = tempfile::tempdir().unwrap();
+    // Several kget processes recording at the same time (each fails fast)
+    let children: Vec<_> = (0..6)
+        .map(|i| {
+            std::process::Command::new(assert_cmd::cargo::cargo_bin!("kget"))
+                .env("KGET_CONFIG_DIR", dir.path())
+                .current_dir(dir.path())
+                .args([
+                    "-q",
+                    "--retries",
+                    "1",
+                    "--timeout",
+                    "2",
+                    &format!("http://127.0.0.1:9/file{i}.bin"),
+                ])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap()
+        })
+        .collect();
+    for mut c in children {
+        c.wait().unwrap();
+    }
+    let all = history_json(dir.path(), &["--status", "failed"]);
+    assert_eq!(all.len(), 6);
+    let mut files = names(&all);
+    files.sort();
+    assert_eq!(
+        files,
+        [
+            "file0.bin",
+            "file1.bin",
+            "file2.bin",
+            "file3.bin",
+            "file4.bin",
+            "file5.bin"
+        ]
+    );
+    assert!(all.iter().all(|e| e["protocol"] == "http"));
+}
+
+// ============================================================================
+// JSONL `phase` events (verification / extraction)
+// ============================================================================
+
+/// Tiny blocking HTTP server that answers every request with `body`
+/// (honouring `Range` requests, so turbo mode uses parallel chunks).
+fn serve_body(body: Vec<u8>) -> String {
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let body = std::sync::Arc::new(body);
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let body = body.clone();
+            std::thread::spawn(move || {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut request_line = String::new();
+                if reader.read_line(&mut request_line).is_err() {
+                    return;
+                }
+                let mut range: Option<(usize, usize)> = None;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("range:")
+                        && let Some((a, b)) = v.trim().trim_start_matches("bytes=").split_once('-')
+                    {
+                        let last = body.len() - 1;
+                        let start = a.parse().unwrap_or(0);
+                        let end = b.parse().unwrap_or(last).min(last);
+                        range = Some((start, end));
+                    }
+                }
+                let (status, slice, extra) = match range {
+                    Some((s, e)) => (
+                        "206 Partial Content",
+                        &body[s..=e],
+                        format!("Content-Range: bytes {s}-{e}/{}\r\n", body.len()),
+                    ),
+                    None => ("200 OK", &body[..], String::new()),
+                };
+                let head = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\n{extra}Connection: close\r\n\r\n",
+                    slice.len()
+                );
+                let _ = stream.write_all(head.as_bytes());
+                if !request_line.starts_with("HEAD") {
+                    let _ = stream.write_all(slice);
+                }
+            });
+        }
+    });
+    base
+}
+
+fn sha256_hex(data: &[u8]) -> String {
+    use sha2::Digest;
+    hex::encode(sha2::Sha256::digest(data))
+}
+
+/// Run kget with `args` in `dir`; return the parsed JSONL events.
+fn jsonl_events(dir: &std::path::Path, args: &[&str]) -> Vec<serde_json::Value> {
+    let out = kget_in(dir).current_dir(dir).args(args).output().unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        out.status.success(),
+        "kget failed: {stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    stdout
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("not JSON: {l:?} ({e})")))
+        .collect()
+}
+
+fn event_index(events: &[serde_json::Value], pred: impl Fn(&serde_json::Value) -> bool) -> usize {
+    events
+        .iter()
+        .position(pred)
+        .unwrap_or_else(|| panic!("event not found in {events:#?}"))
+}
+
+/// A verifying `phase` event for `algorithm` arrives before `completed`.
+fn assert_verifying_phase(events: &[serde_json::Value], algorithm: &str) -> usize {
+    let phase = event_index(events, |e| {
+        e["event"] == "phase" && e["phase"] == "verifying" && e["algorithm"] == algorithm
+    });
+    assert_eq!(events[phase]["v"], 1);
+    let completed = event_index(events, |e| e["event"] == "completed");
+    assert!(phase < completed);
+    phase
+}
+
+#[test]
+fn jsonl_checksum_emits_verifying_phase() {
+    let body = b"kget phase event test body".repeat(1000);
+    let base = serve_body(body.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let checksum = format!("sha512:{}", {
+        use sha2::Digest;
+        hex::encode(sha2::Sha512::digest(&body))
+    });
+    let url = format!("{base}/file.bin");
+    let events = jsonl_events(dir.path(), &["--jsonl", "--checksum", &checksum, &url]);
+    let phase = assert_verifying_phase(&events, "sha512");
+    let verified = event_index(&events, |e| e["event"] == "verified" && e["ok"] == true);
+    assert!(phase < verified);
+}
+
+#[test]
+fn jsonl_sha256_emits_verifying_phase_simple_and_turbo() {
+    let body = b"0123456789abcdef".repeat(64 * 1024);
+    let base = serve_body(body.clone());
+    let hash = sha256_hex(&body);
+    for advanced in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!("{base}/image.bin");
+        let mut args = vec!["--jsonl", "--sha256", &hash, &url];
+        if advanced {
+            args.push("-a");
+        }
+        let events = jsonl_events(dir.path(), &args);
+        assert_verifying_phase(&events, "sha256");
+        // The engine's status message is kept for older consumers.
+        assert!(
+            events.iter().any(|e| e["event"] == "status"
+                && e["message"].as_str().unwrap_or("").contains("SHA256")),
+            "advanced={advanced}: {events:#?}"
+        );
+        if advanced {
+            // Parallel ranges were used, not the single-stream fallback.
+            assert!(
+                events.iter().any(|e| e["message"]
+                    .as_str()
+                    .is_some_and(|m| m.starts_with("File size verified"))),
+                "{events:#?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn jsonl_metalink_emits_verifying_phase() {
+    let body = b"metalink body".repeat(500);
+    let base = serve_body(body.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = dir.path().join("files.meta4");
+    std::fs::write(
+        &manifest,
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<metalink xmlns="urn:ietf:params:xml:ns:metalink">
+  <file name="data.bin">
+    <size>{}</size>
+    <hash type="sha-256">{}</hash>
+    <url priority="1">{base}/data.bin</url>
+  </file>
+</metalink>"#,
+            body.len(),
+            sha256_hex(&body)
+        ),
+    )
+    .unwrap();
+    let out_dir = dir.path().join("out");
+    let events = jsonl_events(
+        dir.path(),
+        &[
+            "--jsonl",
+            "-O",
+            out_dir.to_str().unwrap(),
+            manifest.to_str().unwrap(),
+        ],
+    );
+    assert_verifying_phase(&events, "sha256");
+    assert_eq!(std::fs::read(out_dir.join("data.bin")).unwrap(), body);
+}
+
+#[test]
+fn jsonl_batch_phase_events_carry_url() {
+    let body = b"batch body".repeat(100);
+    let base = serve_body(body.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!("{base}/one.bin");
+    let list = dir.path().join("urls.txt");
+    std::fs::write(&list, format!("{url}\n")).unwrap();
+    let checksum = format!("sha256:{}", sha256_hex(&body));
+    let out_dir = dir.path().join("out");
+    let events = jsonl_events(
+        dir.path(),
+        &[
+            "--jsonl",
+            "--checksum",
+            &checksum,
+            "--batch",
+            list.to_str().unwrap(),
+            "-O",
+            out_dir.to_str().unwrap(),
+        ],
+    );
+    let phase = assert_verifying_phase(&events, "sha256");
+    assert_eq!(events[phase]["url"], url.as_str());
+}
+
+#[test]
+fn jsonl_extract_emits_extracting_phase() {
+    // Not a real archive: the phase is announced before the tool runs, and a
+    // failed extraction is only a warning.
+    let base = serve_body(b"not really a tarball".to_vec());
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!("{base}/archive.tar.gz");
+    let events = jsonl_events(dir.path(), &["--jsonl", "--extract", &url]);
+    let phase = event_index(&events, |e| e["event"] == "phase");
+    assert_eq!(events[phase]["phase"], "extracting");
+    assert!(events[phase].get("algorithm").is_none());
+    let saved = event_index(&events, |e| e["event"] == "saved");
+    assert!(phase < saved);
 }

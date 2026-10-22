@@ -16,7 +16,7 @@ A native macOS frontend for KGet built with SwiftUI, providing deep system integ
 - **Drag-and-drop URLs** — drag any HTTP/HTTPS/FTP/magnet link into the window
 - **Clipboard monitor** — detects new URLs every 1.5s, shows dismissable banner with one-click download
 - **Speed sparkline** — 44×16pt real-time speed graph per active download (last 30 samples)
-- **History tab** — full download history from `history.json`; hover to re-download
+- **History tab** — full download history from `kget-bin --history --json`; hover to re-download
 - **yt-dlp auto-detection** — video URLs routed through yt-dlp; quality picker in Settings
 - **WebDAV support** — `webdav://` and `webdavs://` auto-detected from URL scheme
 - **Auto-extract archives** — toggle in Settings → Downloads
@@ -36,7 +36,7 @@ A native macOS frontend for KGet built with SwiftUI, providing deep system integ
 ```
 
 The script:
-1. Builds the Rust binary with all features (`gui,torrent-native,torrent-transmission`)
+1. Builds the Rust binary with the native torrent client (`--features torrent-native`)
 2. Compiles the Swift app via `swift build`
 3. Assembles `KGet.app` bundle with the Rust binary renamed to `kget-bin`
 4. Compiles and embeds `KGetShareExtension.appex` into `Contents/PlugIns/`
@@ -71,7 +71,7 @@ The Swift frontend handles:
 
 The Rust backend (`kget-bin`) handles:
 - All actual file downloads (HTTP/HTTPS, FTP, SFTP, WebDAV, torrent)
-- Progress reporting via stdout (transitioning to JSONL)
+- Progress, verification/extraction phases and errors via the versioned `--jsonl` protocol (`src/events.rs`); the app never parses human-readable text
 - yt-dlp subprocess management
 - History persistence
 

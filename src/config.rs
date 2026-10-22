@@ -50,7 +50,7 @@ use std::path::PathBuf;
 ///     proxy_type: ProxyType::Http,
 /// };
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProxyConfig {
     /// Whether to use the proxy for downloads
@@ -59,7 +59,10 @@ pub struct ProxyConfig {
     pub url: Option<String>,
     /// Username for proxy authentication (optional)
     pub username: Option<String>,
-    /// Password for proxy authentication (optional)
+    /// Password for proxy authentication (optional). Never written to
+    /// `config.json`: `kget --save-config` keeps it in the system keychain
+    /// (see [`crate::credentials`]).
+    #[serde(skip_serializing)]
     pub password: Option<String>,
     /// Type of proxy protocol to use
     pub proxy_type: ProxyType,
@@ -100,6 +103,18 @@ impl ProxyType {
         } else {
             ProxyType::Http
         }
+    }
+}
+
+impl std::fmt::Debug for ProxyConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProxyConfig")
+            .field("enabled", &self.enabled)
+            .field("url", &self.url)
+            .field("username", &self.username)
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .field("proxy_type", &self.proxy_type)
+            .finish()
     }
 }
 
@@ -292,7 +307,7 @@ pub struct Config {
     pub ytdlp_path: Option<String>,
 }
 
-/// Directory holding `config.json` and `history.json`.
+/// Directory holding `config.json` and `history.db`.
 ///
 /// Honours `KGET_CONFIG_DIR`; otherwise `<OS config dir>/kget`.
 pub fn config_dir() -> Result<PathBuf, io::Error> {

@@ -663,3 +663,63 @@ async fn test_concurrent_mock_requests() {
         assert_eq!(result, &format!("Content for file {}", i));
     }
 }
+
+/// WebDAV URL with a user but no password: the password comes from the
+/// (mock) keychain; a prompted password is saved once the server accepts it.
+#[tokio::test]
+async fn test_webdav_uses_keychain_and_saves_prompted_password() {
+    use kget::credentials::{CredentialResolver, Keychain, SavePolicy, Target};
+    use kget::webdav::WebDavDownloader;
+    use kget::{Optimizer, ProxyConfig};
+    use std::sync::Arc;
+
+    let mock_server = MockServer::start().await;
+    let temp_dir = TempDir::new().unwrap();
+    for (file, auth) in [
+        ("/saved.txt", "Basic YWxpY2U6czNjcmV0"), // alice:s3cret
+        ("/typed.txt", "Basic YWxpY2U6dHlwZWQ="), // alice:typed
+    ] {
+        Mock::given(method("GET"))
+            .and(path(file))
+            .and(header("authorization", auth))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"ok".to_vec()))
+            .mount(&mock_server)
+            .await;
+    }
+    let base = mock_server.uri().replacen("http://", "webdav://alice@", 1);
+    let target = Target::from_url(&base).unwrap();
+
+    let fetch = |resolver: Arc<CredentialResolver>, name: &str| {
+        let url = format!("{base}/{name}");
+        let out = temp_dir.path().join(name).to_string_lossy().into_owned();
+        tokio::task::spawn_blocking(move || {
+            WebDavDownloader::new(url, out, true, ProxyConfig::default(), Optimizer::new())
+                .with_credentials(resolver)
+                .download()
+        })
+    };
+
+    // 1. Saved password, no prompt
+    let keychain = Keychain::mock();
+    keychain.store(&target, "s3cret").unwrap();
+    let resolver = Arc::new(
+        CredentialResolver::with_keychain(keychain)
+            .with_prompt(Arc::new(|_| panic!("must not prompt")))
+            .quiet(true),
+    );
+    fetch(resolver, "saved.txt").await.unwrap().unwrap();
+    assert_eq!(fs::read(temp_dir.path().join("saved.txt")).unwrap(), b"ok");
+
+    // 2. Prompted password, saved after the server accepted it
+    let keychain = Keychain::mock();
+    let resolver = Arc::new(
+        CredentialResolver::with_keychain(keychain.clone())
+            .with_prompt(Arc::new(|_| Some("typed".to_string())))
+            .with_confirm(Arc::new(|_| true))
+            .save_policy(SavePolicy::Ask)
+            .quiet(true),
+    );
+    fetch(resolver.clone(), "typed.txt").await.unwrap().unwrap();
+    assert_eq!(resolver.finish(), vec![target.clone()]);
+    assert_eq!(keychain.get(&target).unwrap().as_deref(), Some("typed"));
+}

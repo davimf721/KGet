@@ -2,7 +2,9 @@
 //!
 //! Handles `webdav://` and `webdavs://` URLs by converting them to
 //! `http://` / `https://` and injecting a `Basic` authentication header
-//! when credentials are embedded in the URL.
+//! when credentials are embedded in the URL. A URL with a user but no
+//! password takes the password from the system keychain or a prompt when a
+//! [`CredentialResolver`] is attached.
 //!
 //! WebDAV files are fetched via ordinary HTTP GET — servers that implement
 //! RFC 4918 always support GET for existing resources, so no special
@@ -10,9 +12,11 @@
 
 use crate::DownloadOptions;
 use crate::config::ProxyConfig;
+use crate::credentials::{CredentialResolver, Target};
 use crate::download::download_to_path as http_download;
 use crate::optimization::Optimizer;
 use std::error::Error;
+use std::sync::Arc;
 
 /// Returns `true` if the URL uses the `webdav://` or `webdavs://` scheme.
 pub fn is_webdav_url(url: &str) -> bool {
@@ -29,7 +33,9 @@ pub struct WebDavDownloader {
     optimizer: Optimizer,
     username: Option<String>,
     password: Option<String>,
+    target: Option<Target>,
     options: DownloadOptions,
+    credentials: Option<Arc<CredentialResolver>>,
 }
 
 impl WebDavDownloader {
@@ -54,7 +60,9 @@ impl WebDavDownloader {
             optimizer,
             username,
             password,
+            target: Target::from_url(&url),
             options: DownloadOptions::default(),
+            credentials: None,
         }
     }
 
@@ -62,6 +70,13 @@ impl WebDavDownloader {
     /// underlying HTTP download. `quiet_mode` and `output_path` are ignored.
     pub fn with_options(mut self, options: DownloadOptions) -> Self {
         self.options = options;
+        self
+    }
+
+    /// Look up (or prompt for) the password when the URL has a user but no
+    /// password, and report accepted passwords back to the resolver.
+    pub fn with_credentials(mut self, credentials: Arc<CredentialResolver>) -> Self {
+        self.credentials = Some(credentials);
         self
     }
 
@@ -74,24 +89,38 @@ impl WebDavDownloader {
         options.quiet_mode = self.quiet;
         options.output_path = Some(self.output.clone());
 
+        let creds = self.credentials.as_deref().zip(self.target.as_ref());
+        let password = match (&self.password, creds) {
+            (Some(p), Some((r, t))) => {
+                r.provided(t, p);
+                Some(p.clone())
+            }
+            (Some(p), None) => Some(p.clone()),
+            (None, Some((r, t))) => r.resolve(t, "WebDAV password"),
+            (None, None) => None,
+        };
         if let Some(user) = &self.username {
             if self.http_url.starts_with("http://") && !self.quiet {
                 eprintln!("Warning: sending WebDAV credentials without TLS (use webdavs://)");
             }
-            let pass = self.password.as_deref().unwrap_or("");
+            let pass = password.as_deref().unwrap_or("");
             let creds = base64_encode(format!("{user}:{pass}").as_bytes());
             options
                 .extra_headers
                 .push(("Authorization".to_string(), format!("Basic {creds}")));
         }
 
-        http_download(
+        let path = http_download(
             &self.http_url,
             self.proxy.clone(),
             self.optimizer.clone(),
             options,
             status_callback,
-        )
+        )?;
+        if let Some((r, t)) = creds {
+            r.accepted(t);
+        }
+        Ok(path)
     }
 
     /// Download the resource.
