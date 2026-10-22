@@ -9,11 +9,47 @@
 //! The [`ProxyType`] describes how KGet talks to the proxy; the proxy is used
 //! for **both** `http://` and `https://` targets. A proxy that is enabled but
 //! invalid is an error — KGet never silently falls back to a direct connection.
+//!
+//! # HTTP versions
+//!
+//! HTTP/2 is negotiated through TLS ALPN (`h2`) on every client; plain
+//! `http://` URLs and servers without HTTP/2 stay on HTTP/1.1. Proxies keep
+//! working: HTTPS targets are tunnelled (`CONNECT` / SOCKS) and negotiate h2
+//! end-to-end. [`HttpVersion`] forces a version when needed.
+//!
+//! HTTP/3 (QUIC) is experimental and needs both the `http3` cargo feature and
+//! `RUSTFLAGS="--cfg reqwest_unstable"`, because reqwest's HTTP/3 support is
+//! unstable. QUIC runs over UDP and cannot go through HTTP or SOCKS proxies, so
+//! [`HttpVersion::Http3`] is ignored when a proxy is enabled.
 
 use crate::config::{ProxyConfig, ProxyType};
 use crate::error::KgetError;
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use std::time::Duration;
+
+/// Which HTTP version a client speaks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HttpVersion {
+    /// HTTP/2 when the server offers it through TLS ALPN, HTTP/1.1 otherwise.
+    #[default]
+    Auto,
+    /// Never use HTTP/2.
+    Http1Only,
+    /// Speak HTTP/2 without negotiation (also over cleartext `http://`, "h2c").
+    /// Only for servers known to support it.
+    Http2PriorKnowledge,
+    /// HTTP/3 over QUIC without negotiation. Without the `http3` feature (and
+    /// `--cfg reqwest_unstable`), or with a proxy enabled, this behaves like
+    /// [`Auto`](HttpVersion::Auto).
+    Http3,
+}
+
+impl HttpVersion {
+    /// Whether HTTP/3 is compiled in (`http3` feature + `--cfg reqwest_unstable`).
+    pub const fn http3_available() -> bool {
+        cfg!(all(feature = "http3", reqwest_unstable))
+    }
+}
 
 /// User agent sent with every request.
 pub const USER_AGENT: &str = concat!("KGet/", env!("CARGO_PKG_VERSION"));
@@ -32,6 +68,8 @@ pub struct ClientOptions {
     /// Timeout for each operation (sending the request and each read), not the
     /// whole transfer. `None` disables it.
     pub io_timeout: Option<Duration>,
+    /// HTTP version policy (default: negotiate HTTP/2 via ALPN).
+    pub http_version: HttpVersion,
 }
 
 impl Default for ClientOptions {
@@ -39,6 +77,7 @@ impl Default for ClientOptions {
         Self {
             connect_timeout: Duration::from_secs(20),
             io_timeout: Some(Duration::from_secs(DEFAULT_TIMEOUT_SECS)),
+            http_version: HttpVersion::Auto,
         }
     }
 }
@@ -56,8 +95,53 @@ impl ClientOptions {
         Self {
             connect_timeout: Duration::from_secs(secs.min(60)),
             io_timeout: Some(Duration::from_secs(secs)),
+            ..Self::default()
         }
     }
+
+    /// The same options with another HTTP version policy.
+    pub fn with_http_version(self, http_version: HttpVersion) -> Self {
+        Self {
+            http_version,
+            ..self
+        }
+    }
+}
+
+/// The configured proxy, or `None` for a direct connection.
+fn make_proxy(proxy: &ProxyConfig) -> Result<Option<reqwest::Proxy>, KgetError> {
+    if !proxy.enabled {
+        return Ok(None);
+    }
+    let raw = proxy
+        .url
+        .as_deref()
+        .filter(|u| !u.trim().is_empty())
+        .ok_or_else(|| KgetError::Protocol("Proxy is enabled but no URL is set".into()))?;
+    let url = normalize_proxy_url(raw, proxy.proxy_type);
+    // Proxy::all covers http:// and https:// targets; the proxy's own
+    // protocol comes from the scheme of its URL.
+    let mut p = reqwest::Proxy::all(&url)
+        .map_err(|e| KgetError::Protocol(format!("Invalid proxy '{url}': {e}")))?;
+    if let (Some(u), Some(pw)) = (&proxy.username, &proxy.password) {
+        p = p.basic_auth(u, pw);
+    }
+    Ok(Some(p))
+}
+
+/// Apply the version policy to a (blocking or async) `ClientBuilder`.
+macro_rules! apply_version {
+    ($b:expr, $version:expr, $proxied:expr) => {{
+        let b = $b;
+        match $version {
+            HttpVersion::Auto => b,
+            HttpVersion::Http1Only => b.http1_only(),
+            HttpVersion::Http2PriorKnowledge => b.http2_prior_knowledge(),
+            #[cfg(all(feature = "http3", reqwest_unstable))]
+            HttpVersion::Http3 if !$proxied => b.http3_prior_knowledge(),
+            HttpVersion::Http3 => b,
+        }
+    }};
 }
 
 /// Build a blocking client honouring the proxy configuration.
@@ -71,24 +155,39 @@ pub fn build_client(proxy: &ProxyConfig, opts: &ClientOptions) -> Result<Client,
         .user_agent(USER_AGENT)
         .connect_timeout(opts.connect_timeout)
         .timeout(opts.io_timeout);
-
-    if proxy.enabled {
-        let raw = proxy
-            .url
-            .as_deref()
-            .filter(|u| !u.trim().is_empty())
-            .ok_or_else(|| KgetError::Protocol("Proxy is enabled but no URL is set".into()))?;
-        let url = normalize_proxy_url(raw, proxy.proxy_type);
-        // Proxy::all covers http:// and https:// targets; the proxy's own
-        // protocol comes from the scheme of its URL.
-        let mut p = reqwest::Proxy::all(&url)
-            .map_err(|e| KgetError::Protocol(format!("Invalid proxy '{url}': {e}")))?;
-        if let (Some(u), Some(pw)) = (&proxy.username, &proxy.password) {
-            p = p.basic_auth(u, pw);
-        }
+    if let Some(p) = make_proxy(proxy)? {
         b = b.proxy(p);
     }
+    b = apply_version!(b, opts.http_version, proxy.enabled);
+    b.build()
+        .map_err(|e| KgetError::Protocol(format!("Failed to create HTTP client: {e}")))
+}
 
+/// Build an async client (used by the turbo engine) honouring the proxy
+/// configuration.
+///
+/// The I/O timeout applies to each read (`read_timeout`), never to the whole
+/// transfer. HTTP/2 uses adaptive flow-control windows so a single connection
+/// can carry several fast streams.
+///
+/// # Errors
+///
+/// Same as [`build_client`].
+pub fn build_async_client(
+    proxy: &ProxyConfig,
+    opts: &ClientOptions,
+) -> Result<reqwest::Client, KgetError> {
+    let mut b = reqwest::Client::builder()
+        .user_agent(USER_AGENT)
+        .connect_timeout(opts.connect_timeout)
+        .http2_adaptive_window(true);
+    if let Some(t) = opts.io_timeout {
+        b = b.read_timeout(t);
+    }
+    if let Some(p) = make_proxy(proxy)? {
+        b = b.proxy(p);
+    }
+    b = apply_version!(b, opts.http_version, proxy.enabled);
     b.build()
         .map_err(|e| KgetError::Protocol(format!("Failed to create HTTP client: {e}")))
 }
@@ -120,9 +219,30 @@ pub fn apply_headers(mut req: RequestBuilder, headers: &[(String, String)]) -> R
     req
 }
 
+/// [`apply_headers`] for the async client.
+pub fn apply_headers_async(
+    mut req: reqwest::RequestBuilder,
+    headers: &[(String, String)],
+) -> reqwest::RequestBuilder {
+    for (name, value) in headers {
+        if let (Ok(n), Ok(v)) = (
+            reqwest::header::HeaderName::from_bytes(name.as_bytes()),
+            reqwest::header::HeaderValue::from_str(value),
+        ) {
+            req = req.header(n, v);
+        }
+    }
+    req
+}
+
 /// Delay requested by a `Retry-After: <seconds>` header (capped at 5 minutes).
 pub fn retry_after(resp: &Response) -> Option<Duration> {
-    resp.headers()
+    retry_after_header(resp.headers())
+}
+
+/// [`retry_after`] on a raw header map (works for blocking and async responses).
+pub fn retry_after_header(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    headers
         .get(reqwest::header::RETRY_AFTER)?
         .to_str()
         .ok()?
@@ -178,6 +298,21 @@ mod tests {
             ..ProxyConfig::default()
         };
         assert!(build_client(&proxy, &ClientOptions::default()).is_ok());
+        let h2 = ClientOptions::default().with_http_version(HttpVersion::Http2PriorKnowledge);
+        assert!(build_async_client(&proxy, &h2).is_ok());
+    }
+
+    #[test]
+    fn http3_request_with_proxy_falls_back() {
+        // QUIC cannot use the proxy; the client must still build (as Auto).
+        let proxy = ProxyConfig {
+            enabled: true,
+            url: Some("http://127.0.0.1:3128".into()),
+            ..ProxyConfig::default()
+        };
+        let opts = ClientOptions::default().with_http_version(HttpVersion::Http3);
+        assert!(build_async_client(&proxy, &opts).is_ok());
+        assert!(build_async_client(&ProxyConfig::default(), &opts).is_ok());
     }
 
     #[test]
