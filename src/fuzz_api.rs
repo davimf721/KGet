@@ -136,3 +136,49 @@ pub fn jsonl(data: &[u8]) {
     let v: serde_json::Value = serde_json::from_str(&line).expect("valid JSON");
     assert_eq!(v["message"].as_str(), Some(&*s));
 }
+
+/// `--since` / `--until` date bounds of the history query.
+pub fn date_bound(data: &[u8]) {
+    let s = String::from_utf8_lossy(data);
+    if let (Ok(start), Ok(end)) = (
+        crate::queue::parse_date_bound(&s, false),
+        crate::queue::parse_date_bound(&s, true),
+    ) {
+        assert!(end >= start, "{s:?}: end {end} < start {start}");
+    }
+}
+
+/// `--checksum <algo>:<hex>` / bare hex specs.
+pub fn checksum_spec(data: &[u8]) {
+    let s = String::from_utf8_lossy(data);
+    if let Ok((algo, hex)) = crate::runner::parse_checksum_spec(&s) {
+        // `<algo>:<hex>` accepts any length (by design); bare hex is inferred
+        // from its length.
+        if !s.contains(':') {
+            assert_eq!(
+                crate::checksum::ChecksumAlgorithm::from_hex_len(&hex),
+                Some(algo),
+                "{s:?}"
+            );
+        }
+        assert!(
+            !hex.is_empty()
+                && hex
+                    .chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
+    }
+}
+
+/// `-i <file>` URL lists.
+pub fn url_list(data: &[u8]) {
+    let s = String::from_utf8_lossy(data);
+    let urls = crate::runner::parse_url_list(&s);
+    assert!(urls.len() <= s.lines().count());
+    for u in &urls {
+        assert!(
+            !u.is_empty() && !u.starts_with('#') && u.trim() == u,
+            "{u:?}"
+        );
+    }
+}

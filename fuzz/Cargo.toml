@@ -82,3 +82,24 @@ path = "fuzz_targets/jsonl.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "date_bound"
+path = "fuzz_targets/date_bound.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "checksum_spec"
+path = "fuzz_targets/checksum_spec.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "url_list"
+path = "fuzz_targets/url_list.rs"
+test = false
+doc = false
+bench = false

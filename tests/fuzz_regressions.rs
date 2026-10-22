@@ -76,3 +76,18 @@ fn config() {
 fn jsonl() {
     run("jsonl", kget::fuzz_api::jsonl);
 }
+
+#[test]
+fn date_bound() {
+    run("date_bound", kget::fuzz_api::date_bound);
+}
+
+#[test]
+fn checksum_spec() {
+    run("checksum_spec", kget::fuzz_api::checksum_spec);
+}
+
+#[test]
+fn url_list() {
+    run("url_list", kget::fuzz_api::url_list);
+}

@@ -3,3 +3,5 @@ corpus
 artifacts
 coverage
 Cargo.lock
+# macOS AppleDouble files on non-HFS volumes
+._*
