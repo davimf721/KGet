@@ -290,7 +290,7 @@ impl Default for SftpConfig {
 /// config.optimization.max_connections = 16;
 /// config.save().expect("Failed to save config");
 /// ```
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     /// Proxy server settings
@@ -305,6 +305,34 @@ pub struct Config {
     pub sftp: SftpConfig,
     /// Explicit path to the yt-dlp binary (the `KGET_YTDLP_PATH` env var wins)
     pub ytdlp_path: Option<String>,
+    /// Apply the smart rules ([`crate::rules`]) to every download
+    /// (`--organize` / `--no-organize` override it for one run)
+    pub rules_enabled: bool,
+    /// Also apply the built-in rules (Videos, Music, Images, …) after the
+    /// user rules when organizing
+    pub builtin_rules: bool,
+    /// Root folder that rule destinations are created in (`None` = the
+    /// current directory)
+    pub organize_dir: Option<String>,
+    /// User-defined smart rules, in order: the first match wins
+    pub rules: Vec<crate::rules::Rule>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            proxy: ProxyConfig::default(),
+            optimization: OptimizationConfig::default(),
+            torrent: TorrentConfig::default(),
+            ftp: FtpConfig::default(),
+            sftp: SftpConfig::default(),
+            ytdlp_path: None,
+            rules_enabled: false,
+            builtin_rules: true,
+            organize_dir: None,
+            rules: Vec::new(),
+        }
+    }
 }
 
 /// Directory holding `config.json` and `history.db`.

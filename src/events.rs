@@ -125,6 +125,14 @@ pub struct FileProgressEntry {
 /// {"v":1,"event":"completed"}
 /// {"v":1,"event":"error","code":"http_404","message":"…","retryable":false}
 /// ```
+///
+/// Smart rules and duplicate detection add (KGet 1.8):
+///
+/// ```text
+/// {"v":1,"event":"rule","name":"builtin:videos","output":"./Videos/","tags":["talks"]}
+/// {"v":1,"event":"duplicate","kind":"url","action":"skip","path":"/abs/x.iso","existing_id":"…"}
+/// {"v":1,"event":"duplicate","kind":"content","action":"linked","path":"/abs/old.iso","existing_id":"…","sha256":"…"}
+/// ```
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum JsonEvent {
@@ -170,6 +178,30 @@ pub enum JsonEvent {
         algorithm: String,
         hash: String,
         ok: bool,
+    },
+    /// A smart rule matched (sent before `started`); `output` is the
+    /// destination chosen by the rule, empty when it only sets tags/options.
+    Rule {
+        name: String,
+        output: String,
+        tags: Vec<String>,
+    },
+    /// The download duplicates an earlier one.
+    ///
+    /// `kind` is `"url"` (same URL already downloaded, file intact; sent
+    /// before the transfer) or `"content"` (same SHA-256 as another file,
+    /// sent after it). `action` is what KGet did: `skip`, `download`,
+    /// `link` (linked/copied instead of downloading), `linked` (new file
+    /// replaced by a hard link, `--dedupe`) or `kept`. `path` is the
+    /// existing file.
+    Duplicate {
+        kind: String,
+        action: String,
+        path: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        existing_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        sha256: Option<String>,
     },
     /// The file was written to its final location.
     Saved { path: String, bytes: u64 },

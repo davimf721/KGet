@@ -171,6 +171,8 @@ pub struct HistoryFilter {
     pub until: Option<String>,
     /// Text in the URL or file name
     pub search: Option<String>,
+    /// Tags the entries must all have
+    pub tags: Vec<String>,
     /// Sort order (`newest`, `oldest`, `largest`, `smallest`, `name`, `fastest`);
     /// empty = newest
     pub sort: String,
@@ -211,6 +213,9 @@ impl HistoryFilter {
         if let Some(s) = &self.search {
             q = q.search(s);
         }
+        for t in self.tags.iter().flat_map(|t| t.split(',')) {
+            q = q.tag(t);
+        }
         Ok(q)
     }
 }
@@ -238,8 +243,13 @@ pub fn print_history(query: &HistoryQuery, json: bool, jsonl: bool) -> Result<()
                 .bytes_total
                 .map(|b| humansize::format_size(b, humansize::BINARY))
                 .unwrap_or_default();
+            let tags = if e.tags.is_empty() {
+                String::new()
+            } else {
+                format!("  [{}]", e.tags.join(", "))
+            };
             println!(
-                "{:<16} {:<22} {:<12} {:>10}  {}",
+                "{:<16} {:<22} {:<12} {:>10}  {}{tags}",
                 e.id,
                 e.created_at_display(),
                 e.status,

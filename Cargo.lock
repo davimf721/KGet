@@ -29,6 +29,7 @@ dependencies = [
  "notify-rust",
  "predicates",
  "rayon",
+ "regex",
  "reqwest 0.13.2",
  "rfd",
  "roxmltree",

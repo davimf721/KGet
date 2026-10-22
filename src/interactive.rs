@@ -59,6 +59,7 @@ const COMMANDS: &[&str] = &[
     "verify",
     "extract",
     "credentials",
+    "rules",
     "clear",
     "version",
     "help",
@@ -93,6 +94,11 @@ const DOWNLOAD_FLAGS: &[&str] = &[
     "--torrent",
     "--metalink",
     "--save-credentials",
+    "--organize",
+    "--no-organize",
+    "--tag",
+    "--duplicates",
+    "--dedupe",
 ];
 
 const CONFIG_KEYS: &[&str] = &[
@@ -215,6 +221,10 @@ struct DownloadArgs {
     at: Option<String>,
     jobs: usize,
     save_credentials: bool,
+    organize: Option<bool>,
+    tags: Vec<String>,
+    duplicates: Option<kget::dedupe::DuplicatePolicy>,
+    dedupe: bool,
 }
 
 fn take_value<'a>(parts: &[&'a str], i: &mut usize, flag: &str) -> Result<&'a str, String> {
@@ -248,6 +258,11 @@ fn parse_download_args(parts: &[&str]) -> Result<DownloadArgs, String> {
             "--no-clobber" => args.no_clobber = true,
             "--extract" => args.extract = true,
             "--save-credentials" => args.save_credentials = true,
+            "--organize" => args.organize = Some(true),
+            "--no-organize" => args.organize = Some(false),
+            "--dedupe" => args.dedupe = true,
+            "--tag" => args.tags.push(take_value(parts, &mut i, flag)?.into()),
+            "--duplicates" => args.duplicates = Some(take_value(parts, &mut i, flag)?.parse()?),
             "--ftp" => args.forced = Some(Protocol::Ftp),
             "--sftp" => args.forced = Some(Protocol::Sftp),
             "--webdav" => args.forced = Some(Protocol::WebDav),
@@ -328,10 +343,13 @@ fn local_path(s: &Session, path: &str) -> PathBuf {
 
 fn build_job(s: &Session, a: &DownloadArgs, url: &str) -> Result<DownloadJob, BoxError> {
     let mut job = DownloadJob::new(url);
-    job.output = match &a.output {
-        Some(o) => Some(session_path(s, o)),
-        None => s.dir.clone().map(|d| format!("{d}/")),
-    };
+    job.output = a.output.as_ref().map(|o| session_path(s, o));
+    // The `cd` directory is the default destination (and the smart rules' root).
+    job.base_dir = s.dir.clone();
+    job.organize = a.organize;
+    job.tags = a.tags.clone();
+    job.duplicates = a.duplicates;
+    job.dedupe = a.dedupe;
     job.advanced = a.advanced.unwrap_or(s.turbo);
     job.protocol = a.forced;
     job.sha256 = a.sha256.clone();
@@ -612,6 +630,7 @@ fn parse_history_query(parts: &[&str]) -> Result<HistoryQuery, BoxError> {
                 q = q.search(&text);
             }
             "--search" => q = q.search(value(p)?),
+            "--tag" => q = q.tag(value(p)?),
             "all" => q.limit = None,
             "--status" => {
                 for s in value(p)?.split(',') {
@@ -715,6 +734,10 @@ fn cmd_retry(s: &mut Session, parts: &[&str]) -> Result<(), BoxError> {
     if a.sha256.is_none() {
         a.sha256 = entry.expected_sha256.clone();
     }
+    a.tags.extend(entry.tags.iter().cloned());
+    // Retrying is an explicit request to download again.
+    a.duplicates
+        .get_or_insert(kget::dedupe::DuplicatePolicy::Download);
     // Continue a partial download when there is one.
     a.resume = !a.no_clobber;
     run_download(s, a)
@@ -1111,6 +1134,10 @@ download [flags] <url> [url…]      (aliases: get, dl — or just paste a URL)
       --at HH:MM            Start at a local time
       --save-credentials    Save the password used (URL or prompt) in the keychain
   -j, --jobs <n>            Parallel downloads when several URLs are given
+      --organize / --no-organize   Smart rules on/off for this download ('help rules')
+      --tag <t>             Tag recorded in the history (repeatable)
+      --duplicates <p>      Already downloaded: skip, ask, download or link
+      --dedupe              Hard-link identical content already in the history
       --ftp --sftp --webdav --ytdlp --torrent --metalink   Force a protocol
 
   Ctrl+C stops the download and keeps partial data ('retry last' resumes).
@@ -1119,6 +1146,7 @@ download [flags] <url> [url…]      (aliases: get, dl — or just paste a URL)
   password saved in the system keychain, or ask for it ('help credentials').
 "#
         ),
+        Some("rules") | Some("organize") => println!("\n{}\n", kget::rules::COMMAND_USAGE),
         Some("credentials") | Some("keychain") => {
             println!("\n{}\n", kget::credentials::COMMAND_USAGE)
         }
@@ -1132,7 +1160,7 @@ history clear [completed|failed]
 
 Filters (combine freely, also with the forms above):
   --status <s,…>   --domain <host>   --type <video|audio|image|archive|document|disk|package|ext,…>
-  --protocol <p>   --since <date>    --until <date>     --search <text>
+  --protocol <p>   --since <date>    --until <date>     --search <text>   --tag <t>
   --sort <newest|oldest|largest|smallest|name|fastest>  -n <N>   --offset <N>
   Dates: YYYY-MM-DD, 'YYYY-MM-DD HH:MM', today, yesterday, 7d, 12h (UTC)
   Example: history failed --domain example.com --since 7d
@@ -1171,6 +1199,7 @@ History & settings
   history [N|failed|search] Recent downloads
   config [set <k> <v>]      Saved settings                       help config
   credentials [list|delete] Passwords in the system keychain     help credentials
+  rules [list|test|add|…]   Smart rules: auto-organize and tag   help rules
   set [key value]           Session settings (turbo, quality, retries, timeout)
   cd <dir> / pwd            Session download folder
 
@@ -1241,8 +1270,17 @@ impl Completer for ReplHelper {
             ["config"] => word_candidates(&["show", "set", "path", "reset"], word),
             ["config", "set"] => word_candidates(CONFIG_KEYS, word),
             ["set"] => word_candidates(SET_KEYS, word),
-            ["help"] => word_candidates(&["download", "history", "config", "credentials"], word),
+            ["help"] => word_candidates(
+                &["download", "history", "config", "credentials", "rules"],
+                word,
+            ),
             ["credentials"] => word_candidates(&["list", "add", "delete", "status"], word),
+            ["rules"] => word_candidates(
+                &[
+                    "list", "test", "add", "remove", "enable", "disable", "suggest",
+                ],
+                word,
+            ),
             ["history"] => word_candidates(
                 &["failed", "completed", "cancelled", "all", "search", "clear"],
                 word,
@@ -1319,6 +1357,17 @@ fn execute(s: &mut Session, parts: &[&str]) -> Result<bool, BoxError> {
         "verify" => cmd_verify(s, rest)?,
         "extract" => cmd_extract(s, rest)?,
         "credentials" | "keychain" => println!("{}", kget::credentials::command(rest)?),
+        "rules" => {
+            let ai = rest.contains(&"--ai");
+            let apply = rest.contains(&"--apply");
+            let args: Vec<&str> = rest
+                .iter()
+                .copied()
+                .filter(|a| !matches!(*a, "--ai" | "--apply"))
+                .collect();
+            let opts = kget::rules::CommandOptions { ai, apply };
+            kget::rules::command(&args, &mut s.config, opts)?;
+        }
         other => {
             let suggestion = COMMANDS
                 .iter()

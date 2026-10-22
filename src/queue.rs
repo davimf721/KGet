@@ -61,7 +61,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub const MAX_ENTRIES: usize = 10_000;
 
 /// Current database schema version (`PRAGMA user_version`).
-pub const SCHEMA_VERSION: i32 = 1;
+pub const SCHEMA_VERSION: i32 = 2;
 
 /// How long a writer waits for another process holding the database lock.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(15);
@@ -160,6 +160,9 @@ pub struct HistoryEntry {
     /// `Some(false)` mismatch, `None` not checked.
     #[serde(default)]
     pub checksum_ok: Option<bool>,
+    /// Tags from `--tag` and the matching smart rule (lowercase).
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 impl HistoryEntry {
@@ -195,6 +198,7 @@ impl HistoryEntry {
             duration_ms: None,
             avg_speed: None,
             checksum_ok: None,
+            tags: Vec::new(),
         }
     }
 
@@ -421,6 +425,10 @@ pub struct HistoryQuery {
     pub until: Option<u64>,
     /// Case-insensitive substring of the URL or filename.
     pub search: Option<String>,
+    /// Tags the entry must all have (case-insensitive).
+    pub tags: Vec<String>,
+    /// SHA-256 of the saved file (case-insensitive).
+    pub sha256: Option<String>,
     /// Result order.
     pub sort: HistorySort,
     /// Maximum number of results (`None` = all).
@@ -498,6 +506,21 @@ impl HistoryQuery {
         self
     }
 
+    /// Only entries tagged `tag` (repeat to require several tags).
+    pub fn tag(mut self, tag: &str) -> Self {
+        let t = tag.trim().to_lowercase();
+        if !t.is_empty() && !self.tags.contains(&t) {
+            self.tags.push(t);
+        }
+        self
+    }
+
+    /// Only entries whose saved file has this SHA-256.
+    pub fn sha256(mut self, hash: &str) -> Self {
+        self.sha256 = Some(hash.trim().to_ascii_lowercase());
+        self
+    }
+
     /// Result order.
     pub fn sort(mut self, sort: HistorySort) -> Self {
         self.sort = sort;
@@ -570,6 +593,14 @@ impl HistoryQuery {
             let q = q.trim().to_lowercase();
             params.push(Value::Text(q.clone()));
             params.push(Value::Text(q));
+        }
+        for t in &self.tags {
+            clauses.push("instr(tags, ?) > 0".into());
+            params.push(Value::Text(format!(",{t},")));
+        }
+        if let Some(h) = self.sha256.as_deref().filter(|h| !h.is_empty()) {
+            clauses.push("lower(sha256) = ?".into());
+            params.push(Value::Text(h.to_ascii_lowercase()));
         }
 
         if clauses.is_empty() {
@@ -730,11 +761,14 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX IF NOT EXISTS history_created ON history(created_at);
     CREATE INDEX IF NOT EXISTS history_status ON history(status, created_at);
     CREATE INDEX IF NOT EXISTS history_domain ON history(domain);",
+    // v2: tags (stored as ",a,b,") and duplicate lookups by content hash
+    "ALTER TABLE history ADD COLUMN tags TEXT NOT NULL DEFAULT '';
+    CREATE INDEX IF NOT EXISTS history_sha256 ON history(sha256);",
 ];
 
 const COLUMNS: &str = "id, url, filename, output_dir, status, bytes_total, sha256, \
      expected_sha256, created_at, finished_at, error, protocol, duration_ms, avg_speed, \
-     checksum_ok";
+     checksum_ok, tags";
 
 /// Direct handle on a history database file.
 ///
@@ -1035,11 +1069,11 @@ fn insert_row(conn: &Connection, e: &HistoryEntry, ignore_existing: bool) -> rus
          sha256 = excluded.sha256, expected_sha256 = excluded.expected_sha256, \
          checksum_ok = excluded.checksum_ok, created_at = excluded.created_at, \
          finished_at = excluded.finished_at, duration_ms = excluded.duration_ms, \
-         avg_speed = excluded.avg_speed, error = excluded.error"
+         avg_speed = excluded.avg_speed, error = excluded.error, tags = excluded.tags"
     };
     conn.prepare_cached(&format!(
         "INSERT INTO history ({COLUMNS}, domain) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17) \
          ON CONFLICT(id) {conflict}"
     ))?
     .execute(params![
@@ -1058,6 +1092,7 @@ fn insert_row(conn: &Connection, e: &HistoryEntry, ignore_existing: bool) -> rus
         e.duration_ms.map(to_i64),
         e.avg_speed.map(to_i64),
         e.checksum_ok,
+        encode_tags(&e.tags),
         e.domain().unwrap_or_default(),
     ])?;
     Ok(())
@@ -1082,7 +1117,31 @@ fn row_to_entry(r: &Row<'_>) -> rusqlite::Result<HistoryEntry> {
         duration_ms: u(r.get(12)?),
         avg_speed: u(r.get(13)?),
         checksum_ok: r.get(14)?,
+        tags: decode_tags(&r.get::<_, String>(15)?),
     })
+}
+
+/// `["a", "b"]` → `",a,b,"` (so a tag filter is a substring match on `,a,`).
+fn encode_tags(tags: &[String]) -> String {
+    let mut seen: Vec<String> = Vec::new();
+    for t in tags {
+        let t = t.trim().to_lowercase().replace(',', "");
+        if !t.is_empty() && !seen.contains(&t) {
+            seen.push(t);
+        }
+    }
+    if seen.is_empty() {
+        String::new()
+    } else {
+        format!(",{},", seen.join(","))
+    }
+}
+
+fn decode_tags(s: &str) -> Vec<String> {
+    s.split(',')
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 /// Keep only the newest [`MAX_ENTRIES`] rows.

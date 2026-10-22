@@ -29,10 +29,12 @@ use crate::advanced_download::{AdvancedDownloader, ResumePolicy};
 use crate::checksum::{ChecksumAlgorithm, compute_checksum, parse_sidecar};
 use crate::config::Config;
 use crate::credentials::{CredentialResolver, SavePolicy};
+use crate::dedupe::DuplicatePolicy;
 use crate::events::{FileEntry, FileProgressEntry, JsonEvent, Phase, SpeedMeter};
 use crate::ftp::FtpDownloader;
 use crate::metalink;
 use crate::optimization::Optimizer;
+use crate::organize::{Preempted, apply_rules, check_duplicate, dedupe_after};
 use crate::protocol::{self, Protocol};
 use crate::queue::{DownloadHistory, EntryStatus, HistoryEntry};
 use crate::sftp::SftpDownloader;
@@ -95,6 +97,22 @@ pub struct DownloadJob {
     /// Save the passwords this download used (from the URL or a prompt) in
     /// the system keychain (`--save-credentials`)
     pub save_credentials: bool,
+    /// Tags recorded in the history (`--tag`), merged with the tags of the
+    /// matching smart rule
+    pub tags: Vec<String>,
+    /// Apply the smart rules ([`crate::rules`]): `Some(true)` = `--organize`,
+    /// `Some(false)` = `--no-organize`, `None` = `config.rules_enabled`
+    pub organize: Option<bool>,
+    /// Directory used when `output` is `None` (e.g. the interactive `cd`
+    /// directory); rule folders are created inside it
+    pub base_dir: Option<String>,
+    /// What to do when the URL was already downloaded and the file is still
+    /// there (`--duplicates`); `None` = ask on a terminal (CLI/REPL with
+    /// [`RunContext::credential_prompts`]), download again otherwise
+    pub duplicates: Option<DuplicatePolicy>,
+    /// Replace the downloaded file by a hard link when the history already
+    /// has a file with the same SHA-256 (`--dedupe`)
+    pub dedupe: bool,
 }
 
 impl Default for DownloadJob {
@@ -123,6 +141,11 @@ impl DownloadJob {
             timeout: crate::http::DEFAULT_TIMEOUT_SECS,
             extract: false,
             save_credentials: false,
+            tags: Vec::new(),
+            organize: None,
+            base_dir: None,
+            duplicates: None,
+            dedupe: false,
         }
     }
 
@@ -158,7 +181,8 @@ pub struct RunContext {
     /// Append every job to the persistent download history (default `true`)
     pub record_history: bool,
     /// Ask on the terminal for passwords that are neither in the URL nor in
-    /// the system keychain, and offer to save them (default `false`).
+    /// the system keychain, and offer to save them; also ask whether to
+    /// download an already-downloaded URL again (default `false`).
     ///
     /// Only the CLI and the interactive REPL set this; it has no effect when
     /// the reporter has an event sink (`--jsonl`, GUI, job manager) or when
@@ -245,7 +269,7 @@ impl Reporter {
         Self::events(jsonl_stdout_sink(tag_url))
     }
 
-    fn emit(&self, ev: &JsonEvent) {
+    pub(crate) fn emit(&self, ev: &JsonEvent) {
         if let Some(sink) = &self.events {
             sink(ev);
         }
@@ -296,6 +320,15 @@ pub fn run_job(
     if let Some(flag) = &ctx.cancel_aware {
         flag.store(is_cancel_aware(proto), Ordering::SeqCst);
     }
+    // Smart rules may change the destination, tags and per-download settings.
+    let mut job = job.clone();
+    let mut ruled_ctx = ctx.clone();
+    let (tags, rule_check) = match apply_rules(&mut job, &mut ruled_ctx, reporter, proto) {
+        Ok(tags) => (tags, Ok(())),
+        Err(e) => (job.tags.clone(), Err(e)),
+    };
+    let job = &job;
+    let ctx = &ruled_ctx;
     reporter.emit(&JsonEvent::Started {
         url: crate::queue::redact_url(&job.url),
         protocol: proto.as_str().to_string(),
@@ -318,24 +351,39 @@ pub fn run_job(
     };
     let creds = Arc::new(credential_resolver(job, ctx, reporter));
     let started = std::time::Instant::now();
-    let result = dispatch(job, ctx, reporter, proto, &creds).and_then(|outcome| {
-        if let Outcome::Saved(Some(path)) = &outcome {
-            post_verify(job, ctx, reporter, path)?;
+    let mut content_sha: Option<String> = None;
+    let mut skipped = false;
+    let result = match rule_check.and_then(|()| check_duplicate(job, ctx, reporter, proto)) {
+        Err(e) => Err(e),
+        Ok(Some(Preempted::Skipped(path))) => {
+            skipped = true;
+            Ok(Outcome::Saved(Some(path)))
         }
-        Ok(outcome)
-    });
+        Ok(Some(Preempted::Linked(path, sha))) => {
+            content_sha = sha;
+            Ok(Outcome::Saved(Some(path)))
+        }
+        Ok(None) => dispatch(job, ctx, reporter, proto, &creds).and_then(|outcome| {
+            if let Outcome::Saved(Some(path)) = &outcome {
+                let verified = post_verify(job, ctx, reporter, path)?;
+                content_sha = dedupe_after(job, reporter, path, verified);
+            }
+            Ok(outcome)
+        }),
+    };
     // Offer to save / save accepted passwords once the progress output is done.
     creds.finish();
 
     let cancelled = ctx.cancelled();
-    if ctx.record_history && !matches!(proto, Protocol::Metalink) {
-        record_history(job, proto, &result, cancelled, started.elapsed());
+    if ctx.record_history && !skipped && !matches!(proto, Protocol::Metalink) {
+        let elapsed = started.elapsed();
+        record_history(job, proto, &result, cancelled, elapsed, &tags, content_sha);
     }
 
     match &result {
         Ok(Outcome::Saved(path)) => {
             if let Some(p) = path {
-                if job.extract && utils::is_extractable(p) {
+                if job.extract && !skipped && utils::is_extractable(p) {
                     reporter.emit(&JsonEvent::Phase {
                         phase: Phase::Extracting,
                         algorithm: None,
@@ -415,6 +463,8 @@ fn record_history(
     result: &Result<Outcome, BoxError>,
     cancelled: bool,
     elapsed: std::time::Duration,
+    tags: &[String],
+    sha256: Option<String>,
 ) {
     let output_dir = job
         .output
@@ -463,6 +513,10 @@ fn record_history(
         }
         _ => None,
     };
+    entry.tags = tags.to_vec();
+    if status == EntryStatus::Completed {
+        entry.sha256 = sha256;
+    }
     let _ = DownloadHistory::append(entry, status, error_msg);
 }
 
@@ -472,7 +526,7 @@ fn post_verify(
     ctx: &RunContext,
     reporter: &Reporter,
     path: &Path,
-) -> Result<(), BoxError> {
+) -> Result<Option<String>, BoxError> {
     let mut expected = job.checksum.clone();
     if expected.is_none()
         && let Some(sidecar) = &job.checksum_url
@@ -510,7 +564,7 @@ fn post_verify(
                 ok: true,
             });
         }
-        return Ok(());
+        return Ok(job.sha256.as_ref().map(|h| h.trim().to_ascii_lowercase()));
     };
     if !reporter.quiet {
         println!("Verifying {}...", algo.name());
@@ -538,7 +592,7 @@ fn post_verify(
     if !reporter.quiet {
         println!("{} OK: {}", algo.name().to_uppercase(), got);
     }
-    Ok(())
+    Ok((algo == ChecksumAlgorithm::Sha256).then_some(got))
 }
 
 /// Progress callback that emits `progress` events.
@@ -910,12 +964,25 @@ pub fn parse_url_list(text: &str) -> Vec<String> {
 /// One job per URL, each with a unique destination inside `output_dir` so two
 /// `…/file.zip` URLs never collide. Options are copied from `template`.
 pub fn batch_jobs(urls: &[String], output_dir: &Path, template: &DownloadJob) -> Vec<DownloadJob> {
+    batch_jobs_with(urls, output_dir, template, &Config::default())
+}
+
+/// [`batch_jobs`] with smart rules from `config`: without an explicit output
+/// in `template`, each URL goes to its rule's folder inside `output_dir`.
+fn batch_jobs_with(
+    urls: &[String],
+    output_dir: &Path,
+    template: &DownloadJob,
+    config: &Config,
+) -> Vec<DownloadJob> {
     let mut taken = std::collections::HashSet::new();
     urls.iter()
         .map(|url| {
             let mut job = template.clone();
             job.url = url.clone();
             let proto = job.protocol();
+            let dir = crate::organize::batch_dir(url, template, config, output_dir);
+            let output_dir = dir.as_path();
             job.output = Some(match proto {
                 Protocol::Http | Protocol::WebDav | Protocol::Ftp | Protocol::Sftp => {
                     let name = utils::get_filename_from_url_or_default(url, "download");
@@ -959,7 +1026,12 @@ pub fn run_urls(
         println!("Batch: {} URL(s) queued, {} at a time", urls.len(), jobs);
     }
 
-    let batch = batch_jobs(&urls, output_dir, template);
+    let batch = batch_jobs_with(&urls, output_dir, template, &ctx.config);
+    for job in &batch {
+        if let Some(dir) = job.output.as_deref().map(Path::new).and_then(Path::parent) {
+            let _ = std::fs::create_dir_all(dir);
+        }
+    }
 
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(jobs)

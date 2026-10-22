@@ -248,6 +248,38 @@ struct Args {
     /// Video quality for yt-dlp downloads: best, 1080p, 720p, 480p, 360p, audio
     #[arg(long = "quality", default_value = "best")]
     quality: String,
+
+    /// Sort this download into a folder with the smart rules (see --rules)
+    #[arg(long = "organize", conflicts_with = "no_organize")]
+    organize: bool,
+
+    /// Do not apply the smart rules, even if enabled in the config
+    #[arg(long = "no-organize")]
+    no_organize: bool,
+
+    /// Tag recorded in the history (repeatable); with --history: only entries with this tag
+    #[arg(long = "tag")]
+    tag: Vec<String>,
+
+    /// Already-downloaded URL: skip, ask, download or link (default: ask on a terminal, else download)
+    #[arg(long = "duplicates", value_name = "POLICY")]
+    duplicates: Option<String>,
+
+    /// Replace the download with a hard link when identical content is already in the history
+    #[arg(long = "dedupe")]
+    dedupe: bool,
+
+    /// Manage smart rules: list | test <url> | add key=value… | remove <name> | enable|disable [name] | suggest
+    #[arg(long = "rules", num_args = 1.., value_names = ["ACTION", "ARGS"])]
+    rules: Option<Vec<String>>,
+
+    /// With --rules suggest: also ask Claude (needs ANTHROPIC_API_KEY; sends only aggregated counts after confirmation)
+    #[arg(long = "ai", requires = "rules")]
+    ai: bool,
+
+    /// With --rules suggest: add the suggested rules without asking
+    #[arg(long = "apply", requires = "rules")]
+    apply: bool,
 }
 
 impl Args {
@@ -296,6 +328,7 @@ impl Args {
             since: self.history_since.clone(),
             until: self.history_until.clone(),
             search: self.history_search.clone(),
+            tags: self.tag.clone(),
             sort: self.history_sort.clone(),
             limit: self.history_limit,
             offset: self.history_offset,
@@ -326,6 +359,17 @@ impl Args {
         job.timeout = self.timeout;
         job.extract = self.extract;
         job.save_credentials = self.save_credentials;
+        job.tags = self.tag.clone();
+        job.organize = match (self.organize, self.no_organize) {
+            (true, _) => Some(true),
+            (_, true) => Some(false),
+            _ => None,
+        };
+        job.duplicates = match self.duplicates.as_deref() {
+            Some(p) => Some(p.parse()?),
+            None => None,
+        };
+        job.dedupe = self.dedupe;
         Ok(job)
     }
 
@@ -374,6 +418,16 @@ fn real_main() -> Result<i32, BoxError> {
     if let Some(cmd) = &args.credentials {
         let parts: Vec<&str> = cmd.iter().map(String::as_str).collect();
         println!("{}", kget::credentials::command(&parts)?);
+        return Ok(0);
+    }
+
+    if let Some(cmd) = &args.rules {
+        let parts: Vec<&str> = cmd.iter().map(String::as_str).collect();
+        let opts = kget::rules::CommandOptions {
+            ai: args.ai,
+            apply: args.apply,
+        };
+        kget::rules::command(&parts, &mut config, opts)?;
         return Ok(0);
     }
 
