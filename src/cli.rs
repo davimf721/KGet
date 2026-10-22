@@ -294,6 +294,91 @@ fn clear_scope_query(scope: &str) -> HistoryQuery {
     }
 }
 
+/// Torrent options given on the command line (`--select`, `--select-glob`,
+/// `--seed-ratio`, `--seed-time`).
+pub fn torrent_job_options(
+    select: &[String],
+    select_glob: &[String],
+    seed_ratio: Option<&str>,
+    seed_time: Option<&str>,
+) -> Result<crate::torrent::TorrentJobOptions, BoxError> {
+    let mut opts = crate::torrent::TorrentJobOptions::default();
+    for spec in select {
+        opts.select.add_spec(spec)?;
+    }
+    opts.select.globs = select_glob.to_vec();
+    if let Some(r) = seed_ratio {
+        opts.seed_ratio = Some(crate::torrent::selection::parse_seed_ratio(r)?);
+    }
+    if let Some(t) = seed_time {
+        opts.seed_time_secs = Some(
+            crate::torrent::selection::parse_duration_secs(t)
+                .map_err(|e| format!("--seed-time: {e}"))?,
+        );
+    }
+    Ok(opts)
+}
+
+/// Print the files of a magnet link or `.torrent` (`kget --list-files`): a
+/// numbered table (the numbers `--select` takes), or with `jsonl` one `files`
+/// event. With a selection, the files it picks are marked.
+pub fn print_torrent_files(
+    source: &str,
+    config: &Config,
+    select: &crate::torrent::FileSelection,
+    jsonl: bool,
+) -> Result<(), BoxError> {
+    if !jsonl {
+        eprintln!("Fetching torrent metadata...");
+    }
+    let files = crate::torrent::list_files(source, &config.torrent, None)?;
+    if !select.is_empty() {
+        // Report a bad selection before printing anything.
+        let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
+        select.resolve(&names)?;
+    }
+    let entries = crate::runner::torrent_file_entries(files, select);
+    if jsonl {
+        crate::events::JsonEvent::Files { files: entries }.emit();
+        return Ok(());
+    }
+    println!("{}", format_torrent_files(&entries));
+    Ok(())
+}
+
+/// The `--list-files` table.
+pub fn format_torrent_files(entries: &[crate::events::FileEntry]) -> String {
+    let mut out = format!("{:>5}  {:>10}  File\n", "#", "Size");
+    let mut total = 0u64;
+    let mut picked = 0usize;
+    for (i, e) in entries.iter().enumerate() {
+        let mark = match e.selected {
+            Some(true) => "*",
+            Some(false) => " ",
+            None => "",
+        };
+        if e.selected != Some(false) {
+            total += e.size;
+            picked += 1;
+        }
+        out.push_str(&format!(
+            "{:>4}{mark:<1}  {:>10}  {}\n",
+            i + 1,
+            humansize::format_size(e.size, humansize::BINARY),
+            e.name
+        ));
+    }
+    out.push_str(&format!(
+        "\n{picked} of {} file(s), {}",
+        entries.len(),
+        humansize::format_size(total, humansize::BINARY)
+    ));
+    if entries.iter().any(|e| e.selected.is_some()) {
+        out.push_str(" selected (*)");
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,5 +403,53 @@ mod tests {
         // An empty override changes nothing.
         let same = ConfigOverrides::default().applied_to(&base);
         assert_eq!(same.optimization.speed_limit, Some(10));
+    }
+
+    #[test]
+    fn torrent_flags_build_job_options() {
+        let o = torrent_job_options(
+            &["1,3-4".into(), "2".into()],
+            &["*.mkv".into()],
+            Some("1.5"),
+            Some("30m"),
+        )
+        .unwrap();
+        assert_eq!(o.select.indices, vec![0, 2, 3, 1]);
+        assert_eq!(o.select.globs, vec!["*.mkv".to_string()]);
+        assert_eq!(o.seed_ratio, Some(1.5));
+        assert_eq!(o.seed_time_secs, Some(1800));
+        assert!(torrent_job_options(&["0".into()], &[], None, None).is_err());
+        assert!(torrent_job_options(&[], &[], Some("-1"), None).is_err());
+        assert!(torrent_job_options(&[], &[], None, Some("soon")).is_err());
+        assert!(
+            torrent_job_options(&[], &[], None, None)
+                .unwrap()
+                .is_default()
+        );
+    }
+
+    #[test]
+    fn file_table_marks_selection() {
+        let select = crate::torrent::FileSelection {
+            indices: vec![1],
+            globs: vec![],
+        };
+        let entries = crate::runner::torrent_file_entries(
+            vec![("a.mkv".into(), 1024), ("b.srt".into(), 10)],
+            &select,
+        );
+        assert_eq!(entries[0].selected, Some(false));
+        assert_eq!(entries[1].selected, Some(true));
+        let table = format_torrent_files(&entries);
+        assert!(table.contains("   2*"), "{table}");
+        assert!(
+            table.contains("1 of 2 file(s), 10 B selected (*)"),
+            "{table}"
+        );
+        let plain = crate::runner::torrent_file_entries(
+            vec![("a".into(), 1)],
+            &crate::torrent::FileSelection::default(),
+        );
+        assert_eq!(plain[0].selected, None);
     }
 }

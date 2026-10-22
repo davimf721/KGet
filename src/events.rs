@@ -92,10 +92,75 @@ pub enum Phase {
 /// One file inside a torrent (`files` event).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FileEntry {
-    /// Path relative to the torrent root
+    /// Path relative to the torrent root (or the `hf://` / `ollama://` source)
     pub name: String,
     /// Size in bytes
     pub size: u64,
+    /// Whether the file will be downloaded (present when a selection was
+    /// given with `--select` / `--select-glob`, or with `--list-files`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected: Option<bool>,
+}
+
+/// Status of one tracker of a torrent (inside a `torrent_stats` event).
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct TrackerStatus {
+    /// Announce URL (or host)
+    pub url: String,
+    /// Backend-specific state (`"active"`, `"waiting"`, `"error"`, …)
+    pub status: String,
+    /// Seeders reported by the tracker's last scrape
+    pub seeders: Option<u64>,
+    /// Leechers reported by the tracker's last scrape
+    pub leechers: Option<u64>,
+    /// Result of the last announce (error text when it failed)
+    pub message: Option<String>,
+}
+
+/// Swarm statistics of a torrent (`torrent_stats` event, about once per
+/// second while downloading and seeding).
+///
+/// Fields a backend cannot report are `null` (the native client does not
+/// know which peers are seeders, nor tracker states).
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct TorrentStats {
+    /// Connected peers
+    pub peers: u64,
+    /// Peers being connected to
+    pub peers_connecting: Option<u64>,
+    /// Peers known from DHT, trackers and PEX
+    pub peers_known: Option<u64>,
+    /// Connected peers that have the whole torrent
+    pub seeders: Option<u64>,
+    /// Connected peers that are still downloading
+    pub leechers: Option<u64>,
+    /// Download speed in bytes per second
+    pub download_bps: u64,
+    /// Upload speed in bytes per second
+    pub upload_bps: u64,
+    /// Bytes of the selected files downloaded
+    pub downloaded: u64,
+    /// Bytes uploaded during this run
+    pub uploaded: u64,
+    /// Size of the selected files in bytes
+    pub size: u64,
+    /// `uploaded / size`
+    pub ratio: f64,
+    /// The data is complete and the torrent is seeding (`--seed-ratio` /
+    /// `--seed-time`)
+    pub seeding: bool,
+    /// Seconds spent seeding so far
+    pub seeding_secs: Option<u64>,
+    /// Ratio at which seeding stops
+    pub seed_ratio_limit: Option<f64>,
+    /// Seconds after which seeding stops
+    pub seed_time_limit_secs: Option<u64>,
+    /// Number of files selected for download, out of `files_total`
+    pub files_selected: Option<usize>,
+    /// Number of files in the torrent
+    pub files_total: Option<usize>,
+    /// Tracker states (empty when the backend does not report them)
+    pub trackers: Vec<TrackerStatus>,
 }
 
 /// Progress of one file inside a torrent (`file_progress` event).
@@ -118,6 +183,7 @@ pub struct FileProgressEntry {
 /// ```text
 /// {"v":1,"event":"started","url":"…","protocol":"http","advanced":false,"output":"/abs/x.iso"}
 /// {"v":1,"event":"progress","bytes":524288,"total":1048576,"percent":50.0,"speed_bps":3145728,"eta_secs":12}
+/// {"v":1,"event":"torrent_stats","peers":12,"upload_bps":40960,"ratio":0.4,"seeding":false,…}
 /// {"v":1,"event":"phase","phase":"verifying","algorithm":"sha256"}
 /// {"v":1,"event":"verified","algorithm":"sha256","hash":"…","ok":true}
 /// {"v":1,"event":"phase","phase":"extracting"}
@@ -165,6 +231,9 @@ pub enum JsonEvent {
     Files { files: Vec<FileEntry> },
     /// Per-file progress of a torrent (about once per second).
     FileProgress { files: Vec<FileProgressEntry> },
+    /// Swarm statistics of a torrent: peers, speeds, ratio, seeding state
+    /// (about once per second).
+    TorrentStats(Box<TorrentStats>),
     /// A post-transfer phase started: checksum verification (`algorithm` is
     /// the lowercase name, e.g. `"sha256"`) or archive extraction. The phase
     /// ends with the next `verified`, `saved`, `completed` or `error` event.

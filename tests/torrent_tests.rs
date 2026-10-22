@@ -647,3 +647,134 @@ mod json_output_tests {
         assert!(line.contains("ETA:"));
     }
 }
+
+// ============================================================================
+// File selection, seeding limits and the `torrent_stats` event
+// ============================================================================
+
+mod selection_and_stats {
+    use kget::events::{FileEntry, JsonEvent, TorrentStats, TrackerStatus};
+    use kget::torrent::selection::{parse_duration_secs, ratio};
+    use kget::torrent::{FileSelection, SeedLimits, SeedStop, TorrentJobOptions, parse_select};
+    use std::time::Duration;
+
+    #[test]
+    fn select_spec_is_one_based_with_ranges() {
+        assert_eq!(parse_select("1,3-5").unwrap(), vec![0, 2, 3, 4]);
+        assert!(parse_select("0").is_err());
+        assert!(parse_select("4-2").is_err());
+    }
+
+    #[test]
+    fn selection_combines_indices_and_globs() {
+        let names = [
+            "Show/ep1.mkv",
+            "Show/ep2.mkv",
+            "Show/info.nfo",
+            "sample.MKV",
+        ];
+        let mut sel = FileSelection::default();
+        sel.add_spec("3").unwrap();
+        sel.globs.push("ep?.mkv".into());
+        assert_eq!(sel.resolve(&names).unwrap(), Some(vec![0, 1, 2]));
+        let all_mkv = FileSelection {
+            indices: vec![],
+            globs: vec!["*.mkv".into()],
+        };
+        assert_eq!(all_mkv.resolve(&names).unwrap(), Some(vec![0, 1, 3]));
+        assert!(FileSelection::default().resolve(&names).unwrap().is_none());
+    }
+
+    #[test]
+    fn seed_limits_follow_job_then_config() {
+        let mut config = kget::config::TorrentConfig::default();
+        assert!(!TorrentJobOptions::default().seed_limits(&config).seeds());
+        config.seed_ratio = Some(2.0);
+        let job = TorrentJobOptions {
+            seed_time_secs: Some(parse_duration_secs("30m").unwrap()),
+            ..Default::default()
+        };
+        let limits = job.seed_limits(&config);
+        assert_eq!(limits.ratio, Some(2.0));
+        assert_eq!(limits.time, Some(Duration::from_secs(1800)));
+        assert_eq!(limits.should_stop(150, 100, Duration::from_secs(60)), None);
+        assert_eq!(
+            limits.should_stop(200, 100, Duration::from_secs(60)),
+            Some(SeedStop::Ratio)
+        );
+        assert_eq!(
+            limits.should_stop(0, 100, Duration::from_secs(1800)),
+            Some(SeedStop::Time)
+        );
+        assert!(!SeedLimits::new(None, None).seeds());
+        assert_eq!(ratio(50, 100), 0.5);
+    }
+
+    #[test]
+    fn torrent_stats_jsonl_shape() {
+        let ev = JsonEvent::TorrentStats(Box::new(TorrentStats {
+            peers: 12,
+            peers_connecting: Some(3),
+            download_bps: 1000,
+            upload_bps: 500,
+            downloaded: 40,
+            uploaded: 20,
+            size: 100,
+            ratio: 0.2,
+            seed_ratio_limit: Some(1.5),
+            trackers: vec![TrackerStatus {
+                url: "udp://t".into(),
+                status: "active".into(),
+                seeders: Some(5),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }));
+        let v: serde_json::Value = serde_json::from_str(&ev.to_line()).unwrap();
+        assert_eq!(v["v"], 1);
+        assert_eq!(v["event"], "torrent_stats");
+        assert_eq!(v["peers"], 12);
+        assert_eq!(v["peers_connecting"], 3);
+        assert!(v["seeders"].is_null());
+        assert_eq!(v["upload_bps"], 500);
+        assert_eq!(v["ratio"], 0.2);
+        assert_eq!(v["seeding"], false);
+        assert_eq!(v["seed_ratio_limit"], 1.5);
+        assert!(v["seed_time_limit_secs"].is_null());
+        assert_eq!(v["trackers"][0]["seeders"], 5);
+        let obj = v.as_object().unwrap();
+        for k in [
+            "peers_known",
+            "leechers",
+            "download_bps",
+            "downloaded",
+            "uploaded",
+            "size",
+            "seeding_secs",
+            "files_selected",
+            "files_total",
+        ] {
+            assert!(obj.contains_key(k), "missing {k}");
+        }
+    }
+
+    #[test]
+    fn files_event_marks_selection_only_when_given() {
+        let plain = JsonEvent::Files {
+            files: vec![FileEntry {
+                name: "a".into(),
+                size: 1,
+                selected: None,
+            }],
+        };
+        assert!(!plain.to_line().contains("selected"));
+        let picked = JsonEvent::Files {
+            files: vec![FileEntry {
+                name: "a".into(),
+                size: 1,
+                selected: Some(false),
+            }],
+        };
+        assert!(picked.to_line().contains("\"selected\":false"));
+    }
+}

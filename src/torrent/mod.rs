@@ -53,7 +53,12 @@ use crate::config::{ProxyConfig, TorrentConfig};
 use crate::optimization::Optimizer;
 
 mod external;
+pub mod selection;
 mod settings;
+
+pub use selection::{
+    FileSelection, SeedLimits, SeedStop, TorrentJobOptions, glob_match, parse_select,
+};
 
 #[cfg(feature = "torrent-transmission")]
 mod transmission;
@@ -100,6 +105,10 @@ pub type FilesCb = Arc<dyn Fn(Vec<(String, u64)>) + Send + Sync>;
 /// Callback receiving the bytes downloaded per file (same order as the file list).
 pub type FileProgressCb = Arc<dyn Fn(Vec<u64>) + Send + Sync>;
 
+/// Callback receiving swarm statistics (peers, speeds, ratio) about once per
+/// second while downloading and seeding.
+pub type StatsCb = Arc<dyn Fn(crate::events::TorrentStats) + Send + Sync>;
+
 /// Extra settings for [`download_torrent`].
 #[derive(Clone, Default)]
 pub struct TorrentOptions {
@@ -111,6 +120,39 @@ pub struct TorrentOptions {
     pub on_files: Option<FilesCb>,
     /// Called about once per second with per-file progress (native backend)
     pub on_file_progress: Option<FileProgressCb>,
+    /// Called about once per second with swarm statistics (native and
+    /// Transmission backends)
+    pub on_stats: Option<StatsCb>,
+    /// Files to download (empty = all)
+    pub selection: FileSelection,
+    /// Seed after downloading until one of these limits is reached (native
+    /// backend; Transmission applies the ratio on the daemon)
+    pub seed: SeedLimits,
+}
+
+/// Fetch the metadata of a magnet link or `.torrent` and return its files
+/// `(path inside the torrent, size)` in torrent order, without downloading
+/// (`kget --list-files`).
+///
+/// Requires the native client (`torrent-native` feature).
+#[cfg_attr(not(feature = "torrent-native"), allow(unused_variables))]
+pub fn list_files(
+    source: &str,
+    config: &TorrentConfig,
+    cancel: Option<Arc<AtomicBool>>,
+) -> Result<Vec<(String, u64)>, Box<dyn Error + Send + Sync>> {
+    let source = source.trim();
+    if !is_supported_torrent_source(source) {
+        return Err("Invalid or unsupported BitTorrent magnet link or .torrent file".into());
+    }
+    #[cfg(feature = "torrent-native")]
+    {
+        native::list_files_native(source, config, cancel)
+    }
+    #[cfg(not(feature = "torrent-native"))]
+    {
+        Err("Listing torrent files needs the native torrent client (rebuild with --features torrent-native)".into())
+    }
 }
 
 /// How a torrent request ended.
@@ -298,7 +340,7 @@ pub fn download_torrent(
             #[cfg(feature = "torrent-transmission")]
             {
                 return transmission::download_via_transmission(
-                    magnet, output_dir, quiet, proxy, optimizer, cb,
+                    magnet, output_dir, quiet, proxy, optimizer, cb, opts,
                 );
             }
 

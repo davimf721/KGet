@@ -8,14 +8,18 @@ use url::Url;
 
 use transmission_rpc::{
     TransClient,
-    types::{BasicAuth, Id, TorrentAddArgs, TorrentGetField, TorrentStatus},
+    types::{
+        BasicAuth, Id, RatioMode, Torrent, TorrentAddArgs, TorrentGetField, TorrentSetArgs,
+        TorrentStatus,
+    },
 };
 
 use crate::config::ProxyConfig;
+use crate::events::{TorrentStats, TrackerStatus};
 use crate::optimization::Optimizer;
 use crate::progress::create_progress_bar;
 use crate::torrent::settings::TransmissionSettings;
-use crate::torrent::{TorrentCallbacks, TorrentOutcome};
+use crate::torrent::{TorrentCallbacks, TorrentOptions, TorrentOutcome};
 use crate::utils::print;
 
 pub struct TorrentDownloader {
@@ -26,6 +30,48 @@ pub struct TorrentDownloader {
     optimizer: Optimizer,
     status_cb: Option<Arc<dyn Fn(String) + Send + Sync>>,
     progress_cb: Option<Arc<dyn Fn(f32) + Send + Sync>>,
+    opts: TorrentOptions,
+}
+
+/// `torrent_stats` payload from a Transmission `torrent-get` reply.
+fn swarm_stats(t: &Torrent) -> TorrentStats {
+    let n = |v: Option<i64>| v.unwrap_or(0).max(0) as u64;
+    let trackers = t
+        .tracker_stats
+        .iter()
+        .flatten()
+        .map(|ts| TrackerStatus {
+            url: ts.announce.clone(),
+            status: format!("{:?}", ts.announce_state).to_lowercase(),
+            seeders: (ts.seeder_count >= 0).then_some(ts.seeder_count as u64),
+            leechers: (ts.leecher_count >= 0).then_some(ts.leecher_count as u64),
+            message: (!ts.last_announce_result.is_empty()).then(|| ts.last_announce_result.clone()),
+        })
+        .collect();
+    let size = n(t.size_when_done);
+    let left = n(t.left_until_done);
+    TorrentStats {
+        peers: n(t.peers_connected),
+        // Peers we download from have (at least part of) what we need;
+        // Transmission does not report seeders among connected peers.
+        seeders: None,
+        leechers: t.peers_getting_from_us.map(|v| v.max(0) as u64),
+        download_bps: n(t.rate_download),
+        upload_bps: n(t.rate_upload),
+        downloaded: size.saturating_sub(left),
+        uploaded: n(t.uploaded_ever),
+        size,
+        ratio: t.upload_ratio.map(|r| r.max(0.0) as f64).unwrap_or(0.0),
+        seeding: matches!(t.status, Some(TorrentStatus::Seeding)),
+        seeding_secs: t.seconds_seeding.map(|s| s.max(0) as u64),
+        seed_ratio_limit: t
+            .seed_ratio_limit
+            .filter(|_| matches!(t.seed_ratio_mode, Some(RatioMode::Single)))
+            .map(f64::from),
+        files_total: t.files.as_ref().map(Vec::len),
+        trackers,
+        ..Default::default()
+    }
 }
 
 impl TorrentDownloader {
@@ -44,6 +90,7 @@ impl TorrentDownloader {
             optimizer,
             status_cb: None,
             progress_cb: None,
+            opts: TorrentOptions::default(),
         }
     }
 
@@ -181,6 +228,24 @@ impl TorrentDownloader {
             let _ = Self::open_url_system(&transmission_web_url);
         }
 
+        // The daemon enforces the seed ratio itself (it keeps seeding after
+        // KGet returns); it has no seeding-time limit, only an idle limit.
+        if let Some(ratio) = self.opts.seed.ratio {
+            let mut args = TorrentSetArgs::default();
+            args.seed_ratio_limit = Some(ratio);
+            args.seed_ratio_mode = Some(RatioMode::Single);
+            if let Err(e) = client
+                .torrent_set(args, Some(vec![torrent_id.clone()]))
+                .await
+            {
+                self.emit_status(format!("Could not set the seed ratio: {e}"));
+            }
+        }
+        if self.opts.seed.time.is_some() {
+            self.emit_status("--seed-time is not supported by the Transmission backend");
+        }
+        let mut selection_applied = self.opts.selection.is_empty();
+
         let progress =
             create_progress_bar(self.quiet, "Downloading torrent".to_string(), None, false);
 
@@ -213,6 +278,18 @@ impl TorrentDownloader {
                         TorrentGetField::RateDownload,
                         TorrentGetField::Error,
                         TorrentGetField::ErrorString,
+                        TorrentGetField::Files,
+                        TorrentGetField::PeersConnected,
+                        TorrentGetField::PeersGettingFromUs,
+                        TorrentGetField::RateUpload,
+                        TorrentGetField::UploadRatio,
+                        TorrentGetField::UploadedEver,
+                        TorrentGetField::SizeWhenDone,
+                        TorrentGetField::LeftUntilDone,
+                        TorrentGetField::SecondsSeeding,
+                        TorrentGetField::SeedRatioLimit,
+                        TorrentGetField::SeedRatioMode,
+                        TorrentGetField::TrackerStats,
                     ]),
                     Some(vec![torrent_id.clone()]),
                 )
@@ -222,6 +299,29 @@ impl TorrentDownloader {
                 progress.abandon_with_message("Torrent info not found.");
                 return Err("Torrent info not found after adding.".into());
             };
+
+            // The file list of a magnet appears once the metadata arrives.
+            if !selection_applied && let Some(files) = t.files.as_ref().filter(|f| !f.is_empty()) {
+                let names: Vec<&str> = files.iter().map(|f| f.name.as_str()).collect();
+                if let Some(wanted) = self.opts.selection.resolve(&names)? {
+                    let unwanted: Vec<usize> =
+                        (0..names.len()).filter(|i| !wanted.contains(i)).collect();
+                    let mut args = TorrentSetArgs::default();
+                    args.files_unwanted = Some(unwanted);
+                    client
+                        .torrent_set(args, Some(vec![torrent_id.clone()]))
+                        .await?;
+                    self.emit_status(format!(
+                        "Selected {} of {} files",
+                        wanted.len(),
+                        names.len()
+                    ));
+                }
+                selection_applied = true;
+            }
+            if let Some(cb) = &self.opts.on_stats {
+                cb(swarm_stats(t));
+            }
 
             let percent_done = t.percent_done.unwrap_or(0.0).clamp(0.0, 1.0);
             if percent_done > last_percent {
@@ -286,6 +386,7 @@ pub fn download_via_transmission(
     proxy: ProxyConfig,
     optimizer: Optimizer,
     cb: TorrentCallbacks,
+    opts: TorrentOptions,
 ) -> Result<TorrentOutcome, Box<dyn Error + Send + Sync>> {
     let mut d = TorrentDownloader::new(
         magnet.to_string(),
@@ -294,6 +395,7 @@ pub fn download_via_transmission(
         proxy,
         optimizer,
     );
+    d.opts = opts;
 
     if let Some(status) = cb.status {
         d.set_status_callback(move |s| status(s));

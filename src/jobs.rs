@@ -132,6 +132,10 @@ pub struct JobProgress {
     pub speed_bps: u64,
     /// Estimated seconds remaining
     pub eta_secs: Option<u64>,
+    /// Latest swarm statistics of a torrent job (peers, upload, ratio,
+    /// seeding state)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub torrent: Option<crate::events::TorrentStats>,
 }
 
 /// Snapshot of a job, returned by [`JobManager::get`] and [`JobManager::list`].
@@ -628,7 +632,11 @@ impl Inner {
                         percent: *percent,
                         speed_bps: *speed_bps,
                         eta_secs: *eta_secs,
+                        torrent: entry.info.progress.torrent.take(),
                     };
+                }
+                JsonEvent::TorrentStats(stats) => {
+                    entry.info.progress.torrent = Some((**stats).clone());
                 }
                 JsonEvent::Saved { path, bytes } => {
                     entry.info.path = Some(path.clone());

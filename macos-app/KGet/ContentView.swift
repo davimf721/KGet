@@ -870,7 +870,9 @@ struct DownloadRowView: View {
             }
             .padding(.leading, 4).padding(.top, 4)
         } label: {
-            Text("\(download.torrentFiles.count) file(s)").font(.caption).foregroundStyle(.secondary)
+            Text(download.torrentStats.map { "\(download.torrentFiles.count) file(s) · \($0)" }
+                 ?? "\(download.torrentFiles.count) file(s)")
+                .font(.caption).foregroundStyle(.secondary)
         }
         .buttonStyle(.plain)
     }

@@ -175,6 +175,8 @@ pub fn fetch_all(items: &[FetchItem], opts: &TransferOptions) -> Result<FetchSta
             .map(|i| FileEntry {
                 name: i.name.clone(),
                 size: i.size.unwrap_or(0),
+                // `--include` / `--exclude` already removed unwanted files.
+                selected: None,
             })
             .collect(),
     });

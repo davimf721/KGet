@@ -211,6 +211,12 @@ pub struct TorrentConfig {
     pub max_peer_connections: u32,
     /// Maximum upload slots per torrent
     pub max_upload_slots: u32,
+    /// Keep seeding after a download until this share ratio
+    /// (uploaded / size) is reached (None = do not seed; `--seed-ratio`)
+    pub seed_ratio: Option<f64>,
+    /// Keep seeding after a download for this many seconds
+    /// (None = do not seed; `--seed-time`)
+    pub seed_time_secs: Option<u64>,
 }
 
 impl Default for TorrentConfig {
@@ -224,6 +230,8 @@ impl Default for TorrentConfig {
             dht_enabled: true,
             max_peer_connections: default_torrent_max_peer_connections(),
             max_upload_slots: default_torrent_max_upload_slots(),
+            seed_ratio: None,
+            seed_time_secs: None,
         }
     }
 }

@@ -864,6 +864,13 @@ class DownloadManager: ObservableObject {
                 dl.torrentFiles[idx].downloaded = (file["downloaded"] as? NSNumber)?.int64Value ?? 0
                 dl.torrentFiles[idx].progress = (file["pct"] as? NSNumber)?.doubleValue ?? 0
             }
+        case "torrent_stats":
+            // Swarm summary (kget 1.8+): peers, upload speed, ratio, seeding.
+            var parts = ["\(ev.int64("peers") ?? 0) peers"]
+            if let up = ev.double("upload_bps") { parts.append("↑ \(Formatters.formatSpeed(up))") }
+            if let ratio = ev.double("ratio") { parts.append(String(format: "ratio %.2f", ratio)) }
+            if ev.bool("seeding") == true { parts.append("seeding") }
+            dl.torrentStats = parts.joined(separator: " · ")
         case "verified":
             if ev.bool("ok") == true, let hash = ev.string("hash"), ev.string("algorithm") == "sha256" {
                 dl.sha256Checksum = hash
@@ -1021,6 +1028,7 @@ struct Download: Identifiable {
     var speedHistory: [Double]    // last 30 readings in bytes/s
     var verifyingAlgorithm: String?  // from `phase` events, e.g. "sha256"
     var reportsPhases: Bool          // the binary sends structured `phase` events
+    var torrentStats: String?        // from `torrent_stats` events
 
     init(id: UUID, url: String, outputPath: String, fullFilePath: String, status: DownloadStatus,
          progress: Double, speed: String, eta: String, totalSize: String = "", downloadedSize: String = "",
@@ -1054,6 +1062,7 @@ struct Download: Identifiable {
         self.speedHistory = []
         self.verifyingAlgorithm = nil
         self.reportsPhases = false
+        self.torrentStats = nil
     }
     
     /// Real file name (from `Content-Disposition`/yt-dlp once the binary reports it).
