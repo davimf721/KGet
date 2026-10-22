@@ -36,7 +36,7 @@ use crate::optimization::Optimizer;
 use crate::protocol::{self, Protocol};
 use crate::queue::{DownloadHistory, EntryStatus, HistoryEntry};
 use crate::sftp::SftpDownloader;
-use crate::torrent::{TorrentCallbacks, TorrentOptions, TorrentOutcome};
+use crate::torrent::{TorrentCallbacks, TorrentJobOptions, TorrentOptions, TorrentOutcome};
 use crate::utils;
 use crate::webdav::WebDavDownloader;
 use crate::ytdlp::{VideoEvent, VideoQuality, download_video_with_cancel, ytdlp_binary};
@@ -95,6 +95,9 @@ pub struct DownloadJob {
     /// Save the passwords this download used (from the URL or a prompt) in
     /// the system keychain (`--save-credentials`)
     pub save_credentials: bool,
+    /// Torrent file selection and seeding limits
+    #[serde(skip_serializing_if = "TorrentJobOptions::is_default")]
+    pub torrent: TorrentJobOptions,
 }
 
 impl Default for DownloadJob {
@@ -123,6 +126,7 @@ impl DownloadJob {
             timeout: crate::http::DEFAULT_TIMEOUT_SECS,
             extract: false,
             save_credentials: false,
+            torrent: TorrentJobOptions::default(),
         }
     }
 
@@ -405,6 +409,48 @@ pub fn error_code(e: &(dyn Error + Send + Sync + 'static), cancelled: bool) -> (
         Some(k) => (k.code(), k.is_retryable(&[408, 429, 500, 502, 503, 504])),
         None if cancelled => ("cancelled".into(), false),
         None => ("error".into(), true),
+    }
+}
+
+/// `files` event entries for a torrent's file list; with a selection, each
+/// entry says whether it will be downloaded.
+pub fn torrent_file_entries(
+    files: Vec<(String, u64)>,
+    select: &crate::torrent::FileSelection,
+) -> Vec<FileEntry> {
+    let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
+    let selected = if select.is_empty() {
+        None
+    } else {
+        Some(select.resolve(&names).ok().flatten().unwrap_or_default())
+    };
+    files
+        .into_iter()
+        .enumerate()
+        .map(|(i, (name, size))| FileEntry {
+            name,
+            size,
+            selected: selected.as_ref().map(|s| s.contains(&i)),
+        })
+        .collect()
+}
+
+/// `progress` event derived from a torrent's swarm statistics.
+fn torrent_progress(stats: &crate::events::TorrentStats) -> JsonEvent {
+    let total = (stats.size > 0).then_some(stats.size);
+    let percent = total.map(|t| (stats.downloaded as f64 / t as f64 * 100.0).min(100.0));
+    let eta_secs = match total {
+        Some(t) if t <= stats.downloaded => Some(0),
+        Some(t) if stats.download_bps > 0 => Some((t - stats.downloaded) / stats.download_bps),
+        _ => None,
+    };
+    JsonEvent::Progress {
+        bytes: stats.downloaded,
+        total,
+        percent,
+        speed_bps: stats.download_bps,
+        eta_secs,
+        progress: percent.map(|p| p / 100.0),
     }
 }
 
@@ -716,12 +762,19 @@ fn dispatch(
                 .or_else(|| config.torrent.download_dir.clone())
                 .unwrap_or_else(|| "torrent_output".to_string());
             let output_dir = utils::expand_tilde(&output_dir);
+            // Once the backend reports swarm stats, progress events carry
+            // real byte counts and speeds; the bare fraction callback stops.
+            let have_stats = Arc::new(AtomicBool::new(false));
             let callbacks = match &reporter.events {
                 Some(sink) => {
                     let sink = sink.clone();
+                    let have_stats = have_stats.clone();
                     TorrentCallbacks {
                         status: Some(Arc::new(event_status(reporter))),
                         progress: Some(Arc::new(move |p| {
+                            if have_stats.load(Ordering::Relaxed) {
+                                return;
+                            }
                             let pct = p as f64 * 100.0;
                             sink(&JsonEvent::Progress {
                                 bytes: 0,
@@ -765,16 +818,24 @@ fn dispatch(
                 });
             let on_files: Option<crate::torrent::FilesCb> = reporter.events.clone().map(|sink| {
                 let sizes = sizes.clone();
+                let select = job.torrent.select.clone();
                 Arc::new(move |files: Vec<(String, u64)>| {
                     *sizes.lock().expect("sizes poisoned") =
                         files.iter().map(|(_, size)| *size).collect();
                     sink(&JsonEvent::Files {
-                        files: files
-                            .into_iter()
-                            .map(|(name, size)| FileEntry { name, size })
-                            .collect(),
+                        files: torrent_file_entries(files, &select),
                     });
                 }) as crate::torrent::FilesCb
+            });
+            let on_stats: Option<crate::torrent::StatsCb> = reporter.events.clone().map(|sink| {
+                let have_stats = have_stats.clone();
+                Arc::new(move |stats: crate::events::TorrentStats| {
+                    have_stats.store(true, Ordering::Relaxed);
+                    if !stats.seeding {
+                        sink(&torrent_progress(&stats));
+                    }
+                    sink(&JsonEvent::TorrentStats(Box::new(stats)));
+                }) as crate::torrent::StatsCb
             });
             let outcome = crate::torrent::download_torrent(
                 &job.url,
@@ -788,6 +849,9 @@ fn dispatch(
                     cancel: Some(ctx.cancel.clone()),
                     on_files,
                     on_file_progress,
+                    on_stats,
+                    selection: job.torrent.select.clone(),
+                    seed: job.torrent.seed_limits(&config.torrent),
                 },
             )?;
             Ok(match outcome {

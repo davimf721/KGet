@@ -3,7 +3,9 @@
 //! This module provides a built-in BitTorrent client for downloading
 //! magnet links without requiring an external torrent application.
 
+use std::collections::BTreeSet;
 use std::error::Error;
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,9 +14,11 @@ use std::time::{Duration, Instant};
 use librqbit::{AddTorrent, AddTorrentOptions, AddTorrentResponse, Session, SessionOptions};
 
 use crate::config::{ProxyConfig, TorrentConfig};
+use crate::events::TorrentStats;
 use crate::optimization::Optimizer;
 use crate::progress::create_progress_bar;
-use crate::torrent::{FileProgressCb, FilesCb, TorrentCallbacks, TorrentOptions};
+use crate::torrent::selection::{self, FileSelection, SeedLimits, SeedStop};
+use crate::torrent::{FileProgressCb, FilesCb, StatsCb, TorrentCallbacks, TorrentOptions};
 use crate::utils::print;
 
 // ============================================================================
@@ -63,18 +67,123 @@ fn format_eta(seconds: f64) -> String {
     }
 }
 
+/// Bytes downloaded and total size of the selected files (every file when
+/// `selected` is `None`).
 fn calculate_progress(
     file_infos: &FileInfoList,
     file_progress: &[u64],
+    selected: Option<&BTreeSet<usize>>,
     fallback: (u64, u64),
 ) -> (u64, u64) {
     if file_infos.is_empty() || file_progress.is_empty() {
         return fallback;
     }
-
-    let downloaded: u64 = file_progress.iter().sum();
-    let total: u64 = file_infos.iter().map(|(_, size)| *size).sum();
+    let wanted = |i: &usize| selected.is_none_or(|s| s.contains(i));
+    let downloaded: u64 = file_progress
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| wanted(i))
+        .map(|(_, b)| *b)
+        .sum();
+    let total: u64 = file_infos
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| wanted(i))
+        .map(|(_, (_, size))| *size)
+        .sum();
     (downloaded, total)
+}
+
+/// MiB/s (librqbit's speed unit) to bytes per second.
+fn mibps_to_bps(mbps: f64) -> u64 {
+    (mbps.max(0.0) * 1024.0 * 1024.0) as u64
+}
+
+/// `torrent_stats` payload from librqbit's statistics. librqbit 8 does not
+/// tell seeders from leechers nor expose tracker states, so those stay empty.
+fn swarm_stats(
+    stats: &librqbit::TorrentStats,
+    downloaded: u64,
+    size: u64,
+    files: (Option<usize>, usize),
+) -> TorrentStats {
+    let (peers, connecting, known, down, up) = match &stats.live {
+        Some(live) => {
+            let p = &live.snapshot.peer_stats;
+            (
+                p.live as u64,
+                Some(p.connecting as u64),
+                Some(p.seen as u64),
+                mibps_to_bps(live.download_speed.mbps),
+                mibps_to_bps(live.upload_speed.mbps),
+            )
+        }
+        None => (0, None, None, 0, 0),
+    };
+    TorrentStats {
+        peers,
+        peers_connecting: connecting,
+        peers_known: known,
+        download_bps: down,
+        upload_bps: up,
+        downloaded,
+        uploaded: stats.uploaded_bytes,
+        size,
+        ratio: selection::ratio(stats.uploaded_bytes, size),
+        files_selected: Some(files.0.unwrap_or(files.1)),
+        files_total: Some(files.1),
+        ..Default::default()
+    }
+}
+
+/// Run `fut`, giving up with [`crate::KgetError::Cancelled`] as soon as
+/// `cancel` is set (checked every 200 ms).
+async fn cancellable<T>(
+    cancel: &AtomicBool,
+    fut: impl Future<Output = Result<T, BoxError>>,
+) -> Result<T, BoxError> {
+    tokio::pin!(fut);
+    loop {
+        tokio::select! {
+            r = &mut fut => return r,
+            _ = tokio::time::sleep(Duration::from_millis(200)) => {
+                if cancel.load(Ordering::Relaxed) {
+                    return Err(Box::new(crate::KgetError::Cancelled));
+                }
+            }
+        }
+    }
+}
+
+/// `AddTorrent` for a magnet link, `http(s)://…/.torrent` URL or local file.
+fn add_source(source: &str) -> Result<AddTorrent<'static>, BoxError> {
+    let lower = source.to_ascii_lowercase();
+    if lower.starts_with("magnet:") || lower.starts_with("http://") || lower.starts_with("https://")
+    {
+        Ok(AddTorrent::from_url(source.to_string()))
+    } else {
+        let bytes = std::fs::read(source)
+            .map_err(|e| format!("Cannot read torrent file '{}': {}", source, e))?;
+        Ok(AddTorrent::from_bytes(bytes))
+    }
+}
+
+/// File names and sizes of a `list_only` response, in torrent order.
+fn listed_files(resp: &librqbit::ListOnlyResponse) -> Result<FileInfoList, BoxError> {
+    let files = resp
+        .info
+        .iter_file_details()
+        .map_err(|e| format!("Invalid torrent metadata: {e}"))?
+        .enumerate()
+        .map(|(i, fd)| {
+            let name = fd
+                .filename
+                .to_string()
+                .unwrap_or_else(|_| format!("file_{i}"));
+            (name, fd.len)
+        })
+        .collect();
+    Ok(files)
 }
 
 fn emit_files_json(file_infos: &FileInfoList) {
@@ -129,8 +238,21 @@ pub struct NativeTorrentDownloader {
     cancel: Arc<AtomicBool>,
     files_cb: Option<FilesCb>,
     file_progress_cb: Option<FileProgressCb>,
+    stats_cb: Option<StatsCb>,
     status_cb: Option<Arc<dyn Fn(String) + Send + Sync>>,
     progress_cb: Option<Arc<dyn Fn(f32) + Send + Sync>>,
+    selection: FileSelection,
+    seed: SeedLimits,
+}
+
+/// What the progress and seeding loops need to know about the torrent.
+#[derive(Clone, Copy)]
+struct LoopCtx<'a> {
+    name: &'a str,
+    file_infos: &'a FileInfoList,
+    /// Indices being downloaded (`None` = every file)
+    selected: Option<&'a BTreeSet<usize>>,
+    progress_bar: &'a indicatif::ProgressBar,
 }
 
 impl NativeTorrentDownloader {
@@ -151,9 +273,22 @@ impl NativeTorrentDownloader {
             cancel: Arc::new(AtomicBool::new(false)),
             files_cb: None,
             file_progress_cb: None,
+            stats_cb: None,
             status_cb: None,
             progress_cb: None,
+            selection: FileSelection::default(),
+            seed: SeedLimits::default(),
         }
+    }
+
+    /// Download only these files (`--select`, `--select-glob`).
+    pub fn set_selection(&mut self, selection: FileSelection) {
+        self.selection = selection;
+    }
+
+    /// Keep seeding after the download until one of these limits is reached.
+    pub fn set_seed_limits(&mut self, seed: SeedLimits) {
+        self.seed = seed;
     }
 
     /// Apply port / DHT settings from the torrent configuration.
@@ -221,6 +356,8 @@ impl NativeTorrentDownloader {
 
         let name = handle.name().unwrap_or_else(|| "Torrent".to_string());
         let file_infos = self.extract_file_infos(&handle);
+        let selected: Option<BTreeSet<usize>> =
+            handle.only_files().map(|v| v.into_iter().collect());
 
         if let Some(cb) = &self.files_cb {
             cb(file_infos.clone());
@@ -229,23 +366,37 @@ impl NativeTorrentDownloader {
             emit_files_json(&file_infos);
         }
 
-        let stats = handle.stats();
-        self.emit_status(format!(
-            "Downloading: {} ({} bytes)",
-            name, stats.total_bytes
-        ));
+        let (_, size) = calculate_progress(
+            &file_infos,
+            &vec![0; file_infos.len()],
+            selected.as_ref(),
+            (0, handle.stats().total_bytes),
+        );
+        match &selected {
+            Some(sel) => self.emit_status(format!(
+                "Downloading: {} ({} of {} files, {} bytes)",
+                name,
+                sel.len(),
+                file_infos.len(),
+                size
+            )),
+            None => self.emit_status(format!("Downloading: {} ({} bytes)", name, size)),
+        }
 
         let progress_bar = create_progress_bar(
             self.quiet,
             format!("Downloading {}", name),
-            Some(stats.total_bytes),
+            Some(size),
             false,
         );
 
-        if let Err(e) = self
-            .run_download_loop(&handle, &name, &file_infos, &progress_bar)
-            .await
-        {
+        let ctx = LoopCtx {
+            name: &name,
+            file_infos: &file_infos,
+            selected: selected.as_ref(),
+            progress_bar: &progress_bar,
+        };
+        if let Err(e) = self.run_download_loop(&handle, &ctx).await {
             drop(handle);
             session.stop().await;
             return Err(e);
@@ -254,6 +405,10 @@ impl NativeTorrentDownloader {
         self.emit_progress(1.0);
         progress_bar.finish_with_message(format!("✓ {} downloaded successfully!", name));
         self.emit_status(format!("Download complete: {}", name));
+
+        if self.seed.seeds() {
+            self.seed_until_limit(&handle, &ctx, size).await;
+        }
 
         drop(handle);
         session.stop().await;
@@ -299,24 +454,51 @@ impl NativeTorrentDownloader {
     ) -> Result<Arc<librqbit::ManagedTorrent>, BoxError> {
         self.emit_status("Adding torrent...");
 
-        let opts = AddTorrentOptions {
+        let mut opts = AddTorrentOptions {
             overwrite: true,
             ..Default::default()
         };
+        let mut add = add_source(&self.magnet)?;
 
-        let lower = self.magnet.to_ascii_lowercase();
-        let add = if lower.starts_with("magnet:")
-            || lower.starts_with("http://")
-            || lower.starts_with("https://")
-        {
-            AddTorrent::from_url(&self.magnet)
-        } else {
-            let bytes = std::fs::read(&self.magnet)
-                .map_err(|e| format!("Cannot read torrent file '{}': {}", self.magnet, e))?;
-            AddTorrent::from_bytes(bytes)
-        };
+        if !self.selection.is_empty() {
+            // Fetch the file list first (the peers seen while resolving a
+            // magnet are reused), then add the torrent with only the chosen
+            // files so the others are never created on disk.
+            self.emit_status("Fetching torrent metadata from peers...");
+            let listed = cancellable(&self.cancel, async {
+                session
+                    .add_torrent(
+                        add,
+                        Some(AddTorrentOptions {
+                            list_only: true,
+                            ..Default::default()
+                        }),
+                    )
+                    .await
+                    .map_err(|e| BoxError::from(format!("Failed to add torrent: {e}")))
+            })
+            .await?;
+            let AddTorrentResponse::ListOnly(resp) = listed else {
+                return Err("Torrent metadata was not returned".into());
+            };
+            let names: Vec<String> = listed_files(&resp)?.into_iter().map(|f| f.0).collect();
+            let only = self.selection.resolve(&names)?;
+            if let Some(only) = &only {
+                self.emit_status(format!("Selected {} of {} files", only.len(), names.len()));
+            }
+            opts.only_files = only;
+            opts.initial_peers = Some(resp.seen_peers);
+            add = AddTorrent::from_bytes(resp.torrent_bytes);
+        }
 
-        match session.add_torrent(add, Some(opts)).await {
+        let added = cancellable(&self.cancel, async {
+            session
+                .add_torrent(add, Some(opts))
+                .await
+                .map_err(|e| BoxError::from(format!("Failed to add torrent: {e}")))
+        })
+        .await;
+        match added {
             Ok(AddTorrentResponse::Added(_, handle)) => Ok(handle),
             Ok(AddTorrentResponse::AlreadyManaged(_, handle)) => {
                 self.emit_status("Torrent already exists, resuming...");
@@ -325,7 +507,7 @@ impl NativeTorrentDownloader {
             Ok(AddTorrentResponse::ListOnly(_)) => {
                 Err("Torrent was added in list-only mode".into())
             }
-            Err(e) => Err(format!("Failed to add torrent: {}", e).into()),
+            Err(e) => Err(e),
         }
     }
 
@@ -374,10 +556,14 @@ impl NativeTorrentDownloader {
     async fn run_download_loop(
         &self,
         handle: &Arc<librqbit::ManagedTorrent>,
-        name: &str,
-        file_infos: &FileInfoList,
-        progress_bar: &indicatif::ProgressBar,
+        ctx: &LoopCtx<'_>,
     ) -> Result<(), BoxError> {
+        let LoopCtx {
+            name,
+            file_infos,
+            selected,
+            progress_bar,
+        } = *ctx;
         let mut last_progress: f32 = 0.0;
         let mut last_bytes: u64 = 0;
         let mut last_time = Instant::now();
@@ -388,7 +574,8 @@ impl NativeTorrentDownloader {
                 return Err(Box::new(crate::KgetError::Cancelled));
             }
             let stats = handle.stats();
-            let download_stats = self.compute_stats(&stats, file_infos, last_bytes, last_time);
+            let download_stats =
+                self.compute_stats(&stats, file_infos, selected, last_bytes, last_time);
 
             last_bytes = download_stats.downloaded;
             last_time = Instant::now();
@@ -407,6 +594,14 @@ impl NativeTorrentDownloader {
                 && !stats.file_progress.is_empty()
             {
                 cb(stats.file_progress.clone());
+            }
+            if let Some(cb) = &self.stats_cb {
+                cb(self.with_limits(swarm_stats(
+                    &stats,
+                    download_stats.downloaded,
+                    download_stats.total,
+                    (selected.map(|s| s.len()), file_infos.len()),
+                )));
             }
 
             // Line-oriented output for external parsers (never in quiet/JSONL mode)
@@ -429,7 +624,9 @@ impl NativeTorrentDownloader {
                 last_progress = download_stats.progress_pct;
             }
 
-            if download_stats.downloaded >= download_stats.total && download_stats.total > 0 {
+            let done =
+                download_stats.downloaded >= download_stats.total && download_stats.total > 0;
+            if done || (stats.finished && selected.is_some()) {
                 break;
             }
 
@@ -444,16 +641,94 @@ impl NativeTorrentDownloader {
         Ok(())
     }
 
+    /// Add the configured seeding limits to a stats payload.
+    fn with_limits(&self, mut s: TorrentStats) -> TorrentStats {
+        s.seed_ratio_limit = self.seed.ratio;
+        s.seed_time_limit_secs = self.seed.time.map(|t| t.as_secs());
+        s
+    }
+
+    /// Keep the torrent running after the download until a seeding limit is
+    /// reached or the job is cancelled (either way the download succeeded).
+    async fn seed_until_limit(
+        &self,
+        handle: &Arc<librqbit::ManagedTorrent>,
+        ctx: &LoopCtx<'_>,
+        size: u64,
+    ) {
+        let mut limits = Vec::new();
+        if let Some(r) = self.seed.ratio {
+            limits.push(format!("ratio {r}"));
+        }
+        if let Some(t) = self.seed.time {
+            limits.push(format_eta(t.as_secs_f64()));
+        }
+        self.emit_status(format!("Seeding until {}", limits.join(" or ")));
+        let start = Instant::now();
+        loop {
+            if self.is_cancelled() {
+                self.emit_status("Seeding stopped");
+                return;
+            }
+            let stats = handle.stats();
+            if let Some(error) = &stats.error {
+                self.emit_status(format!("Seeding stopped: {error}"));
+                return;
+            }
+            let mut s = self.with_limits(swarm_stats(
+                &stats,
+                size,
+                size,
+                (ctx.selected.map(|s| s.len()), ctx.file_infos.len()),
+            ));
+            s.seeding = true;
+            s.seeding_secs = Some(start.elapsed().as_secs());
+            let up = humansize::format_size(s.upload_bps, humansize::BINARY);
+            ctx.progress_bar.set_message(format!(
+                "{} - seeding, ratio {:.2}, {} peers, up {}/s",
+                ctx.name, s.ratio, s.peers, up
+            ));
+            if !self.quiet {
+                ctx.progress_bar.suspend(|| {
+                    println!(
+                        "SEEDING: ratio {:.2} UP: {}/s PEERS: {}",
+                        s.ratio, up, s.peers
+                    )
+                });
+            }
+            if let Some(cb) = &self.stats_cb {
+                cb(s);
+            }
+            match self
+                .seed
+                .should_stop(stats.uploaded_bytes, size, start.elapsed())
+            {
+                Some(SeedStop::Ratio) => {
+                    self.emit_status("Seed ratio reached");
+                    return;
+                }
+                Some(SeedStop::Time) => {
+                    self.emit_status("Seeding time limit reached");
+                    return;
+                }
+                None => {}
+            }
+            tokio::time::sleep(Duration::from_millis(PROGRESS_UPDATE_INTERVAL_MS)).await;
+        }
+    }
+
     fn compute_stats(
         &self,
         stats: &librqbit::TorrentStats,
         file_infos: &FileInfoList,
+        selected: Option<&BTreeSet<usize>>,
         last_bytes: u64,
         last_time: Instant,
     ) -> DownloadStats {
         let (downloaded, total) = calculate_progress(
             file_infos,
             &stats.file_progress,
+            selected,
             (stats.progress_bytes, stats.total_bytes),
         );
 
@@ -514,6 +789,9 @@ pub fn download_magnet_native(
     }
     downloader.files_cb = opts.on_files;
     downloader.file_progress_cb = opts.on_file_progress;
+    downloader.stats_cb = opts.on_stats;
+    downloader.set_selection(opts.selection);
+    downloader.set_seed_limits(opts.seed);
 
     if let Some(status) = callbacks.status {
         downloader.set_status_callback(move |s| status(s));
@@ -526,9 +804,70 @@ pub fn download_magnet_native(
     tokio::runtime::Runtime::new()?.block_on(downloader.download())
 }
 
+/// Fetch the metadata of a magnet link or `.torrent` and return its files
+/// `(path, size)` in torrent order, without downloading anything.
+pub fn list_files_native(
+    source: &str,
+    config: &TorrentConfig,
+    cancel: Option<Arc<AtomicBool>>,
+) -> Result<Vec<(String, u64)>, BoxError> {
+    let cancel = cancel.unwrap_or_default();
+    tokio::runtime::Runtime::new()?.block_on(async {
+        let opts = SessionOptions {
+            disable_dht: !config.dht_enabled,
+            disable_dht_persistence: true,
+            persistence: None,
+            listen_port_range: None,
+            enable_upnp_port_forwarding: false,
+            ..Default::default()
+        };
+        let session = Session::new_with_opts(std::env::temp_dir(), opts)
+            .await
+            .map_err(|e| format!("Failed to create torrent session: {}", e))?;
+        let add = add_source(source)?;
+        let listed = tokio::time::timeout(
+            Duration::from_secs(METADATA_TIMEOUT_SECS),
+            cancellable(&cancel, async {
+                session
+                    .add_torrent(
+                        add,
+                        Some(AddTorrentOptions {
+                            list_only: true,
+                            ..Default::default()
+                        }),
+                    )
+                    .await
+                    .map_err(|e| BoxError::from(format!("Failed to read torrent: {e}")))
+            }),
+        )
+        .await;
+        session.stop().await;
+        match listed {
+            Ok(Ok(AddTorrentResponse::ListOnly(resp))) => listed_files(&resp),
+            Ok(Ok(_)) => Err("Torrent metadata was not returned".into()),
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err("Timeout waiting for torrent metadata. No peers found.".into()),
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::format_eta;
+    use super::*;
+
+    #[test]
+    fn progress_counts_only_selected_files() {
+        let files: FileInfoList = vec![("a".into(), 100), ("b".into(), 50), ("c".into(), 10)];
+        let done = [100, 25, 0];
+        assert_eq!(calculate_progress(&files, &done, None, (0, 0)), (125, 160));
+        let sel: BTreeSet<usize> = [1, 2].into();
+        assert_eq!(
+            calculate_progress(&files, &done, Some(&sel), (0, 0)),
+            (25, 60)
+        );
+        assert_eq!(calculate_progress(&Vec::new(), &[], None, (7, 9)), (7, 9));
+        assert_eq!(mibps_to_bps(1.0), 1_048_576);
+    }
 
     #[test]
     fn eta_uses_integer_division() {

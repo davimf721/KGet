@@ -748,7 +748,7 @@ fn resolve_target(s: &Session, reference: Option<&str>) -> Result<PathBuf, BoxEr
     }
 }
 
-fn open_with_system(path: &Path, reveal: bool) -> Result<(), BoxError> {
+pub(crate) fn open_with_system(path: &Path, reveal: bool) -> Result<(), BoxError> {
     if !path.exists() {
         return Err(format!("{} does not exist", path.display()).into());
     }

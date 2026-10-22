@@ -53,9 +53,11 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 keyring-core = "1.0.1"
 rpassword = "7.5.4"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
+# Terminal UI (`kget tui`); crossterm comes re-exported as `ratatui::crossterm`
+ratatui = { version = "0.30.2", optional = true }
 
 [features]
-default = ["keychain"]
+default = ["keychain", "tui"]
 # Save passwords in the OS credential store (macOS Keychain, Windows Credential
 # Manager, Secret Service on Linux/BSD). Pure Rust on every platform.
 keychain = [
@@ -64,6 +66,9 @@ keychain = [
     "dep:zbus-secret-service-keyring-store",
 ]
 async = ["dep:tokio"]
+# `kget tui`: full-screen terminal UI driven by the job manager. Pure Rust
+# (ratatui + crossterm, no system libraries), so it is on by default.
+tui = ["dep:ratatui"]
 gui = ["eframe", "egui", "rfd", "arboard", "image", "egui_extras", "torrent-native", "notify-rust"]
 torrent-transmission = ["transmission-rpc", "dep:tokio"]
 torrent-native = ["librqbit", "dep:tokio"]

@@ -1,5 +1,5 @@
 //! `kget` binary: parses the command line and launches a mode (CLI download,
-//! batch, interactive REPL, GUI, history, doctor).
+//! batch, interactive REPL, terminal UI, GUI, history, doctor).
 //!
 //! All download logic lives in the library: [`kget::runner`] (dispatch,
 //! verification, history, JSONL), [`kget::cli`] (terminal helpers) and
@@ -17,6 +17,9 @@ mod interactive;
 
 #[cfg(feature = "gui")]
 mod gui;
+
+#[cfg(feature = "tui")]
+mod tui;
 
 use kget::cli::{self, ConfigOverrides, HistoryFilter};
 use kget::config::Config;
@@ -95,6 +98,26 @@ struct Args {
     /// Disable DHT for torrents
     #[arg(long = "no-dht")]
     no_dht: bool,
+
+    /// Torrent: download only these files, by number as shown by --list-files (e.g. 1,3-5; repeatable)
+    #[arg(long = "select", value_name = "LIST")]
+    select: Vec<String>,
+
+    /// Torrent: download only files whose path matches this pattern (e.g. "*.mkv"; repeatable)
+    #[arg(long = "select-glob", value_name = "PATTERN")]
+    select_glob: Vec<String>,
+
+    /// Torrent: print the files of a magnet link or .torrent and exit (needs torrent-native)
+    #[arg(long = "list-files")]
+    list_files: bool,
+
+    /// Torrent: keep seeding after the download until this share ratio (e.g. 1.5)
+    #[arg(long = "seed-ratio", value_name = "RATIO")]
+    seed_ratio: Option<String>,
+
+    /// Torrent: keep seeding after the download for this long (e.g. 30m, 2h; bare number = minutes)
+    #[arg(long = "seed-time", value_name = "DURATION")]
+    seed_time: Option<String>,
 
     /// Expected SHA256 hash for automatic verification after download
     #[arg(long = "sha256")]
@@ -326,7 +349,18 @@ impl Args {
         job.timeout = self.timeout;
         job.extract = self.extract;
         job.save_credentials = self.save_credentials;
+        job.torrent = self.torrent_options()?;
         Ok(job)
+    }
+
+    /// `--select`, `--select-glob`, `--seed-ratio` and `--seed-time`.
+    fn torrent_options(&self) -> Result<kget::torrent::TorrentJobOptions, BoxError> {
+        cli::torrent_job_options(
+            &self.select,
+            &self.select_glob,
+            self.seed_ratio.as_deref(),
+            self.seed_time.as_deref(),
+        )
     }
 
     /// The output for a single download.
@@ -379,6 +413,23 @@ fn real_main() -> Result<i32, BoxError> {
 
     if args.interactive {
         interactive::interactive_mode();
+        return Ok(0);
+    }
+
+    // `kget tui`: full-screen terminal UI (an existing file named `tui` is
+    // still downloadable as `./tui`).
+    if args.url == "tui" {
+        args.overrides().apply(&mut config);
+        return launch_tui(config);
+    }
+
+    if args.list_files {
+        if args.url.is_empty() {
+            return Err("--list-files needs a magnet link or .torrent file".into());
+        }
+        args.overrides().apply(&mut config);
+        let opts = args.torrent_options()?;
+        cli::print_torrent_files(&args.url, &config, &opts.select, args.jsonl)?;
         return Ok(0);
     }
 
@@ -491,6 +542,21 @@ fn run_batch(
         return Ok(130);
     }
     Ok(if failed > 0 { 1 } else { 0 })
+}
+
+// ============================================================================
+// Terminal UI
+// ============================================================================
+
+#[cfg(feature = "tui")]
+fn launch_tui(config: Config) -> Result<i32, BoxError> {
+    tui::run(config)?;
+    Ok(0)
+}
+
+#[cfg(not(feature = "tui"))]
+fn launch_tui(_config: Config) -> Result<i32, BoxError> {
+    Err("The terminal UI was not compiled in (rebuild with --features tui)".into())
 }
 
 // ============================================================================
