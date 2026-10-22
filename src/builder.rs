@@ -183,6 +183,11 @@ pub struct DownloadBuilder {
     retry: RetryConfig,
     range: Option<(u64, u64)>,
     quiet: bool,
+    include: Vec<String>,
+    exclude: Vec<String>,
+    revision: Option<String>,
+    hf_cache: bool,
+    parallel_files: usize,
 }
 
 impl DownloadBuilder {
@@ -202,6 +207,11 @@ impl DownloadBuilder {
             retry: RetryConfig::default(),
             range: None,
             quiet: false,
+            include: Vec::new(),
+            exclude: Vec::new(),
+            revision: None,
+            hf_cache: false,
+            parallel_files: 4,
         }
     }
 
@@ -306,10 +316,46 @@ impl DownloadBuilder {
         self
     }
 
+    /// `hf://` downloads: only fetch files matching this glob (repeatable).
+    pub fn include(mut self, glob: impl Into<String>) -> Self {
+        self.include.push(glob.into());
+        self
+    }
+
+    /// `hf://` downloads: skip files matching this glob (repeatable).
+    pub fn exclude(mut self, glob: impl Into<String>) -> Self {
+        self.exclude.push(glob.into());
+        self
+    }
+
+    /// `hf://` downloads: branch, tag or commit (overrides the URL's `@rev`).
+    pub fn revision(mut self, rev: impl Into<String>) -> Self {
+        self.revision = Some(rev.into());
+        self
+    }
+
+    /// `hf://` downloads: write into the Hugging Face hub cache layout.
+    pub fn hf_cache(mut self, enabled: bool) -> Self {
+        self.hf_cache = enabled;
+        self
+    }
+
+    /// `hf://` / `ollama://` downloads: files fetched at the same time.
+    pub fn parallel_files(mut self, n: usize) -> Self {
+        self.parallel_files = n.clamp(1, crate::fetch::MAX_PARALLEL_FILES);
+        self
+    }
+
     // ── Terminal methods ─────────────────────────────────────────────────────
 
     /// Execute the download synchronously and return metrics on success.
+    ///
+    /// `hf://` and `ollama://` URLs download every selected file; the result's
+    /// `path` is then the directory (or the single file) that was written.
     pub fn download(mut self) -> Result<DownloadResult, KgetError> {
+        if self.is_model() {
+            return self.download_model(None);
+        }
         // 1. Resolve sidecar before the main download so the hash is ready.
         if let Some(sidecar_url) = self.verify_from.take() {
             self.apply_sidecar(&sidecar_url)?;
@@ -384,6 +430,21 @@ impl DownloadBuilder {
     ) {
         let (tx, rx) = mpsc::channel::<DownloadEvent>();
         let handle = thread::spawn(move || {
+            if self.is_model() {
+                let result = self.download_model(Some(&tx));
+                match &result {
+                    Ok(r) => {
+                        let _ = tx.send(DownloadEvent::Completed {
+                            path: r.path.clone(),
+                            sha256: None,
+                        });
+                    }
+                    Err(e) => {
+                        let _ = tx.send(DownloadEvent::Error(e.to_string()));
+                    }
+                }
+                return result;
+            }
             // Resolve sidecar
             if let Some(sidecar_url) = self.verify_from.take()
                 && let Err(e) = self.apply_sidecar(&sidecar_url)
@@ -446,6 +507,90 @@ impl DownloadBuilder {
     }
 
     // ── Private helpers ──────────────────────────────────────────────────────
+
+    /// Whether the URL is a multi-file AI model source (`hf://`, `ollama://`).
+    fn is_model(&self) -> bool {
+        matches!(
+            crate::protocol::detect(&self.url),
+            crate::Protocol::HuggingFace | crate::Protocol::Ollama
+        )
+    }
+
+    /// `hf://` / `ollama://` through the shared runner (no history entry).
+    fn download_model(
+        &self,
+        events: Option<&mpsc::Sender<DownloadEvent>>,
+    ) -> Result<DownloadResult, KgetError> {
+        use crate::runner::{DownloadJob, Outcome, Reporter, RunContext, run_job};
+
+        let mut job = DownloadJob::new(self.url.clone());
+        job.output = self.output.clone();
+        job.headers = self.headers.clone();
+        job.sha256 = self.checksums.sha256.clone();
+        job.retries = self.retry.max_attempts.max(1);
+        job.include = self.include.clone();
+        job.exclude = self.exclude.clone();
+        job.revision = self.revision.clone();
+        job.hf_cache = self.hf_cache;
+        job.parallel_files = self.parallel_files;
+
+        let mut config = Config {
+            proxy: self.make_proxy(),
+            ..Default::default()
+        };
+        config.optimization.speed_limit = self.speed_limit;
+        config.optimization.max_connections = self.connections;
+        let mut ctx = RunContext::new(config);
+        ctx.record_history = false;
+
+        let reporter = match events {
+            Some(tx) => {
+                let tx = std::sync::Mutex::new(tx.clone());
+                Reporter::events(Arc::new(move |ev: &crate::events::JsonEvent| {
+                    let msg = match ev {
+                        crate::events::JsonEvent::Progress {
+                            percent,
+                            speed_bps,
+                            eta_secs,
+                            ..
+                        } => DownloadEvent::Progress {
+                            percent: percent.unwrap_or(0.0),
+                            speed_bps: *speed_bps,
+                            eta_secs: *eta_secs,
+                        },
+                        crate::events::JsonEvent::Status { message } => {
+                            DownloadEvent::Status(message.clone())
+                        }
+                        _ => return,
+                    };
+                    let _ = tx.lock().expect("event sender poisoned").send(msg);
+                }))
+            }
+            None if self.quiet => Reporter::quiet(),
+            None => Reporter::terminal(),
+        };
+
+        let start = Instant::now();
+        let outcome = run_job(&job, &ctx, &reporter).map_err(KgetError::from)?;
+        let duration = start.elapsed();
+        let path = match outcome {
+            Outcome::Saved(Some(p)) => p,
+            _ => std::path::PathBuf::new(),
+        };
+        let bytes_downloaded = if path.is_dir() {
+            crate::fetch::dir_size(&path)
+        } else {
+            std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0)
+        };
+        Ok(DownloadResult {
+            path: path.to_string_lossy().into_owned(),
+            bytes_downloaded,
+            avg_speed_bps: avg_speed(bytes_downloaded, duration),
+            duration,
+            connections_used: self.connections,
+            checksums: ComputedChecksums::default(),
+        })
+    }
 
     /// Fetch the sidecar file and, if a matching hash is found, update
     /// `self.checksums` so the post-download verification uses it.

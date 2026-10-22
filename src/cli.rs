@@ -118,6 +118,9 @@ pub fn print_doctor(config: &Config) {
         cfg!(feature = "keychain")
     );
     println!("Keychain: {}", crate::credentials::status());
+    println!("HF auth:  {}", crate::hf::auth_status());
+    println!("HF cache: {}", crate::hf::hub_cache_dir().display());
+    println!("Ollama:   {}", crate::ollama::models_dir().display());
     println!(
         "Proxy:    {}",
         if config.proxy.enabled {
