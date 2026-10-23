@@ -58,7 +58,11 @@ fn serve(body: Arc<Vec<u8>>, per_conn_bps: usize, slow: Option<(usize, usize)>) 
                         .and_then(|r| {
                             let (a, b) = r.split_once('-')?;
                             let a: usize = a.parse().ok()?;
-                            let b = if b.is_empty() { len } else { b.parse::<usize>().ok()? + 1 };
+                            let b = if b.is_empty() {
+                                len
+                            } else {
+                                b.parse::<usize>().ok()? + 1
+                            };
                             Some((a, b.min(len)))
                         })
                         .unwrap_or((0, len));
@@ -75,7 +79,11 @@ fn serve(body: Arc<Vec<u8>>, per_conn_bps: usize, slow: Option<(usize, usize)>) 
                         Some((s, bps)) if s == start => bps,
                         _ => per_conn_bps,
                     };
-                    let step = if bps == 0 { 256 * 1024 } else { (bps / 20).max(1) };
+                    let step = if bps == 0 {
+                        256 * 1024
+                    } else {
+                        (bps / 20).max(1)
+                    };
                     let mut pos = start;
                     while pos < end {
                         let n = step.min(end - pos);
@@ -94,7 +102,13 @@ fn serve(body: Arc<Vec<u8>>, per_conn_bps: usize, slow: Option<(usize, usize)>) 
     base
 }
 
-fn run(name: &str, size: usize, connections: usize, per_conn_bps: usize, slow: Option<(usize, usize)>) {
+fn run(
+    name: &str,
+    size: usize,
+    connections: usize,
+    per_conn_bps: usize,
+    slow: Option<(usize, usize)>,
+) {
     let body: Arc<Vec<u8>> = Arc::new((0..size).map(|i| (i * 31 % 251) as u8).collect());
     let base = serve(body.clone(), per_conn_bps, slow);
     let dir = TempDir::new().unwrap();
