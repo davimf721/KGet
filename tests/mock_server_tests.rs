@@ -723,3 +723,340 @@ async fn test_webdav_uses_keychain_and_saves_prompted_password() {
     assert_eq!(resolver.finish(), vec![target.clone()]);
     assert_eq!(keychain.get(&target).unwrap().as_deref(), Some("typed"));
 }
+
+// ============================================================================
+// Async turbo engine: work stealing, 1.7.1 resume, mirrors, HTTP/2
+// ============================================================================
+
+mod turbo {
+    use super::*;
+    use kget::http::HttpVersion;
+    use kget::{AdvancedDownloader, Config, Optimizer, ProxyConfig};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+    use wiremock::{Request, Respond};
+
+    const MIB: usize = 1024 * 1024;
+
+    fn pattern(len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i * 13 % 251) as u8).collect()
+    }
+
+    fn sha256_hex(data: &[u8]) -> String {
+        use sha2::Digest;
+        hex::encode(sha2::Sha256::digest(data))
+    }
+
+    fn optimizer(connections: usize) -> Optimizer {
+        let mut cfg = Config::default().optimization;
+        cfg.max_connections = connections;
+        Optimizer::from_config(cfg)
+    }
+
+    /// Serves any `Range` of `body` and records every range it was asked for.
+    /// Requests whose range starts at `slow_start` are delayed; once
+    /// `fail_after` ranges were served, every further request gets a 403.
+    #[derive(Clone)]
+    struct Ranges {
+        body: Arc<Vec<u8>>,
+        seen: Arc<Mutex<Vec<(u64, u64)>>>,
+        slow_start: Option<(u64, Duration)>,
+        fail_after: Option<usize>,
+    }
+
+    impl Ranges {
+        fn new(body: &[u8]) -> Self {
+            Self {
+                body: Arc::new(body.to_vec()),
+                seen: Arc::default(),
+                slow_start: None,
+                fail_after: None,
+            }
+        }
+
+        fn seen(&self) -> Vec<(u64, u64)> {
+            self.seen.lock().unwrap().clone()
+        }
+
+        async fn mount(&self, server: &MockServer, file: &str) {
+            Mock::given(method("HEAD"))
+                .and(path(file))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .insert_header("content-length", self.body.len().to_string())
+                        .insert_header("accept-ranges", "bytes")
+                        .insert_header("etag", "\"v1\""),
+                )
+                .mount(server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path(file))
+                .respond_with(self.clone())
+                .mount(server)
+                .await;
+        }
+    }
+
+    impl Respond for Ranges {
+        fn respond(&self, req: &Request) -> ResponseTemplate {
+            let len = self.body.len() as u64;
+            let range = req
+                .headers
+                .get("range")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.strip_prefix("bytes="))
+                .and_then(|v| v.split_once('-'))
+                .and_then(|(a, b)| Some((a.parse::<u64>().ok()?, b.parse::<u64>().ok()? + 1)));
+            let Some((start, end)) = range else {
+                return ResponseTemplate::new(200).set_body_bytes(self.body.to_vec());
+            };
+            let mut seen = self.seen.lock().unwrap();
+            let fail = self.fail_after.is_some_and(|n| seen.len() >= n);
+            seen.push((start, end));
+            if fail {
+                return ResponseTemplate::new(403);
+            }
+            let end = end.min(len);
+            let mut t = ResponseTemplate::new(206)
+                .set_body_bytes(self.body[start as usize..end as usize].to_vec())
+                .insert_header("content-range", format!("bytes {start}-{}/{len}", end - 1))
+                .insert_header("etag", "\"v1\"");
+            if let Some((s, d)) = self.slow_start
+                && s == start
+            {
+                t = t.set_delay(d);
+            }
+            t
+        }
+    }
+
+    fn run(dl: AdvancedDownloader) -> Result<(), String> {
+        dl.download().map_err(|e| e.to_string())
+    }
+
+    #[tokio::test]
+    async fn slow_range_is_split_by_idle_connections() {
+        let server = MockServer::start().await;
+        let body = pattern(10 * MIB);
+        let mut ranges = Ranges::new(&body);
+        // Chunk 0 (0..4 MiB) stalls for 3 s before its first byte.
+        ranges.slow_start = Some((0, Duration::from_secs(3)));
+        ranges.mount(&server, "/ws.bin").await;
+
+        let dir = TempDir::new().unwrap();
+        let out = dir.path().join("ws.bin");
+        let dl = AdvancedDownloader::new(
+            format!("{}/ws.bin", server.uri()),
+            out.to_string_lossy().into_owned(),
+            true,
+            ProxyConfig::default(),
+            optimizer(2),
+        )
+        .unwrap();
+        tokio::task::spawn_blocking(move || run(dl))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(fs::read(&out).unwrap(), body, "no holes, no overlap damage");
+        let seen = ranges.seen();
+        // Chunk boundaries are 0, 4 MiB and 8 MiB; a split starts inside chunk 0.
+        assert!(
+            seen.iter().any(|&(s, _)| s > 0 && s < 4 * MIB as u64),
+            "the stalled range was split: {seen:?}"
+        );
+        assert!(!dir.path().join("ws.bin.kget").exists());
+    }
+
+    #[tokio::test]
+    async fn resumes_a_1_7_1_state_file() {
+        let server = MockServer::start().await;
+        let body = pattern(12 * MIB);
+        let ranges = Ranges::new(&body);
+        ranges.mount(&server, "/old.bin").await;
+        let url = format!("{}/old.bin", server.uri());
+
+        let dir = TempDir::new().unwrap();
+        let out = dir.path().join("old.bin");
+        // Exactly what 1.7.1 writes: chunk 0 done, chunk 1 half done, chunk 2 untouched.
+        let m = MIB as u64;
+        let mut part = body[..6 * MIB].to_vec();
+        part.resize(body.len(), 0);
+        fs::write(dir.path().join("old.bin.part"), &part).unwrap();
+        let state = serde_json::json!({
+            "version": 1,
+            "url": url,
+            "total_size": body.len(),
+            "etag": "\"v1\"",
+            "last_modified": null,
+            "chunks": [
+                { "start": 0, "end": 4 * m, "done": 4 * m },
+                { "start": 4 * m, "end": 8 * m, "done": 2 * m },
+                { "start": 8 * m, "end": 12 * m, "done": 0 },
+            ],
+        });
+        fs::write(dir.path().join("old.bin.kget"), state.to_string()).unwrap();
+
+        let dl = AdvancedDownloader::new(
+            url,
+            out.to_string_lossy().into_owned(),
+            true,
+            ProxyConfig::default(),
+            optimizer(4),
+        )
+        .unwrap();
+        tokio::task::spawn_blocking(move || run(dl))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(fs::read(&out).unwrap(), body);
+        let seen = ranges.seen();
+        assert!(
+            seen.iter().all(|&(s, _)| s >= 6 * m),
+            "already-downloaded bytes are never requested again: {seen:?}"
+        );
+        assert!(seen.iter().any(|&(s, _)| s == 6 * m));
+        assert!(seen.iter().any(|&(s, _)| s == 8 * m));
+    }
+
+    #[tokio::test]
+    async fn metalink_mirror_failing_mid_download_is_dropped() {
+        let bad = MockServer::start().await;
+        let good = MockServer::start().await;
+        let body = pattern(10 * MIB);
+        let mut flaky = Ranges::new(&body);
+        flaky.fail_after = Some(1); // serves one range, then 403 forever
+        flaky.mount(&bad, "/m.bin").await;
+        let healthy = Ranges::new(&body);
+        healthy.mount(&good, "/m.bin").await;
+
+        let dir = TempDir::new().unwrap();
+        let manifest = dir.path().join("m.meta4");
+        fs::write(
+            &manifest,
+            format!(
+                r#"<?xml version="1.0"?>
+<metalink xmlns="urn:ietf:params:xml:ns:metalink">
+  <file name="m.bin">
+    <size>{}</size>
+    <hash type="sha-256">{}</hash>
+    <url priority="1">{}/m.bin</url>
+    <url priority="2">{}/m.bin</url>
+  </file>
+</metalink>"#,
+                body.len(),
+                sha256_hex(&body),
+                bad.uri(),
+                good.uri()
+            ),
+        )
+        .unwrap();
+
+        let out_dir = dir.path().join("out");
+        let (src, dst) = (
+            manifest.to_string_lossy().into_owned(),
+            out_dir.to_string_lossy().into_owned(),
+        );
+        tokio::task::spawn_blocking(move || {
+            kget::metalink::download_metalink(
+                &src,
+                &dst,
+                true,
+                ProxyConfig::default(),
+                optimizer(4),
+            )
+            .map_err(|e| e.to_string())
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(fs::read(out_dir.join("m.bin")).unwrap(), body);
+        let (bad_seen, good_seen) = (flaky.seen(), healthy.seen());
+        assert!(
+            bad_seen.len() >= 2,
+            "the bad mirror served and then failed: {bad_seen:?}"
+        );
+        // Parallel path: the good mirror never had to fetch the whole file.
+        let good_bytes: u64 = good_seen.iter().map(|(s, e)| e - s).sum();
+        assert!(
+            good_bytes < body.len() as u64,
+            "the healthy mirror only fetched what the bad one did not: {good_seen:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn http2_streams_are_multiplexed() {
+        let server = MockServer::start().await;
+        let body = pattern(9 * MIB);
+        let ranges = Ranges::new(&body);
+        ranges.mount(&server, "/h2.bin").await;
+
+        let dir = TempDir::new().unwrap();
+        let out = dir.path().join("h2.bin");
+        let mut dl = AdvancedDownloader::new(
+            format!("{}/h2.bin", server.uri()),
+            out.to_string_lossy().into_owned(),
+            true,
+            ProxyConfig::default(),
+            optimizer(8),
+        )
+        .unwrap();
+        // wiremock speaks cleartext HTTP/2 (h2c) with prior knowledge.
+        dl.set_http_version(HttpVersion::Http2PriorKnowledge)
+            .unwrap();
+        let statuses: Arc<Mutex<Vec<String>>> = Arc::default();
+        let log = statuses.clone();
+        dl.set_status_callback(move |m| log.lock().unwrap().push(m));
+        tokio::task::spawn_blocking(move || run(dl))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(fs::read(&out).unwrap(), body);
+        let statuses = statuses.lock().unwrap().clone();
+        assert!(
+            statuses
+                .iter()
+                .any(|m| m.contains("HTTP/2") && m.contains("over 2 connection")),
+            "8 streams over 2 HTTP/2 connections: {statuses:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_while_waiting_for_the_server_is_prompt() {
+        let server = MockServer::start().await;
+        let body = pattern(8 * MIB);
+        let mut ranges = Ranges::new(&body);
+        ranges.slow_start = Some((0, Duration::from_secs(30)));
+        ranges.mount(&server, "/c.bin").await;
+
+        let dir = TempDir::new().unwrap();
+        let out = dir.path().join("c.bin");
+        let mut dl = AdvancedDownloader::new(
+            format!("{}/c.bin", server.uri()),
+            out.to_string_lossy().into_owned(),
+            true,
+            ProxyConfig::default(),
+            optimizer(1),
+        )
+        .unwrap();
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        dl.set_cancel_token(cancel.clone());
+        let started = std::time::Instant::now();
+        let handle = tokio::task::spawn_blocking(move || run(dl));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        let err = handle.await.unwrap().unwrap_err();
+        assert!(err.to_lowercase().contains("cancel"), "{err}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "did not wait for the server"
+        );
+        assert!(
+            dir.path().join("c.bin.kget").exists(),
+            "state kept for resume"
+        );
+    }
+}

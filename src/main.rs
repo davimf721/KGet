@@ -108,6 +108,10 @@ struct Args {
     #[arg(long = "no-dht")]
     no_dht: bool,
 
+    /// HTTP version for turbo downloads: auto, 1.1, 2 or 3 (3 needs a build with --features http3)
+    #[arg(long = "http-version", value_name = "VERSION", value_parser = parse_http_version)]
+    http_version: Option<kget::http::HttpVersion>,
+
     /// Torrent: download only these files, by number as shown by --list-files (e.g. 1,3-5; repeatable)
     #[arg(long = "select", value_name = "LIST")]
     select: Vec<String>,
@@ -328,6 +332,11 @@ struct Args {
     /// With --rules suggest: add the suggested rules without asking
     #[arg(long = "apply", requires = "rules")]
     apply: bool,
+}
+
+/// `--http-version`: a known version that this build supports.
+fn parse_http_version(s: &str) -> Result<kget::http::HttpVersion, String> {
+    s.parse::<kget::http::HttpVersion>()?.ensure_available()
 }
 
 /// Subcommands (`kget <url>` keeps working without one).
@@ -851,6 +860,7 @@ impl Args {
         };
         job.dedupe = self.dedupe;
         job.torrent = self.torrent_options()?;
+        job.http_version = self.http_version;
         Ok(job)
     }
 
@@ -1227,6 +1237,13 @@ mod tests {
                 ..
             })) if browser == "firefox"
         ));
+        assert_eq!(
+            parse(&["https://x/y", "--http-version", "1.1"]).http_version,
+            Some(kget::http::HttpVersion::Http1Only)
+        );
+        let h3 = Args::try_parse_from(["kget", "https://x/y", "--http-version", "3"]);
+        assert_eq!(h3.is_ok(), kget::http::HttpVersion::http3_available());
+        assert!(Args::try_parse_from(["kget", "u", "--http-version", "9"]).is_err());
         // A local file named like a subcommand is still downloadable as ./tui.
         assert_eq!(parse(&["./tui"]).url, "./tui");
     }

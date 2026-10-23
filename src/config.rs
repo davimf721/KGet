@@ -152,6 +152,11 @@ pub struct OptimizationConfig {
     pub speed_limit: Option<u64>,
     /// Maximum parallel connections per download (1-32)
     pub max_connections: usize,
+    /// HTTP version of turbo (`-a`) downloads: `auto` (HTTP/2 via ALPN when
+    /// offered), `1.1`, `2` (prior knowledge) or `3` (needs the `http3`
+    /// build); `--http-version` overrides it for one run
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub http_version: Option<crate::http::HttpVersion>,
 }
 
 impl Default for OptimizationConfig {
@@ -163,6 +168,7 @@ impl Default for OptimizationConfig {
             cache_dir: "~/.cache/kget".to_string(),
             speed_limit: None,
             max_connections: 4,
+            http_version: None,
         }
     }
 }

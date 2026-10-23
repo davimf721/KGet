@@ -35,7 +35,9 @@ fs2 = "0.4.3"
 humansize = "2.1.3"
 indicatif = {version = "0.18.4", features = ["rayon"]}
 mime = "0.3.17"
-tokio = { version = "1.0", features = ["rt-multi-thread", "time", "macros", "sync"], optional = true }
+# Core dependency since 1.8: the turbo engine runs its range requests as async
+# tasks. reqwest (always required) depends on tokio anyway.
+tokio = { version = "1.0", features = ["rt-multi-thread", "time", "macros", "sync"] }
 rayon = "1.11.0"
 serde = { version = "1.0.218", features = ["derive"] }
 serde_json = "1.0.149"
@@ -51,7 +53,7 @@ blake3 = "1"
 hex = "0.4"
 transmission-rpc = { version = "0.5.0", optional = true }
 # No transparent decompression: downloaded files must be byte-identical to the server's.
-reqwest = { version = "0.13.2", default-features = false, features = ["blocking", "json", "stream", "hickory-dns", "default-tls", "socks"] }
+reqwest = { version = "0.13.2", default-features = false, features = ["blocking", "json", "stream", "hickory-dns", "default-tls", "socks", "http2"] }
 rustyline = "17.0.2"
 urlencoding = "2.1"
 roxmltree = "0.20"
@@ -78,13 +80,18 @@ keychain = [
     "dep:windows-native-keyring-store",
     "dep:zbus-secret-service-keyring-store",
 ]
-async = ["dep:tokio"]
+# Async builder helpers (`download_async`, `download_batch_async`). tokio itself
+# is always a dependency now; the feature only gates those APIs.
+async = []
+# Experimental HTTP/3 (QUIC) for the turbo engine. reqwest's HTTP/3 support is
+# unstable and only compiles with RUSTFLAGS="--cfg reqwest_unstable".
+http3 = ["reqwest/http3"]
 # `kget tui`: full-screen terminal UI driven by the job manager. Pure Rust
 # (ratatui + crossterm, no system libraries), so it is on by default.
 tui = ["dep:ratatui"]
 gui = ["eframe", "egui", "rfd", "arboard", "image", "egui_extras", "torrent-native", "notify-rust"]
-torrent-transmission = ["transmission-rpc", "dep:tokio"]
-torrent-native = ["librqbit", "dep:tokio"]
+torrent-transmission = ["transmission-rpc"]
+torrent-native = ["librqbit"]
 
 [dependencies.eframe]
 version = "0.33.3"
@@ -142,3 +149,7 @@ apple-native-keyring-store = { version = "1.0.2", optional = true, features = ["
 # cross builds keep working.
 [target.'cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android"))))'.dependencies]
 zbus-secret-service-keyring-store = { version = "1.0.1", optional = true, features = ["crypto-rust"] }
+
+[lints.rust]
+# `reqwest_unstable` comes from RUSTFLAGS when building the `http3` feature.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(reqwest_unstable)"] }

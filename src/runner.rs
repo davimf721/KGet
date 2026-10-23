@@ -127,6 +127,10 @@ pub struct DownloadJob {
     /// Torrent file selection and seeding limits
     #[serde(skip_serializing_if = "TorrentJobOptions::is_default")]
     pub torrent: TorrentJobOptions,
+    /// HTTP version of a turbo download (`--http-version`); `None` = the
+    /// configuration's `optimization.http_version`, else auto
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub http_version: Option<crate::http::HttpVersion>,
 }
 
 impl Default for DownloadJob {
@@ -166,6 +170,7 @@ impl DownloadJob {
             duplicates: None,
             dedupe: false,
             torrent: TorrentJobOptions::default(),
+            http_version: None,
         }
     }
 
@@ -997,6 +1002,9 @@ fn dispatch(
             downloader.set_cancel_token(ctx.cancel.clone());
             downloader.set_retries(job.retries);
             downloader.set_timeout_secs(job.timeout)?;
+            if let Some(v) = job.http_version.or(config.optimization.http_version) {
+                downloader.set_http_version(v.ensure_available()?)?;
+            }
             if !std::io::stdin().is_terminal() || jsonl {
                 downloader.set_resume_policy(ResumePolicy::AlwaysResume);
             }

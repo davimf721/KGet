@@ -2,8 +2,11 @@
 //!
 //! Metalink is a standard XML format (RFC 5854 for `.meta4`) that describes a
 //! file along with multiple download mirrors and cryptographic checksums.
-//! KGet parses the manifest, tries each mirror in priority order, and verifies
-//! the hash after a successful download — all automatically.
+//! KGet parses the manifest, downloads different chunks from all mirrors at
+//! once (in priority order, dropping mirrors that fail mid-download), and
+//! verifies the hash — all automatically. If that fails (for example a mirror
+//! served different bytes and the hash does not match), the mirrors are tried
+//! one at a time so a bad mirror cannot spoil the result.
 //!
 //! # Supported features
 //! - Metalink 4 (RFC 5854, `.meta4`) and Metalink 3 (`.metalink`) manifests
@@ -288,6 +291,28 @@ fn download_one_file(
 
     let mut last_error: Option<Box<dyn Error + Send + Sync>> = None;
 
+    // Several mirrors: fetch different chunks from all of them at once.
+    if file.urls.len() > 1 {
+        let urls: Vec<String> = file.urls.iter().map(|u| u.url.clone()).collect();
+        let result =
+            download_from_mirrors(&urls, &dest, quiet, proxy, optimizer, file.sha256.clone())
+                .and_then(|()| verify_file(file, &dest, "parallel mirrors", quiet, status));
+        match result {
+            Ok(()) => return Ok(()),
+            Err(e) if is_cancelled(e.as_ref()) => return Err(e),
+            Err(e) => {
+                if !quiet {
+                    eprintln!("  Parallel mirror download failed: {e}");
+                    println!("  Retrying one mirror at a time");
+                }
+                // A bad hash cannot be pinned on one mirror: start over per mirror.
+                discard_partial(&dest);
+                let _ = std::fs::remove_file(&dest);
+                last_error = Some(e);
+            }
+        }
+    }
+
     for (idx, mirror) in file.urls.iter().enumerate() {
         if !quiet {
             println!("  Mirror {}/{}: {}", idx + 1, file.urls.len(), mirror.url);
@@ -298,60 +323,15 @@ fn download_one_file(
                 if !quiet {
                     println!("  Download OK");
                 }
-
-                if let Some(expected) = file.size {
-                    let got = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
-                    if got != expected {
-                        let _ = std::fs::remove_file(&dest);
-                        last_error = Some(
-                            format!(
-                                "Size mismatch on mirror {}: expected {expected}, got {got}",
-                                mirror.url
-                            )
-                            .into(),
-                        );
-                        continue;
-                    }
-                }
-
-                // Verify the strongest hash the manifest provides.
-                let checks = [
-                    (file.sha256.as_deref(), ChecksumAlgorithm::Sha256),
-                    (file.sha512.as_deref(), ChecksumAlgorithm::Sha512),
-                    (file.md5.as_deref(), ChecksumAlgorithm::Md5),
-                ];
-                if let Some((expected, algo)) =
-                    checks.into_iter().find_map(|(h, a)| h.map(|h| (h, a)))
-                {
-                    if !quiet {
-                        println!("  Verifying {}...", algo.name());
-                    }
-                    if let Some(cb) = status {
-                        cb(crate::events::verifying_status(algo.name()));
-                    }
-                    let got = compute_checksum(&dest, &algo)?;
-                    if got != expected {
-                        eprintln!(
-                            "  {} mismatch: expected {}, got {}",
-                            algo.name(),
-                            expected,
-                            got
-                        );
+                match verify_file(file, &dest, &mirror.url, quiet, status) {
+                    Ok(()) => return Ok(()),
+                    Err(e) => {
                         // Remove the corrupted file and try the next mirror.
                         let _ = std::fs::remove_file(&dest);
-                        last_error = Some(Box::new(crate::KgetError::ChecksumMismatch {
-                            algorithm: algo.name().to_string(),
-                            expected: expected.to_string(),
-                            got,
-                        }));
+                        last_error = Some(e);
                         continue;
                     }
-                    if !quiet {
-                        println!("  {} OK ✓", algo.name());
-                    }
                 }
-
-                return Ok(());
             }
             Err(e) => {
                 if !quiet {
@@ -365,6 +345,95 @@ fn download_one_file(
     }
 
     Err(last_error.unwrap_or_else(|| "All mirrors failed".into()))
+}
+
+/// Check the manifest size and the strongest hash it provides.
+fn verify_file(
+    file: &MetalinkFile,
+    dest: &Path,
+    origin: &str,
+    quiet: bool,
+    status: Option<&(dyn Fn(String) + Send + Sync)>,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    if let Some(expected) = file.size {
+        let got = std::fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
+        if got != expected {
+            return Err(
+                format!("Size mismatch on {origin}: expected {expected}, got {got}").into(),
+            );
+        }
+    }
+
+    let checks = [
+        (file.sha256.as_deref(), ChecksumAlgorithm::Sha256),
+        (file.sha512.as_deref(), ChecksumAlgorithm::Sha512),
+        (file.md5.as_deref(), ChecksumAlgorithm::Md5),
+    ];
+    if let Some((expected, algo)) = checks.into_iter().find_map(|(h, a)| h.map(|h| (h, a))) {
+        if !quiet {
+            println!("  Verifying {}...", algo.name());
+        }
+        if let Some(cb) = status {
+            cb(crate::events::verifying_status(algo.name()));
+        }
+        let got = compute_checksum(dest, &algo)?;
+        if got != expected {
+            eprintln!(
+                "  {} mismatch: expected {}, got {}",
+                algo.name(),
+                expected,
+                got
+            );
+            return Err(Box::new(crate::KgetError::ChecksumMismatch {
+                algorithm: algo.name().to_string(),
+                expected: expected.to_string(),
+                got,
+            }));
+        }
+        if !quiet {
+            println!("  {} OK ✓", algo.name());
+        }
+    }
+    Ok(())
+}
+
+fn is_cancelled(e: &(dyn Error + Send + Sync + 'static)) -> bool {
+    matches!(
+        e.downcast_ref::<crate::KgetError>(),
+        Some(crate::KgetError::Cancelled)
+    )
+}
+
+/// Download `dest` from every mirror at once (chunks spread over the mirrors in
+/// priority order; failing mirrors are dropped mid-download).
+fn download_from_mirrors(
+    urls: &[String],
+    dest: &Path,
+    quiet: bool,
+    proxy: &ProxyConfig,
+    optimizer: &Optimizer,
+    sha256: Option<String>,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    use crate::advanced_download::AdvancedDownloader;
+
+    let output_path = dest
+        .to_str()
+        .ok_or("Output path contains non-UTF-8 characters")?
+        .to_string();
+    let (main, mirrors) = urls.split_first().ok_or("Metalink file has no URLs")?;
+    let mut dl = AdvancedDownloader::new(
+        main.clone(),
+        output_path,
+        quiet,
+        proxy.clone(),
+        optimizer.clone(),
+    )?;
+    dl.set_mirrors(mirrors.to_vec());
+    dl.set_resume_policy(crate::advanced_download::ResumePolicy::AlwaysResume);
+    if let Some(h) = sha256 {
+        dl.set_expected_sha256(h);
+    }
+    dl.download()
 }
 
 /// Attempt to download a single URL to `dest` using AdvancedDownloader.

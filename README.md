@@ -307,6 +307,7 @@ Exit codes: `0` success, `1` error, `130` cancelled (Ctrl+C — partial data is 
 | Flag | Description |
 |------|-------------|
 | `-a, --advanced` | Turbo mode — parallel connections, resumable |
+| `--http-version <v>` | Turbo HTTP version: `auto` (HTTP/2 via ALPN), `1.1`, `2`, `3` (needs `--features http3`); config: `optimization.http_version` |
 | `-O <path>` | Output file or directory |
 | `-q, --quiet` | Minimal output |
 | `-c, --continue` | Continue a partial download (`<file>.part`) |

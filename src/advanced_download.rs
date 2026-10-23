@@ -2,6 +2,9 @@
 //!
 //! The [`AdvancedDownloader`] provides high-performance downloads using:
 //! - **Parallel connections**: Split files into chunks downloaded simultaneously
+//! - **Work stealing**: Idle connections split the slowest remaining range
+//! - **HTTP/2 multiplexing**: Fewer TCP connections when the server speaks h2
+//! - **Multiple mirrors**: Different chunks from several URLs at once
 //! - **Resume support**: Continue interrupted downloads from where they left off
 //! - **Progress callbacks**: Real-time progress and status updates
 //! - **Cancellation**: Graceful download cancellation via atomic tokens
@@ -14,6 +17,10 @@
 //! next run, the state is reused **only** if the remote resource is the same
 //! (URL, size, `ETag`, `Last-Modified`), and only the missing byte ranges are
 //! requested. A pre-existing final file is never used as a resume point.
+//!
+//! The state format is unchanged since 1.7.1 (`"version": 1`): a range split by
+//! work stealing is stored as one more `{start, end, done}` chunk, so 1.7.1
+//! states resume here and states written here still resume on 1.7.1.
 //!
 //! # Example
 //!
@@ -46,25 +53,34 @@
 //! # Parallel Downloads
 //!
 //! The number of connections comes from the [`Optimizer`] configuration
-//! (`max_connections`, 1–32). Each connection runs on its own thread, so the
-//! count is not limited by the number of CPU cores.
+//! (`max_connections`, 1–32). Range requests are async tasks on a small,
+//! process-wide tokio runtime, so the count is not limited by the number of
+//! CPU cores and no thread is parked per connection. [`download`] stays
+//! synchronous; from async code, call it inside `spawn_blocking`.
+//!
+//! When a connection runs out of work it takes the next unstarted chunk; when
+//! none is left it halves the in-flight range that will finish last, so one
+//! slow connection does not hold up the tail of the download.
+//!
+//! [`download`]: AdvancedDownloader::download
 
 use crate::DownloadOptions;
 use crate::config::ProxyConfig;
 use crate::error::KgetError;
-use crate::http::{self, ClientOptions};
+use crate::http::{self, ClientOptions, HttpVersion};
 use crate::optimization::Optimizer;
 use indicatif::{ProgressBar, ProgressStyle};
-use rayon::prelude::*;
-use reqwest::blocking::Client;
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fs::File;
-use std::io::{IsTerminal, Read};
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tokio::sync::watch;
+use tokio::task::JoinSet;
 
 #[cfg(target_family = "unix")]
 use std::os::unix::fs::FileExt;
@@ -77,10 +93,23 @@ type BoxError = Box<dyn Error + Send + Sync>;
 const MIN_CHUNK_SIZE: u64 = 4 * 1024 * 1024;
 /// Maximum chunk size for parallel downloads (64 MB)
 const MAX_CHUNK_SIZE: u64 = 64 * 1024 * 1024;
-/// Read buffer per connection
-const READ_BUF: usize = 64 * 1024;
+/// Received bytes are buffered per connection and written in blocks this big
+const WRITE_BUF: usize = 256 * 1024;
 /// Version of the `.kget` state format
 const STATE_VERSION: u32 = 1;
+/// Work stealing never leaves either half of a split range below this size
+const MIN_SPLIT: u64 = 512 * 1024;
+// The owner of a split range may hold up to WRITE_BUF unwritten bytes (plus
+// one more piece) past its recorded position; the split point must be beyond.
+const _: () = assert!(MIN_SPLIT >= 2 * WRITE_BUF as u64);
+/// A range must have been in flight this long before it can be split
+const STEAL_GRACE: Duration = Duration::from_secs(1);
+/// Only ranges expected to need at least this long are worth splitting
+const STEAL_MIN_ETA: Duration = Duration::from_secs(2);
+/// Range requests multiplexed over each HTTP/2 (or HTTP/3) connection
+const H2_STREAMS_PER_CONN: usize = 4;
+/// Interval of the progress / cancellation ticker
+const TICK: Duration = Duration::from_millis(100);
 
 /// Controls how [`AdvancedDownloader`] behaves around resume and prompts.
 ///
@@ -100,10 +129,12 @@ pub enum ResumePolicy {
     AlwaysRestart,
 }
 
-/// Token bucket for global download rate limiting across parallel threads.
+use crate::http::io_runtime as runtime;
+
+/// Token bucket for global download rate limiting across parallel connections.
 ///
-/// Unlike per-thread throttling, this bounds aggregate throughput regardless of
-/// how many threads are active.
+/// Unlike per-connection throttling, this bounds aggregate throughput regardless
+/// of how many connections are active.
 struct TokenBucket {
     limit_bps: u64,
     tokens: f64,
@@ -119,7 +150,8 @@ impl TokenBucket {
         }
     }
 
-    /// Consume `n` bytes from the bucket and return how long to sleep before writing.
+    /// Consume `n` bytes from the bucket and return how long to sleep before
+    /// reading more.
     ///
     /// The caller must release the lock before sleeping.
     fn consume(&mut self, n: u64) -> Option<Duration> {
@@ -215,6 +247,8 @@ struct RemoteInfo {
     accepts_ranges: bool,
     etag: Option<String>,
     last_modified: Option<String>,
+    /// HTTP version the server answered the probe with
+    version: reqwest::Version,
 }
 
 impl RemoteInfo {
@@ -225,11 +259,112 @@ impl RemoteInfo {
             .filter(|e| !e.starts_with("W/"))
             .or(self.last_modified.as_deref())
     }
+
+    /// HTTP/2 and HTTP/3 carry many requests over one connection.
+    fn is_multiplexed(&self) -> bool {
+        self.version >= reqwest::Version::HTTP_2
+    }
 }
 
-enum ChunkError {
-    Transient(String),
-    Fatal(BoxError),
+fn version_name(v: reqwest::Version) -> &'static str {
+    match v {
+        reqwest::Version::HTTP_09 => "HTTP/0.9",
+        reqwest::Version::HTTP_10 => "HTTP/1.0",
+        reqwest::Version::HTTP_2 => "HTTP/2",
+        reqwest::Version::HTTP_3 => "HTTP/3",
+        _ => "HTTP/1.1",
+    }
+}
+
+/// A client plus whether its requests go over HTTP/3.
+///
+/// reqwest sends a request over QUIC only when the request itself asks for
+/// HTTP/3, even on an `http3_prior_knowledge` client.
+#[derive(Clone)]
+struct Conn {
+    client: Client,
+    h3: bool,
+}
+
+impl Conn {
+    fn request(&self, method: reqwest::Method, url: &str) -> reqwest::RequestBuilder {
+        let req = self.client.request(method, url);
+        if self.h3 {
+            req.version(reqwest::Version::HTTP_3)
+        } else {
+            req
+        }
+    }
+
+    fn get(&self, url: &str) -> reqwest::RequestBuilder {
+        self.request(reqwest::Method::GET, url)
+    }
+
+    fn head(&self, url: &str) -> reqwest::RequestBuilder {
+        self.request(reqwest::Method::HEAD, url)
+    }
+}
+
+/// Query size, range support and validators of `url`.
+async fn probe(
+    client: &Conn,
+    url: &str,
+    headers: &[(String, String)],
+) -> Result<RemoteInfo, BoxError> {
+    let header = |resp: &reqwest::Response, name: reqwest::header::HeaderName| {
+        resp.headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+    };
+
+    if let Ok(response) = http::apply_headers_async(client.head(url), headers)
+        .send()
+        .await
+        && response.status().is_success()
+    {
+        let size = header(&response, reqwest::header::CONTENT_LENGTH)
+            .and_then(|s| s.parse().ok())
+            .filter(|l: &u64| *l > 0);
+        let accepts_ranges = header(&response, reqwest::header::ACCEPT_RANGES)
+            .is_some_and(|s| s.eq_ignore_ascii_case("bytes"));
+        if size.is_some() && accepts_ranges {
+            return Ok(RemoteInfo {
+                size,
+                accepts_ranges,
+                etag: header(&response, reqwest::header::ETAG),
+                last_modified: header(&response, reqwest::header::LAST_MODIFIED),
+                version: response.version(),
+            });
+        }
+    }
+
+    // HEAD failed or was inconclusive: probe with a 1-byte range request.
+    let response = http::apply_headers_async(client.get(url), headers)
+        .header(reqwest::header::RANGE, "bytes=0-0")
+        .send()
+        .await?;
+    let status = response.status();
+    if status == reqwest::StatusCode::PARTIAL_CONTENT {
+        let total = header(&response, reqwest::header::CONTENT_RANGE)
+            .as_deref()
+            .and_then(parse_content_range_total);
+        return Ok(RemoteInfo {
+            size: total,
+            accepts_ranges: total.is_some(),
+            etag: header(&response, reqwest::header::ETAG),
+            last_modified: header(&response, reqwest::header::LAST_MODIFIED),
+            version: response.version(),
+        });
+    }
+    if status.is_success() {
+        return Ok(RemoteInfo {
+            size: response.content_length(),
+            version: response.version(),
+            ..Default::default()
+        });
+    }
+    Err(Box::new(KgetError::from_status(status.as_u16(), url)))
 }
 
 /// A chunk request was answered with `200` (range ignored, or `If-Range`
@@ -254,8 +389,10 @@ impl Error for RangeNotHonored {}
 /// `AdvancedDownloader` is the recommended way to download large files. It provides:
 ///
 /// - **Parallel chunk downloads**: Splits files into segments downloaded simultaneously
+/// - **Work stealing**: Idle connections split the slowest in-flight range
 /// - **Safe resume**: `<file>.part` + `<file>.kget` state, validated against the server
 /// - **Server compatibility**: Falls back to single-stream if server doesn't support ranges
+/// - **Mirrors**: Optional extra URLs ([`set_mirrors`](Self::set_mirrors)) serve other chunks
 /// - **Integrity**: every chunk must be complete; size and SHA-256 are always checked
 /// - **Progress tracking**: Real-time callbacks for UI integration
 /// - **Cancellation support**: Stop downloads gracefully via atomic cancel token
@@ -304,9 +441,11 @@ impl Error for RangeNotHonored {}
 /// }
 /// # Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 /// ```
+#[derive(Clone)]
 pub struct AdvancedDownloader {
     client: Client,
     url: String,
+    mirrors: Vec<String>,
     output_path: String,
     quiet_mode: bool,
     proxy: ProxyConfig,
@@ -320,6 +459,7 @@ pub struct AdvancedDownloader {
     resume_policy: ResumePolicy,
     max_retries: u32,
     timeout_secs: u64,
+    http_version: HttpVersion,
 }
 
 impl AdvancedDownloader {
@@ -358,10 +498,11 @@ impl AdvancedDownloader {
         proxy_config: ProxyConfig,
         optimizer: Optimizer,
     ) -> Result<Self, BoxError> {
-        let client = http::build_client(&proxy_config, &ClientOptions::default())?;
+        let client = http::build_async_client(&proxy_config, &ClientOptions::default())?;
         Ok(Self {
             client,
             url,
+            mirrors: Vec::new(),
             output_path,
             quiet_mode,
             proxy: proxy_config,
@@ -375,14 +516,16 @@ impl AdvancedDownloader {
             resume_policy: ResumePolicy::default(),
             max_retries: http::DEFAULT_RETRIES,
             timeout_secs: http::DEFAULT_TIMEOUT_SECS,
+            http_version: HttpVersion::Auto,
         })
     }
 
     /// Set a custom cancellation token for graceful download interruption.
     ///
-    /// When the token is set to `true`, the download stops at the next
-    /// checkpoint, the resume state is saved and an error is returned. Running
-    /// the same download again continues where it stopped.
+    /// When the token is set to `true`, the download stops within about 100 ms
+    /// (also while waiting for the server), the resume state is saved and an
+    /// error is returned. Running the same download again continues where it
+    /// stopped.
     ///
     /// # Example
     ///
@@ -470,6 +613,32 @@ impl AdvancedDownloader {
         self.resume_policy = policy;
     }
 
+    /// Additional URLs serving the same file, in order of preference.
+    ///
+    /// Every mirror whose size matches the main URL and that supports range
+    /// requests downloads its own share of the chunks. A mirror that fails
+    /// (error status, ignored ranges, retries exhausted) is dropped and its
+    /// chunks continue on the others; the download only fails when the last
+    /// one fails. Mirrors serve different bytes of one file, so set an
+    /// expected hash ([`set_expected_sha256`](Self::set_expected_sha256)) to
+    /// catch a mirror with different content.
+    pub fn set_mirrors(&mut self, mirrors: Vec<String>) {
+        self.mirrors = mirrors.into_iter().filter(|m| *m != self.url).collect();
+    }
+
+    /// HTTP version policy (default [`HttpVersion::Auto`]: HTTP/2 when the
+    /// server offers it). [`HttpVersion::Http3`] falls back to HTTP/2 or
+    /// HTTP/1.1 when the QUIC connection fails.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the proxy is enabled but invalid.
+    pub fn set_http_version(&mut self, version: HttpVersion) -> Result<(), BoxError> {
+        self.http_version = version;
+        self.client = http::build_async_client(&self.proxy, &self.client_options())?;
+        Ok(())
+    }
+
     /// Maximum consecutive failed attempts per chunk without progress (default 3).
     pub fn set_retries(&mut self, retries: u32) {
         self.max_retries = retries.max(1);
@@ -478,15 +647,12 @@ impl AdvancedDownloader {
     /// Connect / per-read timeout in seconds (default 60, 0 = no read timeout).
     pub fn set_timeout_secs(&mut self, secs: u64) -> Result<(), BoxError> {
         self.timeout_secs = secs;
-        self.client = http::build_client(&self.proxy, &ClientOptions::with_timeout_secs(secs))?;
+        self.client = http::build_async_client(&self.proxy, &self.client_options())?;
         Ok(())
     }
 
-    fn apply_headers(
-        &self,
-        req: reqwest::blocking::RequestBuilder,
-    ) -> reqwest::blocking::RequestBuilder {
-        http::apply_headers(req, &self.extra_headers)
+    fn client_options(&self) -> ClientOptions {
+        ClientOptions::with_timeout_secs(self.timeout_secs).with_http_version(self.http_version)
     }
 
     fn send_status(&self, msg: &str) {
@@ -523,9 +689,13 @@ impl AdvancedDownloader {
     /// This method:
     /// 1. Queries the server for size, range support, `ETag` and `Last-Modified`
     /// 2. Reuses a compatible `.part`/`.kget` state, or starts fresh
-    /// 3. Downloads the missing chunks in parallel, retrying each from its exact offset
+    /// 3. Downloads the missing chunks in parallel, retrying each from its exact
+    ///    offset and splitting slow ranges between idle connections
     /// 4. Falls back to a single stream if the server doesn't support ranges
     /// 5. Verifies size (and SHA-256), then renames `.part` to the final name
+    ///
+    /// It blocks the calling thread. Calling it from async code works (the
+    /// download then runs on a helper thread), but prefer `spawn_blocking`.
     ///
     /// # Errors
     ///
@@ -534,6 +704,19 @@ impl AdvancedDownloader {
     /// - Cancellation via the cancel token ([`KgetError::Cancelled`])
     /// - Size or checksum mismatch, disk I/O errors
     pub fn download(&self) -> Result<(), BoxError> {
+        if tokio::runtime::Handle::try_current().is_ok() {
+            // Inside a runtime, `block_on` would panic and the blocking parts
+            // (single-stream fallback, prompts, hashing) would stall a worker.
+            return std::thread::scope(|s| {
+                s.spawn(|| self.download_blocking())
+                    .join()
+                    .unwrap_or_else(|p| std::panic::resume_unwind(p))
+            });
+        }
+        self.download_blocking()
+    }
+
+    fn download_blocking(&self) -> Result<(), BoxError> {
         let is_iso = self.url.to_lowercase().ends_with(".iso");
         self.log(&format!("Starting advanced download for: {}", self.url));
         if is_iso {
@@ -548,7 +731,7 @@ impl AdvancedDownloader {
         }
 
         self.log("Querying server for file size and range support...");
-        let remote = self.probe_remote()?;
+        let (client, remote) = self.probe_main()?;
         self.log(&format!(
             "Total file size: {}",
             remote
@@ -591,12 +774,15 @@ impl AdvancedDownloader {
                 let f = File::create(&part)?;
                 // Preallocation is safe: the state file says what is missing.
                 f.set_len(total_size)?;
+                // With mirrors, chunks come from servers with different
+                // validators; the size and the expected hash identify the file.
+                let single = self.mirrors.is_empty();
                 ResumeState {
                     version: STATE_VERSION,
                     url: self.url.clone(),
                     total_size,
-                    etag: remote.etag.clone(),
-                    last_modified: remote.last_modified.clone(),
+                    etag: remote.etag.clone().filter(|_| single),
+                    last_modified: remote.last_modified.clone().filter(|_| single),
                     chunks: self
                         .calculate_chunks(total_size)
                         .into_iter()
@@ -615,11 +801,19 @@ impl AdvancedDownloader {
         if file.metadata()?.len() != total_size {
             file.set_len(total_size)?;
         }
+        let file = Arc::new(file);
 
-        let result = self.download_chunks_parallel(&file, state, &state_path, &remote);
-        match result {
-            Ok(()) => {}
-            Err(e) if e.is::<RangeNotHonored>() => {
+        let remaining = total_size - state.done_bytes();
+        let workers = self
+            .optimizer
+            .max_connections()
+            .min(remaining.div_ceil(MIN_SPLIT).max(1) as usize)
+            .max(1);
+        let sources = self.build_sources(client, remote, workers);
+
+        let result = self.download_chunks(file.clone(), state, &state_path, sources, workers);
+        if let Err(e) = result {
+            if e.is::<RangeNotHonored>() {
                 // Never splice two versions: drop the partial data and fetch
                 // the whole (possibly new) file in one stream.
                 drop(file);
@@ -628,12 +822,10 @@ impl AdvancedDownloader {
                 let _ = std::fs::remove_file(&state_path);
                 return self.download_single_stream(is_iso);
             }
-            Err(e) => {
-                if matches!(e.downcast_ref::<KgetError>(), Some(KgetError::Cancelled)) {
-                    self.log("Download paused; run the same command again to resume.");
-                }
-                return Err(e);
+            if matches!(e.downcast_ref::<KgetError>(), Some(KgetError::Cancelled)) {
+                self.log("Download paused; run the same command again to resume.");
             }
+            return Err(e);
         }
         file.sync_all()?;
         drop(file);
@@ -641,6 +833,115 @@ impl AdvancedDownloader {
         self.finish(&part, total_size, is_iso)?;
         let _ = std::fs::remove_file(&state_path);
         Ok(())
+    }
+
+    /// Probe the main URL; an HTTP/3 failure falls back to HTTP/2 / HTTP/1.1.
+    fn probe_main(&self) -> Result<(Conn, RemoteInfo), BoxError> {
+        let rt = runtime();
+        let h3 = self.http_version == HttpVersion::Http3
+            && HttpVersion::http3_available()
+            && !self.proxy.enabled;
+        let conn = Conn {
+            client: self.client.clone(),
+            h3,
+        };
+        match rt.block_on(probe(&conn, &self.url, &self.extra_headers)) {
+            Ok(info) => Ok((conn, info)),
+            Err(e) if h3 => {
+                self.send_status(&format!(
+                    "HTTP/3 connection failed ({e}); falling back to HTTP/2 / HTTP/1.1"
+                ));
+                let client = http::build_async_client(
+                    &self.proxy,
+                    &self.client_options().with_http_version(HttpVersion::Auto),
+                )?;
+                let conn = Conn { client, h3: false };
+                let info = rt.block_on(probe(&conn, &self.url, &self.extra_headers))?;
+                Ok((conn, info))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The main URL plus every usable mirror, each with its connections.
+    fn build_sources(&self, client: Conn, main: RemoteInfo, workers: usize) -> Vec<Source> {
+        let mut found = vec![(self.url.clone(), main.clone(), client.clone())];
+        if !self.mirrors.is_empty() {
+            let probes = runtime().block_on(async {
+                let mut set = JoinSet::new();
+                for (i, url) in self.mirrors.iter().cloned().enumerate() {
+                    let (client, headers) = (client.clone(), self.extra_headers.clone());
+                    set.spawn(async move {
+                        let r = probe(&client, &url, &headers).await;
+                        (i, url, r)
+                    });
+                }
+                let mut out = Vec::new();
+                while let Some(Ok(r)) = set.join_next().await {
+                    out.push(r);
+                }
+                out.sort_by_key(|(i, _, _)| *i);
+                out
+            });
+            for (_, url, r) in probes {
+                match r {
+                    Ok(info) if info.size == main.size && info.accepts_ranges => {
+                        found.push((url, info, client.clone()));
+                    }
+                    Ok(_) => self.send_status(&format!(
+                        "Skipping mirror {url}: different size or no range support"
+                    )),
+                    Err(e) => self.send_status(&format!("Skipping mirror {url}: {e}")),
+                }
+            }
+            self.send_status(&format!(
+                "Downloading from {} source(s) in parallel",
+                found.len()
+            ));
+        }
+
+        let n = found.len();
+        found
+            .into_iter()
+            .enumerate()
+            .map(|(i, (url, remote, client))| {
+                let share = (workers / n + usize::from(i < workers % n)).max(1);
+                let mut clients = vec![client];
+                if remote.is_multiplexed() {
+                    // Several streams per connection, but more than one TCP
+                    // connection so a single congestion window is not the limit.
+                    // The extra clients skip negotiation, so each opens exactly
+                    // one connection.
+                    let conns = share.div_ceil(H2_STREAMS_PER_CONN);
+                    let pref = if remote.version == reqwest::Version::HTTP_3 {
+                        HttpVersion::Http3
+                    } else {
+                        HttpVersion::Http2PriorKnowledge
+                    };
+                    let opts = self.client_options().with_http_version(pref);
+                    for _ in 1..conns {
+                        match http::build_async_client(&self.proxy, &opts) {
+                            Ok(client) => clients.push(Conn {
+                                client,
+                                h3: pref == HttpVersion::Http3,
+                            }),
+                            Err(_) => break,
+                        }
+                    }
+                    self.send_status(&format!(
+                        "Server negotiated {}: {share} stream(s) over {} connection(s)",
+                        version_name(remote.version),
+                        clients.len()
+                    ));
+                }
+                Source {
+                    url,
+                    remote,
+                    clients,
+                    alive: AtomicBool::new(true),
+                }
+            })
+            .collect()
     }
 
     /// Server without range support (or unknown size): one stream, still via `.part`.
@@ -745,58 +1046,6 @@ impl AdvancedDownloader {
         Ok(())
     }
 
-    fn probe_remote(&self) -> Result<RemoteInfo, BoxError> {
-        let header = |resp: &reqwest::blocking::Response, name: reqwest::header::HeaderName| {
-            resp.headers()
-                .get(name)
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_string)
-        };
-
-        if let Ok(response) = self.apply_headers(self.client.head(&self.url)).send()
-            && response.status().is_success()
-        {
-            let size = response.content_length().filter(|l| *l > 0).or_else(|| {
-                header(&response, reqwest::header::CONTENT_LENGTH).and_then(|s| s.parse().ok())
-            });
-            let accepts_ranges = header(&response, reqwest::header::ACCEPT_RANGES)
-                .is_some_and(|s| s.eq_ignore_ascii_case("bytes"));
-            if size.is_some() && accepts_ranges {
-                return Ok(RemoteInfo {
-                    size,
-                    accepts_ranges,
-                    etag: header(&response, reqwest::header::ETAG),
-                    last_modified: header(&response, reqwest::header::LAST_MODIFIED),
-                });
-            }
-        }
-
-        // HEAD failed or was inconclusive: probe with a 1-byte range request.
-        let response = self
-            .apply_headers(self.client.get(&self.url))
-            .header(reqwest::header::RANGE, "bytes=0-0")
-            .send()?;
-        let status = response.status();
-        if status == reqwest::StatusCode::PARTIAL_CONTENT {
-            let total = header(&response, reqwest::header::CONTENT_RANGE)
-                .as_deref()
-                .and_then(parse_content_range_total);
-            return Ok(RemoteInfo {
-                size: total,
-                accepts_ranges: total.is_some(),
-                etag: header(&response, reqwest::header::ETAG),
-                last_modified: header(&response, reqwest::header::LAST_MODIFIED),
-            });
-        }
-        if status.is_success() {
-            return Ok(RemoteInfo {
-                size: response.content_length(),
-                ..Default::default()
-            });
-        }
-        Err(Box::new(KgetError::from_status(status.as_u16(), &self.url)))
-    }
-
     fn calculate_chunks(&self, total_size: u64) -> Vec<(u64, u64)> {
         let parallelism = self.optimizer.max_connections().max(1) as u64;
         // Keep workers fed without overwhelming servers.
@@ -813,44 +1062,21 @@ impl AdvancedDownloader {
         chunks
     }
 
-    fn download_chunks_parallel(
+    fn download_chunks(
         &self,
-        file: &File,
+        file: Arc<File>,
         state: ResumeState,
         state_path: &Path,
-        remote: &RemoteInfo,
+        sources: Vec<Source>,
+        workers: usize,
     ) -> Result<(), BoxError> {
         let total_size = state.total_size;
-        let chunks: Vec<(u64, u64)> = state.chunks.iter().map(|c| (c.start, c.end)).collect();
-        let done: Vec<AtomicU64> = state
+        let initial = state.done_bytes();
+        let pending = state
             .chunks
             .iter()
-            .map(|c| AtomicU64::new(c.done))
-            .collect();
-        let pending: Vec<usize> = state
-            .chunks
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| c.start + c.done < c.end)
-            .map(|(i, _)| i)
-            .collect();
-        let initial: u64 = state.done_bytes();
-        let downloaded = AtomicU64::new(initial);
-        let finished = AtomicBool::new(false);
-
-        let snapshot = || ResumeState {
-            chunks: state
-                .chunks
-                .iter()
-                .zip(&done)
-                .map(|(c, d)| ChunkState {
-                    start: c.start,
-                    end: c.end,
-                    done: d.load(Ordering::Relaxed),
-                })
-                .collect(),
-            ..state.clone()
-        };
+            .filter(|c| c.start + c.done < c.end)
+            .count();
 
         let bar = ProgressBar::new(total_size);
         bar.set_position(initial);
@@ -865,78 +1091,57 @@ impl AdvancedDownloader {
                 .progress_chars("#>-"),
             );
         }
-
-        let throttle_bucket = self
-            .optimizer
-            .speed_limit
-            .map(|limit| Mutex::new(TokenBucket::new(limit)));
-
-        let threads = self.optimizer.max_connections().min(pending.len()).max(1);
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(threads)
-            .thread_name(|i| format!("kget-chunk-{i}"))
-            .build()?;
         self.log(&format!(
             "Downloading {} of {} chunks with {} connection(s)",
-            pending.len(),
-            chunks.len(),
-            threads
+            pending,
+            state.chunks.len(),
+            workers
         ));
 
-        let report = |bytes: u64| {
-            bar.set_position(bytes);
-            if let Some(cb) = &self.progress_callback {
-                cb((bytes as f64 / total_size.max(1) as f64) as f32);
-            }
-            if let Some(cb) = &self.byte_progress_callback {
-                cb(bytes, Some(total_size));
-            }
-        };
-
-        let result = std::thread::scope(|scope| {
-            // One ticker thread updates progress (UI/callbacks every 200 ms) and
-            // persists the resume state every second.
-            scope.spawn(|| {
-                let mut last_save = Instant::now();
-                let mut last_print = Instant::now();
-                while !finished.load(Ordering::Relaxed) {
-                    std::thread::sleep(Duration::from_millis(200));
-                    let bytes = downloaded.load(Ordering::Relaxed);
-                    report(bytes);
-                    if !self.quiet_mode && last_print.elapsed() >= Duration::from_millis(500) {
-                        let percent = (bytes as f64 / total_size.max(1) as f64 * 100.0).min(100.0);
-                        // Line-oriented format parsed by the macOS app
-                        bar.suspend(|| println!("PROGRESS: {percent:.1}% ({bytes}/{total_size})"));
-                        last_print = Instant::now();
-                    }
-                    if last_save.elapsed() >= Duration::from_secs(1) {
-                        let _ = snapshot().save(state_path);
-                        last_save = Instant::now();
-                    }
-                }
-            });
-
-            let r = pool.install(|| {
-                pending.par_iter().try_for_each(|&idx| {
-                    self.fetch_chunk(
-                        file,
-                        chunks[idx],
-                        &done[idx],
-                        &downloaded,
-                        remote,
-                        throttle_bucket.as_ref(),
-                    )
-                })
-            });
-            finished.store(true, Ordering::Relaxed);
-            r
+        let engine = Arc::new(Engine {
+            dl: self.clone(),
+            file,
+            sched: Scheduler {
+                slots: Mutex::new(
+                    state
+                        .chunks
+                        .iter()
+                        .map(|c| Slot::new(c.start, c.end, c.done))
+                        .collect(),
+                ),
+                steals: AtomicU64::new(0),
+            },
+            sources,
+            source_lock: Mutex::new(()),
+            downloaded: AtomicU64::new(initial),
+            throttle: self
+                .optimizer
+                .speed_limit
+                .map(|limit| Mutex::new(TokenBucket::new(limit))),
+            stop: watch::Sender::new(false),
+            released: tokio::sync::Notify::new(),
+            finished: AtomicBool::new(false),
+            discard_state: AtomicBool::new(false),
+            bar: bar.clone(),
+            total_size,
+            base_state: state,
+            state_path: state_path.to_path_buf(),
         });
 
+        let result = runtime().block_on(engine.clone().run(workers));
+
         // Always persist the final state so an interrupted run can resume.
-        let final_state = snapshot();
-        let _ = final_state.save(state_path);
-        let bytes = downloaded.load(Ordering::Relaxed);
-        report(bytes);
+        let final_state = engine.snapshot();
+        if engine.discard_state.load(Ordering::Relaxed) {
+            let _ = std::fs::remove_file(state_path);
+        } else {
+            let _ = final_state.save(state_path);
+        }
+        engine.report();
+        let steals = engine.sched.steals.load(Ordering::Relaxed);
+        if steals > 0 {
+            self.log(&format!("Work stealing split {steals} slow range(s)"));
+        }
 
         match result {
             Ok(()) => {
@@ -953,109 +1158,518 @@ impl AdvancedDownloader {
             }
         }
     }
+}
 
-    /// Download one chunk, resuming from the last written byte on every retry.
-    fn fetch_chunk(
-        &self,
-        file: &File,
-        (chunk_start, end): (u64, u64),
-        done: &AtomicU64,
-        downloaded: &AtomicU64,
-        remote: &RemoteInfo,
-        throttle: Option<&Mutex<TokenBucket>>,
-    ) -> Result<(), BoxError> {
-        let mut pos = chunk_start + done.load(Ordering::Relaxed);
-        let mut failures = 0u32;
+// ============================================================================
+// Async chunk engine
+// ============================================================================
 
-        while pos < end {
-            if self.is_cancelled() {
-                return Err(Box::new(KgetError::Cancelled));
+/// One byte range of the file. `end` only ever shrinks (work stealing).
+struct Slot {
+    start: u64,
+    end: AtomicU64,
+    /// Bytes written to disk starting at `start`
+    done: AtomicU64,
+    /// A worker owns the range
+    active: AtomicBool,
+    /// When the current owner claimed the range, and `done` at that moment
+    claim: Mutex<(Instant, u64)>,
+}
+
+impl Slot {
+    fn new(start: u64, end: u64, done: u64) -> Arc<Self> {
+        Arc::new(Self {
+            start,
+            end: AtomicU64::new(end),
+            done: AtomicU64::new(done),
+            active: AtomicBool::new(false),
+            claim: Mutex::new((Instant::now(), done)),
+        })
+    }
+
+    /// Offset of the first byte not yet written.
+    fn pos(&self) -> u64 {
+        self.start + self.done.load(Ordering::Acquire)
+    }
+
+    fn remaining(&self) -> u64 {
+        self.end.load(Ordering::Acquire).saturating_sub(self.pos())
+    }
+
+    fn claim(&self) {
+        self.active.store(true, Ordering::Release);
+        *self.claim.lock().expect("slot poisoned") =
+            (Instant::now(), self.done.load(Ordering::Acquire));
+    }
+}
+
+enum Next {
+    Work(Arc<Slot>),
+    /// Nothing to take now; work in flight may become stealable
+    Wait,
+    Done,
+}
+
+struct Scheduler {
+    slots: Mutex<Vec<Arc<Slot>>>,
+    steals: AtomicU64,
+}
+
+impl Scheduler {
+    /// The next range for an idle worker: an unclaimed one, else half of the
+    /// in-flight range expected to finish last.
+    fn next(&self) -> Next {
+        let mut slots = self.slots.lock().expect("scheduler poisoned");
+        if let Some(s) = slots
+            .iter()
+            .find(|s| !s.active.load(Ordering::Acquire) && s.remaining() > 0)
+        {
+            s.claim();
+            return Next::Work(s.clone());
+        }
+
+        let now = Instant::now();
+        let mut victim: Option<(f64, &Arc<Slot>)> = None;
+        for s in slots.iter().filter(|s| s.active.load(Ordering::Acquire)) {
+            let remaining = s.remaining();
+            if remaining < 2 * MIN_SPLIT {
+                continue;
             }
+            let (at, done_then) = *s.claim.lock().expect("slot poisoned");
+            let elapsed = now.duration_since(at);
+            if elapsed < STEAL_GRACE {
+                continue;
+            }
+            let progressed = s.done.load(Ordering::Acquire).saturating_sub(done_then);
+            let eta = if progressed == 0 {
+                f64::INFINITY
+            } else {
+                remaining as f64 * elapsed.as_secs_f64() / progressed as f64
+            };
+            if eta >= STEAL_MIN_ETA.as_secs_f64() && victim.is_none_or(|(best, _)| eta > best) {
+                victim = Some((eta, s));
+            }
+        }
 
-            let attempt: Result<(), ChunkError> = (|| {
-                let mut req = self
-                    .apply_headers(self.client.get(&self.url))
-                    .header(reqwest::header::RANGE, format!("bytes={}-{}", pos, end - 1));
-                // If-Range: if the file changed on the server it answers 200 instead of 206
-                if let Some(v) = remote.if_range() {
-                    req = req.header(reqwest::header::IF_RANGE, v);
-                }
-                let mut resp = req
-                    .send()
-                    .map_err(|e| ChunkError::Transient(e.to_string()))?;
-                let status = resp.status();
-                if status == reqwest::StatusCode::OK
-                    || status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE
+        if let Some((_, v)) = victim {
+            // The owner has at most WRITE_BUF unwritten bytes past `pos`, and
+            // `mid - pos >= MIN_SPLIT`, so the halves never overlap.
+            let pos = v.pos();
+            let end = v.end.load(Ordering::Acquire);
+            let mid = pos + (end - pos) / 2;
+            v.end.store(mid, Ordering::Release);
+            let stolen = Slot::new(mid, end, 0);
+            stolen.claim();
+            slots.push(stolen.clone());
+            self.steals.fetch_add(1, Ordering::Relaxed);
+            return Next::Work(stolen);
+        }
+
+        if slots.iter().any(|s| s.active.load(Ordering::Acquire)) {
+            Next::Wait
+        } else {
+            Next::Done
+        }
+    }
+}
+
+/// A URL serving the file (the main URL or a mirror).
+struct Source {
+    url: String,
+    remote: RemoteInfo,
+    /// One client per TCP connection for multiplexed servers, else one pool
+    clients: Vec<Conn>,
+    alive: AtomicBool,
+}
+
+enum ChunkError {
+    /// Worth retrying on the same source
+    Transient(String),
+    /// The source is unusable (error status, range ignored); another mirror
+    /// may still work
+    Source { err: BoxError, discard_state: bool },
+    /// Stop the whole download
+    Fatal(BoxError),
+}
+
+struct Engine {
+    dl: AdvancedDownloader,
+    file: Arc<File>,
+    sched: Scheduler,
+    sources: Vec<Source>,
+    source_lock: Mutex<()>,
+    downloaded: AtomicU64,
+    throttle: Option<Mutex<TokenBucket>>,
+    /// Set on cancellation or when a worker failed: everyone stops
+    stop: watch::Sender<bool>,
+    /// A worker released its range (finished, or failed and stopped)
+    released: tokio::sync::Notify,
+    finished: AtomicBool,
+    /// The remote file changed: the state must not be resumed
+    discard_state: AtomicBool,
+    bar: ProgressBar,
+    total_size: u64,
+    base_state: ResumeState,
+    state_path: PathBuf,
+}
+
+impl Engine {
+    async fn run(self: Arc<Self>, workers: usize) -> Result<(), BoxError> {
+        let ticker = tokio::spawn(self.clone().ticker());
+        let mut set = JoinSet::new();
+        for id in 0..workers {
+            set.spawn(self.clone().worker(id));
+        }
+
+        let mut first: Option<BoxError> = None;
+        while let Some(joined) = set.join_next().await {
+            let r = joined.unwrap_or_else(|e| Err(format!("download task failed: {e}").into()));
+            if let Err(e) = r {
+                self.stop.send_replace(true);
+                // Report the root cause, not the cancellations it triggered.
+                if first
+                    .as_ref()
+                    .is_none_or(|f| is_cancel(f) && !is_cancel(&e))
                 {
-                    return Err(ChunkError::Fatal(Box::new(RangeNotHonored(
-                        status.as_u16(),
-                    ))));
-                }
-                if http::is_transient_status(status.as_u16()) {
-                    if let Some(delay) = http::retry_after(&resp) {
-                        std::thread::sleep(delay);
-                    }
-                    return Err(ChunkError::Transient(format!("HTTP {status}")));
-                }
-                if status != reqwest::StatusCode::PARTIAL_CONTENT {
-                    return Err(ChunkError::Fatal(Box::new(KgetError::from_status(
-                        status.as_u16(),
-                        &self.url,
-                    ))));
-                }
-
-                let mut buf = vec![0u8; READ_BUF];
-                while pos < end {
-                    if self.is_cancelled() {
-                        return Err(ChunkError::Fatal(Box::new(KgetError::Cancelled)));
-                    }
-                    let want = ((end - pos) as usize).min(buf.len());
-                    let n = resp
-                        .read(&mut buf[..want])
-                        .map_err(|e| ChunkError::Transient(e.to_string()))?;
-                    if n == 0 {
-                        return Err(ChunkError::Transient(format!(
-                            "connection closed early at byte {pos} (chunk ends at {end})"
-                        )));
-                    }
-                    write_all_at(file, &buf[..n], pos)
-                        .map_err(|e| ChunkError::Fatal(Box::new(KgetError::Io(e))))?;
-                    pos += n as u64;
-                    done.fetch_add(n as u64, Ordering::Relaxed);
-                    downloaded.fetch_add(n as u64, Ordering::Relaxed);
-                    // Progress was made: reset the failure counter.
-                    failures = 0;
-
-                    if let Some(bucket) = throttle {
-                        let sleep_dur = bucket
-                            .lock()
-                            .expect("throttle bucket poisoned")
-                            .consume(n as u64);
-                        if let Some(dur) = sleep_dur {
-                            std::thread::sleep(dur);
-                        }
-                    }
-                }
-                Ok(())
-            })();
-
-            match attempt {
-                Ok(()) => {}
-                Err(ChunkError::Fatal(e)) => return Err(e),
-                Err(ChunkError::Transient(msg)) => {
-                    failures += 1;
-                    if failures >= self.max_retries {
-                        return Err(format!(
-                            "Chunk {chunk_start}-{end} failed after {failures} attempts: {msg}"
-                        )
-                        .into());
-                    }
-                    std::thread::sleep(http::backoff_delay(failures));
+                    first = Some(e);
                 }
             }
         }
+        self.finished.store(true, Ordering::Relaxed);
+        let _ = ticker.await;
+        first.map_or(Ok(()), Err)
+    }
+
+    /// Progress (UI/callbacks every 200 ms), cancellation polling, and the
+    /// resume state persisted every second.
+    async fn ticker(self: Arc<Self>) {
+        let mut interval = tokio::time::interval(TICK);
+        let start = Instant::now();
+        let (mut last_report, mut last_print, mut last_save) = (start, start, start);
+        while !self.finished.load(Ordering::Relaxed) {
+            interval.tick().await;
+            if self.dl.is_cancelled() {
+                self.stop.send_replace(true);
+            }
+            if last_report.elapsed() >= Duration::from_millis(200) {
+                self.report();
+                last_report = Instant::now();
+            }
+            if !self.dl.quiet_mode && last_print.elapsed() >= Duration::from_millis(500) {
+                let bytes = self.downloaded.load(Ordering::Relaxed);
+                let total = self.total_size;
+                let percent = (bytes as f64 / total.max(1) as f64 * 100.0).min(100.0);
+                // Line-oriented format parsed by the macOS app
+                self.bar
+                    .suspend(|| println!("PROGRESS: {percent:.1}% ({bytes}/{total})"));
+                last_print = Instant::now();
+            }
+            if last_save.elapsed() >= Duration::from_secs(1)
+                && !self.discard_state.load(Ordering::Relaxed)
+            {
+                let (state, path) = (self.snapshot(), self.state_path.clone());
+                let _ = tokio::task::spawn_blocking(move || state.save(&path)).await;
+                last_save = Instant::now();
+            }
+        }
+    }
+
+    fn report(&self) {
+        let bytes = self.downloaded.load(Ordering::Relaxed);
+        self.bar.set_position(bytes);
+        if let Some(cb) = &self.dl.progress_callback {
+            cb((bytes as f64 / self.total_size.max(1) as f64) as f32);
+        }
+        if let Some(cb) = &self.dl.byte_progress_callback {
+            cb(bytes, Some(self.total_size));
+        }
+    }
+
+    fn snapshot(&self) -> ResumeState {
+        let slots = self.sched.slots.lock().expect("scheduler poisoned");
+        let mut chunks: Vec<ChunkState> = slots
+            .iter()
+            .map(|s| {
+                let end = s.end.load(Ordering::Acquire);
+                ChunkState {
+                    start: s.start,
+                    end,
+                    done: s.done.load(Ordering::Acquire).min(end - s.start),
+                }
+            })
+            .collect();
+        chunks.sort_by_key(|c| c.start);
+        ResumeState {
+            chunks,
+            ..self.base_state.clone()
+        }
+    }
+
+    fn stopped(&self) -> bool {
+        *self.stop.borrow() || self.dl.is_cancelled()
+    }
+
+    /// Sleep, waking early when the download stops.
+    async fn sleep(&self, d: Duration, rx: &mut watch::Receiver<bool>) {
+        tokio::select! {
+            _ = tokio::time::sleep(d) => {}
+            _ = rx.wait_for(|s| *s) => {}
+        }
+    }
+
+    /// Live source for a worker: workers are spread over the live sources in
+    /// order of preference.
+    fn pick_source(&self, worker: usize) -> Option<usize> {
+        let live: Vec<usize> = (0..self.sources.len())
+            .filter(|&i| self.sources[i].alive.load(Ordering::Acquire))
+            .collect();
+        (!live.is_empty()).then(|| live[worker % live.len()])
+    }
+
+    /// Drop a failing source if another one is still alive.
+    fn drop_source(&self, idx: usize, reason: &str) -> bool {
+        let _guard = self.source_lock.lock().expect("source lock poisoned");
+        let live = self
+            .sources
+            .iter()
+            .filter(|s| s.alive.load(Ordering::Acquire))
+            .count();
+        let src = &self.sources[idx];
+        if !src.alive.load(Ordering::Acquire) {
+            // Another worker already dropped it.
+            return live > 0;
+        }
+        if live <= 1 {
+            return false;
+        }
+        src.alive.store(false, Ordering::Release);
+        self.dl
+            .send_status(&format!("Mirror dropped: {} ({reason})", src.url));
+        true
+    }
+
+    async fn worker(self: Arc<Self>, id: usize) -> Result<(), BoxError> {
+        let mut rx = self.stop.subscribe();
+        loop {
+            if self.stopped() {
+                return Err(Box::new(KgetError::Cancelled));
+            }
+            // Registered before asking, so a range released meanwhile still wakes us.
+            let released = self.released.notified();
+            tokio::pin!(released);
+            released.as_mut().enable();
+            match self.sched.next() {
+                Next::Work(slot) => {
+                    let r = self.fetch_slot(id, &slot, &mut rx).await;
+                    slot.active.store(false, Ordering::Release);
+                    self.released.notify_waiters();
+                    r?;
+                }
+                Next::Wait => {
+                    // Re-check periodically: in-flight ranges become stealable.
+                    tokio::select! {
+                        _ = released => {}
+                        _ = self.sleep(Duration::from_millis(200), &mut rx) => {}
+                    }
+                }
+                Next::Done => return Ok(()),
+            }
+        }
+    }
+
+    /// Download one range, resuming from the last written byte on every retry
+    /// and moving to another mirror when its source fails.
+    async fn fetch_slot(
+        &self,
+        id: usize,
+        slot: &Slot,
+        rx: &mut watch::Receiver<bool>,
+    ) -> Result<(), BoxError> {
+        let mut failures = 0u32;
+        loop {
+            if slot.remaining() == 0 {
+                return Ok(());
+            }
+            if self.stopped() {
+                return Err(Box::new(KgetError::Cancelled));
+            }
+            let Some(src) = self.pick_source(id) else {
+                return Err("All mirrors failed".into());
+            };
+            let clients = &self.sources[src].clients;
+            let client = &clients[(id / self.sources.len()) % clients.len()];
+
+            let before = slot.pos();
+            let r = self.attempt(src, client, slot, rx).await;
+            if slot.pos() > before {
+                // Progress was made: reset the failure counter.
+                failures = 0;
+            }
+            match r {
+                Ok(()) => {}
+                Err(ChunkError::Fatal(e)) => return Err(e),
+                Err(ChunkError::Source { err, discard_state }) => {
+                    if self.drop_source(src, &err.to_string()) {
+                        failures = 0;
+                        continue;
+                    }
+                    if discard_state {
+                        self.discard_state.store(true, Ordering::Relaxed);
+                    }
+                    return Err(err);
+                }
+                Err(ChunkError::Transient(msg)) => {
+                    failures += 1;
+                    if failures >= self.dl.max_retries {
+                        let err = format!(
+                            "Chunk {}-{} failed after {failures} attempts: {msg}",
+                            slot.start,
+                            slot.end.load(Ordering::Acquire)
+                        );
+                        if self.drop_source(src, &err) {
+                            failures = 0;
+                            continue;
+                        }
+                        return Err(err.into());
+                    }
+                    self.sleep(http::backoff_delay(failures), rx).await;
+                }
+            }
+        }
+    }
+
+    /// One range request from the current position to the slot's end.
+    async fn attempt(
+        &self,
+        src_idx: usize,
+        client: &Conn,
+        slot: &Slot,
+        rx: &mut watch::Receiver<bool>,
+    ) -> Result<(), ChunkError> {
+        let src = &self.sources[src_idx];
+        let start = slot.pos();
+        let end = slot.end.load(Ordering::Acquire);
+        if start >= end {
+            return Ok(());
+        }
+        let mut req = http::apply_headers_async(client.get(&src.url), &self.dl.extra_headers)
+            .header(
+                reqwest::header::RANGE,
+                format!("bytes={}-{}", start, end - 1),
+            );
+        // If-Range: if the file changed on the server it answers 200 instead of 206
+        if let Some(v) = src.remote.if_range() {
+            req = req.header(reqwest::header::IF_RANGE, v);
+        }
+        let sent = tokio::select! {
+            biased;
+            _ = rx.wait_for(|s| *s) => return Err(ChunkError::Fatal(Box::new(KgetError::Cancelled))),
+            r = req.send() => r,
+        };
+        let mut resp = sent.map_err(|e| ChunkError::Transient(e.to_string()))?;
+        let status = resp.status();
+        if status == reqwest::StatusCode::OK || status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE
+        {
+            // Range ignored, `If-Range` says the file changed, or the range
+            // no longer exists: another mirror may still serve ranges, else
+            // the download restarts as a single stream (never splice versions).
+            return Err(ChunkError::Source {
+                err: Box::new(RangeNotHonored(status.as_u16())),
+                discard_state: true,
+            });
+        }
+        if http::is_transient_status(status.as_u16()) {
+            if let Some(delay) = http::retry_after_header(resp.headers()) {
+                self.sleep(delay, rx).await;
+            }
+            return Err(ChunkError::Transient(format!("HTTP {status}")));
+        }
+        if status != reqwest::StatusCode::PARTIAL_CONTENT {
+            return Err(ChunkError::Source {
+                err: Box::new(KgetError::from_status(status.as_u16(), &src.url)),
+                discard_state: false,
+            });
+        }
+
+        let mut buf: Vec<u8> = Vec::with_capacity(WRITE_BUF);
+        // Offset of the next received byte (written bytes + buffered bytes)
+        let mut pos = start;
+        let result = 'read: loop {
+            let end = slot.end.load(Ordering::Acquire);
+            if pos >= end {
+                break Ok(());
+            }
+            let chunk = tokio::select! {
+                biased;
+                _ = rx.wait_for(|s| *s) => break Err(ChunkError::Fatal(Box::new(KgetError::Cancelled))),
+                c = resp.chunk() => c,
+            };
+            let data = match chunk {
+                Ok(Some(d)) => d,
+                Ok(None) => {
+                    break Err(ChunkError::Transient(format!(
+                        "connection closed early at byte {pos} (chunk ends at {end})"
+                    )));
+                }
+                Err(e) => break Err(ChunkError::Transient(e.to_string())),
+            };
+            let mut rest = &data[..];
+            let mut taken = 0u64;
+            while !rest.is_empty() {
+                // Re-read the end: work stealing may have shrunk the range.
+                let room = slot.end.load(Ordering::Acquire).saturating_sub(pos);
+                if room == 0 {
+                    break;
+                }
+                let n = rest.len().min(WRITE_BUF - buf.len()).min(room as usize);
+                buf.extend_from_slice(&rest[..n]);
+                rest = &rest[n..];
+                pos += n as u64;
+                taken += n as u64;
+                if buf.len() == WRITE_BUF
+                    && let Err(e) = self.flush(slot, &mut buf).await
+                {
+                    break 'read Err(ChunkError::Fatal(e));
+                }
+            }
+            if let Some(bucket) = &self.throttle {
+                let wait = bucket
+                    .lock()
+                    .expect("throttle bucket poisoned")
+                    .consume(taken);
+                if let Some(d) = wait {
+                    self.sleep(d, rx).await;
+                }
+            }
+        };
+        // Bytes already received are valid: write them whatever happened.
+        if let Err(e) = self.flush(slot, &mut buf).await {
+            return Err(ChunkError::Fatal(e));
+        }
+        result
+    }
+
+    /// Write the buffered bytes at the slot's position and account for them.
+    async fn flush(&self, slot: &Slot, buf: &mut Vec<u8>) -> Result<(), BoxError> {
+        if buf.is_empty() {
+            return Ok(());
+        }
+        let data = std::mem::replace(buf, Vec::with_capacity(WRITE_BUF));
+        let n = data.len() as u64;
+        let offset = slot.pos();
+        // A positional write into the page cache is short; block_in_place lets
+        // the runtime move other tasks off this worker meanwhile, without the
+        // thread hop (and copy of ownership) of spawn_blocking.
+        tokio::task::block_in_place(|| write_all_at(&self.file, &data, offset))
+            .map_err(|e| Box::new(KgetError::Io(e)) as BoxError)?;
+        slot.done.fetch_add(n, Ordering::Release);
+        self.downloaded.fetch_add(n, Ordering::Relaxed);
         Ok(())
     }
+}
+
+fn is_cancel(e: &BoxError) -> bool {
+    matches!(e.downcast_ref::<KgetError>(), Some(KgetError::Cancelled))
 }
 
 /// `write_at`/`seek_write` may write fewer bytes than requested; write everything.
@@ -1080,4 +1694,116 @@ fn parse_content_range_total(value: &str) -> Option<u64> {
         return None;
     }
     total.trim().parse::<u64>().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state(chunks: &[(u64, u64, u64)], total: u64) -> ResumeState {
+        ResumeState {
+            version: STATE_VERSION,
+            url: "u".into(),
+            total_size: total,
+            etag: None,
+            last_modified: None,
+            chunks: chunks
+                .iter()
+                .map(|&(start, end, done)| ChunkState { start, end, done })
+                .collect(),
+        }
+    }
+
+    /// Live turbo download over HTTP/3:
+    /// `RUSTFLAGS="--cfg reqwest_unstable" cargo test --features http3 --lib -- --ignored live_turbo_http3`
+    #[cfg(all(feature = "http3", reqwest_unstable))]
+    #[test]
+    #[ignore = "needs network access to an HTTP/3 server"]
+    fn live_turbo_http3() {
+        let dir = std::env::temp_dir().join(format!("kget-h3-{}", std::process::id()));
+        let out = dir.join("h3.bin");
+        let mut dl = AdvancedDownloader::new(
+            "https://www.google.com/robots.txt".into(),
+            out.to_string_lossy().into_owned(),
+            true,
+            ProxyConfig::default(),
+            Optimizer::new(),
+        )
+        .unwrap();
+        dl.set_http_version(HttpVersion::Http3).unwrap();
+        let log: Arc<Mutex<Vec<String>>> = Arc::default();
+        let l = log.clone();
+        dl.set_status_callback(move |m| l.lock().unwrap().push(m));
+        dl.download().unwrap();
+        assert!(std::fs::metadata(&out).unwrap().len() > 0);
+        let _ = std::fs::remove_dir_all(&dir);
+        let log = log.lock().unwrap();
+        assert!(!log.iter().any(|m| m.contains("falling back")), "{log:?}");
+        assert!(
+            log.iter().any(|m| m.contains("negotiated HTTP/3")),
+            "{log:?}"
+        );
+    }
+
+    #[test]
+    fn state_must_cover_the_file_exactly() {
+        assert!(state(&[(0, 5, 5), (5, 10, 0)], 10).is_consistent());
+        assert!(state(&[(0, 3, 1), (3, 6, 2), (6, 10, 0)], 10).is_consistent());
+        // Splits are appended to the scheduler out of order, but
+        // `Engine::snapshot` sorts them before saving, so a file with
+        // unordered chunks was not written by KGet: never trust it.
+        assert!(!state(&[(0, 3, 1), (6, 10, 0), (3, 6, 2)], 10).is_consistent());
+        assert!(!state(&[(0, 5, 5)], 10).is_consistent(), "gap at the end");
+        assert!(!state(&[], 10).is_consistent(), "no chunks");
+        assert!(
+            !state(&[(0, 6, 0), (5, 10, 0)], 10).is_consistent(),
+            "overlap"
+        );
+        assert!(
+            !state(&[(0, 5, 6), (5, 10, 0)], 10).is_consistent(),
+            "overfull"
+        );
+        let huge = state(&[(0, 5, 5), (5, u64::MAX, u64::MAX - 5)], u64::MAX);
+        assert_eq!(huge.done_bytes(), u64::MAX, "saturating sum");
+    }
+
+    #[test]
+    fn idle_worker_takes_unclaimed_range_first() {
+        let sched = Scheduler {
+            slots: Mutex::new(vec![Slot::new(0, 10, 10), Slot::new(10, 20, 3)]),
+            steals: AtomicU64::new(0),
+        };
+        match sched.next() {
+            Next::Work(s) => assert_eq!(s.pos(), 13),
+            _ => panic!("expected work"),
+        }
+        // The only range left is in flight and small: nothing to steal.
+        assert!(matches!(sched.next(), Next::Wait));
+    }
+
+    #[test]
+    fn stalled_range_is_halved() {
+        let big = 8 * MIN_SPLIT;
+        let slot = Slot::new(0, big, 0);
+        slot.claim();
+        *slot.claim.lock().unwrap() = (Instant::now() - STEAL_GRACE * 2, 0);
+        let sched = Scheduler {
+            slots: Mutex::new(vec![slot.clone()]),
+            steals: AtomicU64::new(0),
+        };
+        let Next::Work(stolen) = sched.next() else {
+            panic!("expected a split");
+        };
+        assert_eq!(slot.end.load(Ordering::Relaxed), big / 2);
+        assert_eq!(
+            (stolen.start, stolen.end.load(Ordering::Relaxed)),
+            (big / 2, big)
+        );
+        assert_eq!(sched.steals.load(Ordering::Relaxed), 1);
+        slot.active.store(false, Ordering::Relaxed);
+        stolen.done.store(big / 2, Ordering::Relaxed);
+        stolen.active.store(false, Ordering::Relaxed);
+        // The first half is unclaimed again and still incomplete.
+        assert!(matches!(sched.next(), Next::Work(_)));
+    }
 }
