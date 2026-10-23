@@ -7,7 +7,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0.html),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.8.0] - 2026-10-23
 
 ### Added
 - **AI model downloads (`hf://`, `ollama://`):** `kget hf://org/repo[@rev][/path]` downloads a Hugging Face
@@ -110,6 +110,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A failed or cancelled download saved with `-O file` is recorded under that name, so it can be resumed.
 
 ### Security
+- Archive extraction now happens in a sibling staging directory and rejects all symbolic links before publishing
+  files, preventing an extracted archive from redirecting a later download outside its allowed directory.
+- FTP URLs reject CR/LF in decoded credentials and paths before they reach the FTP command layer.
 - `ProxyConfig` never serializes the proxy password and redacts it in `Debug` output. Passwords never appear in
   `config.json`, the history, logs or JSONL events.
 - Daemon: the Unix socket has mode `0600` in a `0700` directory. TCP mode is loopback-only with a 256-bit token in

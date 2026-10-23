@@ -7,7 +7,7 @@ Todos los cambios notables en este proyecto serán documentados en este archivo.
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 y este proyecto se adhiere al [Versionado Semántico](https://semver.org/spec/v2.0.0.html).
 
-## [Sin publicar]
+## [1.8.0] - 2026-10-23
 
 ### Añadido
 - **Descarga de modelos de IA (`hf://`, `ollama://`):** `kget hf://org/repo[@rev][/ruta]` descarga un modelo,
@@ -116,6 +116,9 @@ y este proyecto se adhiere al [Versionado Semántico](https://semver.org/spec/v2
 - Una descarga fallida o cancelada guardada con `-O archivo` queda registrada con ese nombre, para poder reanudarse.
 
 ### Seguridad
+- La extracción de archivos ahora ocurre en un directorio temporal hermano y rechaza todos los enlaces simbólicos antes
+  de publicar archivos, evitando que un archivo extraído redirija una descarga posterior fuera del directorio permitido.
+- Las URL FTP rechazan CR/LF en credenciales y rutas decodificadas antes de llegar a la capa de comandos FTP.
 - `ProxyConfig` nunca serializa la contraseña del proxy y la oculta en la salida de `Debug`. Las contraseñas nunca
   aparecen en `config.json`, el historial, los logs ni los eventos JSONL.
 - Daemon: el socket Unix tiene modo `0600` en un directorio `0700`. El modo TCP solo acepta loopback, con un token de

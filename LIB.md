@@ -12,16 +12,16 @@ verification.
 
 ```toml
 [dependencies]
-Kget = "1.7.1"
+Kget = "1.8.0"
 
 # Optional: built-in torrent client
-Kget = { version = "1.7.1", features = ["torrent-native"] }
+Kget = { version = "1.8.0", features = ["torrent-native"] }
 
 # Optional: async API
-Kget = { version = "1.7.1", features = ["async"] }
+Kget = { version = "1.8.0", features = ["async"] }
 
 # Library only: skip the terminal UI (the `tui` default feature), keep the keychain
-Kget = { version = "1.7.1", default-features = false, features = ["keychain"] }
+Kget = { version = "1.8.0", default-features = false, features = ["keychain"] }
 ```
 
 Default features are `keychain` (OS credential store) and `tui` (the `kget tui`

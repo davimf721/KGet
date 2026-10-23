@@ -1,6 +1,6 @@
 <img width="1000" height="500" alt="KGet Banner" src="https://github.com/user-attachments/assets/d0888e3f-90a2-42d6-a9aa-b216dc36f1f4" />
 
-# KGet v1.7.1
+# KGet v1.8.0
 
 **A fast, modern download manager written in Rust.**  
 HTTP/HTTPS · FTP/SFTP · WebDAV · BitTorrent · Metalink · yt-dlp · Hugging Face · Ollama · CLI · TUI · GUI · MCP · Library
@@ -11,10 +11,10 @@ HTTP/HTTPS · FTP/SFTP · WebDAV · BitTorrent · Metalink · yt-dlp · Hugging 
 [![crates.io](https://img.shields.io/crates/v/Kget.svg)](https://crates.io/crates/Kget)
 [![docs.rs](https://docs.rs/Kget/badge.svg)](https://docs.rs/Kget)
 
-> **1.7.1** is a reliability release: turbo downloads can no longer finish with a
-> corrupted file, every download resumes after Ctrl+C, CLI flags no longer leak
-> into `config.json`, proxies cover HTTPS/SOCKS5, and the macOS app finds yt-dlp
-> installed with Homebrew. See the [CHANGELOG](CHANGELOG.md).
+> **1.8.0** brings KGet to the agent era: a persistent daemon, MCP server,
+> browser extension, terminal UI, AI-model sources, HTTP/2 turbo downloads and
+> SQLite history — with hardened archive extraction and OS-backed credentials.
+> See the [CHANGELOG](CHANGELOG.md).
 
 ---
 
@@ -115,11 +115,11 @@ brew install kget --with-gui --with-torrent # all optional features
 ### Pre-built binaries
 
 Download the latest release from [Releases](https://github.com/davimf721/KGet/releases):
-- **macOS** — `KGet-1.7.1-macOS-Native.dmg` (native SwiftUI app, no Rust needed)
-- **macOS CLI** — `kget-1.7.1-macos-arm64` (Apple Silicon) / `kget-1.7.1-macos-x64` (Intel)
-- **Linux** — `kget-1.7.1-linux-x64`, `kget-1.7.1-linux-x64-static` (musl), `kget-1.7.1-linux-arm64`
-- **Windows** — `kget-1.7.1-windows-x64.exe` / `.zip`
-- Verify with `SHA256SUMS-1.7.1.txt`
+- **macOS** — `KGet-1.8.0-macOS-Native.dmg` (native SwiftUI app, no Rust needed)
+- **macOS CLI** — `kget-1.8.0-macos-arm64` (Apple Silicon) / `kget-1.8.0-macos-x64` (Intel)
+- **Linux** — `kget-1.8.0-linux-x64`, `kget-1.8.0-linux-x64-static` (musl), `kget-1.8.0-linux-arm64`
+- **Windows** — `kget-1.8.0-windows-x64.exe` / `.zip`
+- Verify with `SHA256SUMS-1.8.0.txt`
 
 ### From crates.io
 
@@ -519,13 +519,13 @@ KGet is also a reusable Rust library. Add it to your project:
 
 ```toml
 [dependencies]
-Kget = "1.7.1"
+Kget = "1.8.0"
 
 # Optional: torrent client
-Kget = { version = "1.7.1", features = ["torrent-native"] }
+Kget = { version = "1.8.0", features = ["torrent-native"] }
 
 # Optional: async API
-Kget = { version = "1.7.1", features = ["async"] }
+Kget = { version = "1.8.0", features = ["async"] }
 ```
 
 ### Builder API (recommended)

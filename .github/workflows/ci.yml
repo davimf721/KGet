@@ -77,6 +77,18 @@ jobs:
           name: fuzz-artifacts
           path: fuzz/artifacts
 
+  audit:
+    name: Security audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - name: Audit dependencies from Cargo.lock
+        run: cargo audit
+
   ffi:
     name: FFI bindings (UniFFI, macOS)
     runs-on: macos-latest

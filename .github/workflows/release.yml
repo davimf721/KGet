@@ -4,7 +4,7 @@ name: Release
 # all binaries + SHA256SUMS, publishes the crate to crates.io and updates the
 # Homebrew tap (davimf721/homebrew-kget).
 #
-# Trigger it by pushing a tag (git tag v1.7.1 && git push origin v1.7.1) or by
+# Trigger it by pushing a tag (git tag v1.8.0 && git push origin v1.8.0) or by
 # running it manually from the Actions tab ("Run workflow"), which creates the
 # tag on the selected commit.
 #
@@ -20,7 +20,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to release (e.g. v1.7.1); created on the selected commit if missing"
+        description: "Tag to release (e.g. v1.8.0); created on the selected commit if missing"
         required: true
 
 permissions:

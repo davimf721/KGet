@@ -2,6 +2,13 @@
 
 ## Shipped
 
+### v1.8.0
+- ✅ Persistent daemon and local MCP server for agents, plus a browser native-messaging extension.
+- ✅ `hf://` / `ollama://` model sources, async turbo downloads with HTTP/2 and experimental HTTP/3,
+  parallel Metalink mirrors, and a ratatui terminal UI.
+- ✅ SQLite history, smart organization rules, duplicate handling, OS keychain credentials and UniFFI bindings.
+- ✅ Hardened archive extraction, FTP input validation, fuzz targets and panic containment in the library.
+
 ### v1.7.1
 - ✅ **Safe resume** — `.part` + `.kget` state for turbo mode, validated chunks, retry from exact offset, Ctrl+C keeps progress.
 - ✅ **CLI flags no longer persisted** — `--save-config`, never stores proxy passwords; `KGET_CONFIG_DIR`.

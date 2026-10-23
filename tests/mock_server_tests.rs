@@ -924,11 +924,17 @@ mod turbo {
     async fn metalink_mirror_failing_mid_download_is_dropped() {
         let bad = MockServer::start().await;
         let good = MockServer::start().await;
-        let body = pattern(10 * MIB);
+        // Two workers are assigned deterministically: worker 0 starts on the
+        // primary (bad) source and worker 1 starts on the mirror.  Delay the
+        // mirror's first range so the primary receives another range and its
+        // mid-download failure is actually exercised, rather than allowing a
+        // fast mirror to finish every remaining chunk first.
+        let body = pattern(20 * MIB);
         let mut flaky = Ranges::new(&body);
         flaky.fail_after = Some(1); // serves one range, then 403 forever
         flaky.mount(&bad, "/m.bin").await;
-        let healthy = Ranges::new(&body);
+        let mut healthy = Ranges::new(&body);
+        healthy.slow_start = Some((4 * MIB as u64, Duration::from_millis(500)));
         healthy.mount(&good, "/m.bin").await;
 
         let dir = TempDir::new().unwrap();
@@ -964,7 +970,7 @@ mod turbo {
                 &dst,
                 true,
                 ProxyConfig::default(),
-                optimizer(4),
+                optimizer(2),
             )
             .map_err(|e| e.to_string())
         })

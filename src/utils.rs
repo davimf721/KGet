@@ -440,6 +440,7 @@ fn reject_symlinks(dir: &std::path::Path) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod extraction_tests {
+    #[cfg(unix)]
     use super::*;
 
     #[cfg(unix)]

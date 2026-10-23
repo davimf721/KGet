@@ -50,7 +50,16 @@ pub fn metalink(data: &[u8]) {
 pub fn magnet(data: &[u8]) {
     let s = String::from_utf8_lossy(data);
     let protocol = crate::protocol::detect(&s);
-    if crate::torrent::is_supported_magnet_link(&s) || crate::torrent::is_torrent_file(&s) {
+    // Model-source schemes deliberately take precedence over a filename
+    // suffix: `hf://org/model.torrent` is a Hugging Face repository name,
+    // not a torrent URL. Keep this invariant aligned with `protocol::detect`.
+    let lower = s.to_ascii_lowercase();
+    let model_source = lower.starts_with("hf://")
+        || lower.contains("huggingface.co/")
+        || lower.starts_with("ollama://");
+    if !model_source
+        && (crate::torrent::is_supported_magnet_link(&s) || crate::torrent::is_torrent_file(&s))
+    {
         assert_eq!(protocol, crate::Protocol::Torrent, "{s:?}");
     }
     let _ = crate::torrent::is_supported_torrent_source(&s);
@@ -184,5 +193,15 @@ pub fn url_list(data: &[u8]) {
             !u.is_empty() && !u.starts_with('#') && u.trim() == u,
             "{u:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_scheme_precedes_torrent_suffix() {
+        magnet("hf://\u{fffd}.torrent".as_bytes());
     }
 }

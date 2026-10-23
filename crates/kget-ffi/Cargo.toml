@@ -1,6 +1,6 @@
 [package]
 name = "kget-ffi"
-version = "1.7.1"
+version = "1.8.0"
 edition = "2024"
 description = "UniFFI bindings (Swift, Kotlin) over the KGet job engine"
 authors = ["Davi Moreira Fuzatto <davimoreiraf@gmail.com>"]

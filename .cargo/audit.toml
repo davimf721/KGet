@@ -1,0 +1,7 @@
+# Keep this exception narrow and review it whenever librqbit is upgraded.
+# librqbit-utp 0.7.0's only RingBuf instantiation is `SharedRb<Heap<u8>>`.
+# RUSTSEC-2026-0293 requires an element's `Drop` implementation to panic;
+# `u8` has no Drop implementation, so the reported double-free path is not
+# reachable through KGet. See SECURITY.md for the release rationale.
+[advisories]
+ignore = ["RUSTSEC-2026-0293"]

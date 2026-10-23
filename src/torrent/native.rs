@@ -11,7 +11,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use librqbit::{AddTorrent, AddTorrentOptions, AddTorrentResponse, Session, SessionOptions};
+use librqbit::{
+    AddTorrent, AddTorrentOptions, AddTorrentResponse, DhtSessionConfig, ListenerOptions, Session,
+    SessionOptions,
+};
 
 use crate::config::{ProxyConfig, TorrentConfig};
 use crate::events::TorrentStats;
@@ -31,6 +34,17 @@ type FileInfoList = Vec<(String, u64)>;
 const METADATA_TIMEOUT_SECS: u64 = 120;
 const PROGRESS_UPDATE_INTERVAL_MS: u64 = 1000;
 const PROGRESS_EMIT_THRESHOLD: f32 = 5.0;
+
+/// librqbit 9 combines DHT enablement and persistence under one option. KGet
+/// keeps its sessions ephemeral, while still honouring the user's DHT and port
+/// settings for peer discovery.
+fn dht_options(enabled: bool, port: Option<u16>) -> Option<DhtSessionConfig> {
+    enabled.then(|| DhtSessionConfig {
+        port,
+        persistence: None,
+        ..Default::default()
+    })
+}
 
 /// Download progress statistics
 struct DownloadStats {
@@ -173,13 +187,9 @@ fn listed_files(resp: &librqbit::ListOnlyResponse) -> Result<FileInfoList, BoxEr
     let files = resp
         .info
         .iter_file_details()
-        .map_err(|e| format!("Invalid torrent metadata: {e}"))?
         .enumerate()
-        .map(|(i, fd)| {
-            let name = fd
-                .filename
-                .to_string()
-                .unwrap_or_else(|_| format!("file_{i}"));
+        .map(|(_, fd)| {
+            let name = fd.filename.to_string();
             (name, fd.len)
         })
         .collect();
@@ -432,13 +442,14 @@ impl NativeTorrentDownloader {
 
         let port = self.config.port.unwrap_or(6881);
         let opts = SessionOptions {
-            disable_dht: !self.config.dht_enabled,
-            disable_dht_persistence: true,
-            dht_config: None,
+            dht: dht_options(self.config.dht_enabled, Some(port)),
             persistence: None,
-            listen_port_range: Some(port..port.saturating_add(8)),
             // Only map ports automatically when the user did not pick one.
-            enable_upnp_port_forwarding: self.config.port.is_none(),
+            listen: Some(ListenerOptions {
+                listen_addr: ([0, 0, 0, 0], port).into(),
+                enable_upnp_port_forwarding: self.config.port.is_none(),
+                ..Default::default()
+            }),
             ..Default::default()
         };
 
@@ -814,11 +825,8 @@ pub fn list_files_native(
     let cancel = cancel.unwrap_or_default();
     tokio::runtime::Runtime::new()?.block_on(async {
         let opts = SessionOptions {
-            disable_dht: !config.dht_enabled,
-            disable_dht_persistence: true,
+            dht: dht_options(config.dht_enabled, config.port),
             persistence: None,
-            listen_port_range: None,
-            enable_upnp_port_forwarding: false,
             ..Default::default()
         };
         let session = Session::new_with_opts(std::env::temp_dir(), opts)

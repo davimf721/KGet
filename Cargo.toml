@@ -1,6 +1,6 @@
 [package]
 name = "Kget"
-version = "1.7.1"
+version = "1.8.0"
 edition = "2024"
 description = "A powerful and versatile download manager and library"
 authors = ["Davi Moreira Fuzatto <davimoreiraf@gmail.com>"]
@@ -124,7 +124,7 @@ version = "4.11"
 optional = true
 
 [dependencies.librqbit]
-version = "8.1.1"
+version = "9.0.1"
 optional = true
 
 [dev-dependencies]

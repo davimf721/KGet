@@ -1,6 +1,6 @@
 <img width="1000" height="500" alt="KGet Banner" src="https://github.com/user-attachments/assets/d0888e3f-90a2-42d6-a9aa-b216dc36f1f4" />
 
-# KGet v1.7.1
+# KGet v1.8.0
 
 **Un gestor de descargas rápido y moderno escrito en Rust.**  
 HTTP/HTTPS · FTP/SFTP · WebDAV · BitTorrent · Metalink · yt-dlp · Hugging Face · Ollama · CLI · TUI · GUI · MCP · Biblioteca
@@ -8,11 +8,10 @@ HTTP/HTTPS · FTP/SFTP · WebDAV · BitTorrent · Metalink · yt-dlp · Hugging 
 [English](../README.md) | [Português](README.pt-BR.md) | [Español](README.es.md)
 
 
-> **1.7.1** es una versión de fiabilidad: las descargas turbo ya no terminan con archivos
-> corruptos, toda descarga se puede reanudar tras Ctrl+C (`-c`), las flags de la CLI ya no se
-> guardan en `config.json` (usa `--save-config`), el proxy cubre HTTPS/SOCKS5 y la app de macOS
-> encuentra yt-dlp instalado con Homebrew. Nuevas flags: `-c`, `--no-clobber`, `--retries`,
-> `--timeout`, `-j`, `--checksum`, `--checksum-url`, `--doctor`. Ver el [CHANGELOG](CHANGELOG.es.md).
+> **1.8.0** lleva KGet a la era de los agentes: daemon con cola persistente, servidor MCP,
+> extensión de navegador, TUI, fuentes de modelos de IA, descargas turbo HTTP/2 e historial
+> SQLite — con extracción de archivos reforzada y credenciales en el llavero del sistema.
+> Ver el [CHANGELOG](CHANGELOG.es.md).
 
 ---
 
@@ -99,7 +98,7 @@ brew install kget --with-gui --with-torrent # todas las características opciona
 ### Binarios precompilados
 
 Descarga la última versión desde [Releases](https://github.com/davimf721/KGet/releases):
-- **macOS** — `KGet-1.7.1-macOS-Native.dmg` (app SwiftUI nativa, sin necesidad de Rust)
+- **macOS** — `KGet-1.8.0-macOS-Native.dmg` (app SwiftUI nativa, sin necesidad de Rust)
 - **Linux/Windows** — binario CLI o GUI (ver assets del release)
 
 ### Desde crates.io
@@ -464,7 +463,7 @@ KGet también es una biblioteca Rust reutilizable. Agrégala a tu proyecto:
 
 ```toml
 [dependencies]
-Kget = "1.7.1"
+Kget = "1.8.0"
 ```
 
 ### API Builder (recomendada)
