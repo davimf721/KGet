@@ -344,6 +344,9 @@ enum Command {
     Mcp(McpArgs),
     /// Full-screen terminal UI (uses the running daemon when there is one)
     Tui(TuiArgs),
+    /// Native-messaging host for the browser extension (started by the browser)
+    #[command(hide = true)]
+    NativeHost(NativeHostArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -616,6 +619,35 @@ struct McpArgs {
     start_daemon: bool,
 }
 
+#[derive(clap::Args, Debug)]
+#[command(args_conflicts_with_subcommands = true)]
+struct NativeHostArgs {
+    #[command(subcommand)]
+    action: Option<NativeHostAction>,
+    /// Arguments the browser passes (the calling extension's origin)
+    #[arg(allow_hyphen_values = true, trailing_var_arg = true)]
+    caller: Vec<String>,
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum NativeHostAction {
+    /// Register the host with browsers (writes the native messaging manifests)
+    Install {
+        /// chrome, chromium, edge, brave, firefox or all
+        #[arg(long = "browser", default_value = "all")]
+        browser: String,
+        /// Extra extension ID to allow (Chromium ID or Firefox add-on ID); repeatable
+        #[arg(long = "extension-id")]
+        extension_id: Vec<String>,
+    },
+    /// Remove the host's manifests
+    Uninstall {
+        /// chrome, chromium, edge, brave, firefox or all
+        #[arg(long = "browser", default_value = "all")]
+        browser: String,
+    },
+}
+
 /// A local `.torrent` / `.meta4` path made absolute (the daemon has its own
 /// working directory); URLs are returned unchanged.
 fn absolute_source(url: &str) -> String {
@@ -689,7 +721,40 @@ fn run_command(cmd: &Command) -> Result<i32, BoxError> {
             })?;
             Ok(0)
         }
+        Command::NativeHost(n) => native_host_command(n),
     }
+}
+
+/// `kget native-host [install|uninstall]`.
+fn native_host_command(n: &NativeHostArgs) -> Result<i32, BoxError> {
+    use kget::native_host::install::{self, Browser, InstallOptions, Layout};
+    let browsers = |name: &str| {
+        Browser::parse_list(name).ok_or_else(|| {
+            format!("unknown browser '{name}' (chrome, chromium, edge, brave, firefox or all)")
+        })
+    };
+    let report = match &n.action {
+        None => return kget::native_host::run(&n.caller),
+        Some(NativeHostAction::Install {
+            browser,
+            extension_id,
+        }) => install::install(
+            &InstallOptions {
+                browsers: browsers(browser)?,
+                extension_ids: extension_id.clone(),
+                exe: std::env::current_exe()?,
+                only_present: browser.eq_ignore_ascii_case("all"),
+            },
+            &Layout::resolve()?,
+        )?,
+        Some(NativeHostAction::Uninstall { browser }) => {
+            install::uninstall(&browsers(browser)?, &Layout::resolve()?)?
+        }
+    };
+    for line in report {
+        println!("{line}");
+    }
+    Ok(0)
 }
 
 impl Args {
@@ -1104,5 +1169,65 @@ fn detach_owned_console() {
         unsafe {
             FreeConsole();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Args {
+        Args::try_parse_from(std::iter::once("kget").chain(args.iter().copied()))
+            .unwrap_or_else(|e| panic!("{args:?}: {e}"))
+    }
+
+    #[test]
+    fn subcommands_coexist_with_the_url_argument() {
+        let a = parse(&["https://example.com/a.iso", "-a"]);
+        assert!(a.command.is_none() && a.url == "https://example.com/a.iso" && a.advanced);
+        assert!(matches!(parse(&["tui"]).command, Some(Command::Tui(_))));
+        assert!(matches!(
+            parse(&["tui", "--daemon"]).command,
+            Some(Command::Tui(TuiArgs { daemon: true, .. }))
+        ));
+        assert!(matches!(
+            parse(&["daemon", "status"]).command,
+            Some(Command::Daemon(DaemonArgs {
+                action: Some(DaemonAction::Status { .. }),
+                ..
+            }))
+        ));
+        assert!(matches!(parse(&["mcp"]).command, Some(Command::Mcp(_))));
+        assert!(matches!(
+            parse(&[
+                "queue",
+                "add",
+                "hf://org/repo",
+                "--include",
+                "*.json",
+                "--tag",
+                "x"
+            ])
+            .command,
+            Some(Command::Queue { .. })
+        ));
+        assert!(matches!(
+            parse(&["native-host"]).command,
+            Some(Command::NativeHost(NativeHostArgs { action: None, .. }))
+        ));
+        // Chrome passes the caller origin, Firefox the manifest path + id.
+        assert!(matches!(
+            parse(&["native-host", "chrome-extension://abc/"]).command,
+            Some(Command::NativeHost(NativeHostArgs { action: None, ref caller })) if caller.len() == 1
+        ));
+        assert!(matches!(
+            parse(&["native-host", "install", "--browser", "firefox"]).command,
+            Some(Command::NativeHost(NativeHostArgs {
+                action: Some(NativeHostAction::Install { ref browser, .. }),
+                ..
+            })) if browser == "firefox"
+        ));
+        // A local file named like a subcommand is still downloadable as ./tui.
+        assert_eq!(parse(&["./tui"]).url, "./tui");
     }
 }

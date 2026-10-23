@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>KGet options</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body class="options">
+    <header>
+      <img src="icons/icon-48.png" alt="" width="32" height="32" />
+      <h1>KGet options</h1>
+    </header>
+
+    <fieldset>
+      <legend>Downloads</legend>
+      <label class="row"><input type="checkbox" id="turbo" /> Use turbo mode (parallel connections) by default</label>
+      <p class="muted">Files are saved in KGet's download directory (<code>daemon.download_dir</code> in KGet's config, default <code>~/Downloads</code>).</p>
+    </fieldset>
+
+    <fieldset>
+      <legend>Intercept browser downloads</legend>
+      <label class="row"><input type="checkbox" id="intercept" /> Hand matching browser downloads to KGet</label>
+      <p class="muted">Needs the “downloads” permission (asked when you turn this on). If KGet is unavailable the browser downloads the file itself. Downloads that need a form submission (POST) cannot be handed over.</p>
+      <div class="field">
+        <span>File extensions (empty = any)</span>
+        <textarea id="interceptExtensions" rows="2"></textarea>
+      </div>
+      <div class="field">
+        <span>Minimum size in MB (0 = any; files of unknown size are intercepted)</span>
+        <input type="number" id="interceptMinSizeMb" min="0" step="1" />
+      </div>
+      <div class="field">
+        <span>Only on these domains (empty = all; subdomains included)</span>
+        <input type="text" id="interceptDomains" placeholder="example.com, releases.example.org" />
+      </div>
+      <div class="field">
+        <span>Never on these domains</span>
+        <input type="text" id="excludeDomains" placeholder="mail.google.com" />
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Cookies</legend>
+      <label class="row"><input type="checkbox" id="sendCookies" /> Send the site's cookies with downloads</label>
+      <p class="muted">Off by default. Lets KGet download files that need you to be logged in. Only the cookies for the download's URL are sent, as a <code>Cookie</code> header, to your local KGet. Needs the “cookies” permission and access to sites (asked when you turn this on).</p>
+    </fieldset>
+
+    <p id="saved" class="muted" hidden>Saved.</p>
+    <p id="error" class="error" hidden></p>
+
+    <script src="lib.js"></script>
+    <script src="options.js"></script>
+  </body>
+</html>

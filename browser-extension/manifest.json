@@ -1,0 +1,42 @@
+{
+  "manifest_version": 3,
+  "name": "KGet",
+  "short_name": "KGet",
+  "version": "1.8.0",
+  "description": "Send links, media and downloads to the KGet download manager.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAq4yfCQIbiWAAT+PxLi5WZq6bUQEiE10pyA+h/j8+BRhk6uqTkE9SGj44T5GR9BaDimmmXZDtsj+sP3AEfGfWDFp1XuvCtMAT0wK8ymVdN0lb3D4USrPo2Lg1ZqvWJfwMeCc/BOqV+X1Lyx4mGLXXadI3wR9N1mDStk8PrzonrTEuj63lvC0dNAKP0AN36ra/aoEp3BglEIr8k7fPpHgTSSAoD8EoxMk2HAE7LG/ZB40Hcy9ZPwnCuBSnWeK7e43lkl5NWTqs2z/sebzwzqCzS+dxpWcqPehjOAxQ/Fxb9u0uZtVtpooXqW5P0UcTlcwdUrgdgGMuZ1GMwda+ua4z2QIDAQAB",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "permissions": ["nativeMessaging", "contextMenus", "storage"],
+  "optional_permissions": ["downloads", "cookies"],
+  "optional_host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js",
+    "scripts": ["lib.js", "background.js"]
+  },
+  "action": {
+    "default_title": "KGet",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png"
+    }
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "kget@davimf721.github.io",
+      "strict_min_version": "128.0",
+      "data_collection_permissions": {
+        "required": ["none"]
+      }
+    }
+  }
+}
