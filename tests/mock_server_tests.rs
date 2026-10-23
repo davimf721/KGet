@@ -1050,6 +1050,9 @@ mod turbo {
             started.elapsed() < Duration::from_secs(5),
             "did not wait for the server"
         );
-        assert!(dir.path().join("c.bin.kget").exists(), "state kept for resume");
+        assert!(
+            dir.path().join("c.bin.kget").exists(),
+            "state kept for resume"
+        );
     }
 }

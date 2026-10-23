@@ -77,7 +77,7 @@ use std::fs::File;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
 use tokio::task::JoinSet;
@@ -98,7 +98,10 @@ const WRITE_BUF: usize = 256 * 1024;
 /// Version of the `.kget` state format
 const STATE_VERSION: u32 = 1;
 /// Work stealing never leaves either half of a split range below this size
-const MIN_SPLIT: u64 = 1024 * 1024;
+const MIN_SPLIT: u64 = 512 * 1024;
+// The owner of a split range may hold up to WRITE_BUF unwritten bytes (plus
+// one more piece) past its recorded position; the split point must be beyond.
+const _: () = assert!(MIN_SPLIT >= 2 * WRITE_BUF as u64);
 /// A range must have been in flight this long before it can be split
 const STEAL_GRACE: Duration = Duration::from_secs(1);
 /// Only ranges expected to need at least this long are worth splitting
@@ -126,25 +129,7 @@ pub enum ResumePolicy {
     AlwaysRestart,
 }
 
-/// The runtime that drives every turbo download.
-///
-/// It is process-wide and never dropped: pooled connections belong to the
-/// runtime that opened them, so one shared runtime lets downloads reuse them.
-fn runtime() -> &'static tokio::runtime::Runtime {
-    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-    RUNTIME.get_or_init(|| {
-        // I/O-bound work: a few threads are enough for 32 connections.
-        let workers = std::thread::available_parallelism()
-            .map_or(2, |n| n.get())
-            .clamp(2, 4);
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(workers)
-            .thread_name("kget-io")
-            .enable_all()
-            .build()
-            .expect("failed to start the download runtime")
-    })
-}
+use crate::http::io_runtime as runtime;
 
 /// Token bucket for global download rate limiting across parallel connections.
 ///
@@ -285,9 +270,38 @@ fn version_name(v: reqwest::Version) -> &'static str {
     }
 }
 
+/// A client plus whether its requests go over HTTP/3.
+///
+/// reqwest sends a request over QUIC only when the request itself asks for
+/// HTTP/3, even on an `http3_prior_knowledge` client.
+#[derive(Clone)]
+struct Conn {
+    client: Client,
+    h3: bool,
+}
+
+impl Conn {
+    fn request(&self, method: reqwest::Method, url: &str) -> reqwest::RequestBuilder {
+        let req = self.client.request(method, url);
+        if self.h3 {
+            req.version(reqwest::Version::HTTP_3)
+        } else {
+            req
+        }
+    }
+
+    fn get(&self, url: &str) -> reqwest::RequestBuilder {
+        self.request(reqwest::Method::GET, url)
+    }
+
+    fn head(&self, url: &str) -> reqwest::RequestBuilder {
+        self.request(reqwest::Method::HEAD, url)
+    }
+}
+
 /// Query size, range support and validators of `url`.
 async fn probe(
-    client: &Client,
+    client: &Conn,
     url: &str,
     headers: &[(String, String)],
 ) -> Result<RemoteInfo, BoxError> {
@@ -790,15 +804,18 @@ impl AdvancedDownloader {
     }
 
     /// Probe the main URL; an HTTP/3 failure falls back to HTTP/2 / HTTP/1.1.
-    fn probe_main(&self) -> Result<(Client, RemoteInfo), BoxError> {
+    fn probe_main(&self) -> Result<(Conn, RemoteInfo), BoxError> {
         let rt = runtime();
-        match rt.block_on(probe(&self.client, &self.url, &self.extra_headers)) {
-            Ok(info) => Ok((self.client.clone(), info)),
-            Err(e)
-                if self.http_version == HttpVersion::Http3
-                    && HttpVersion::http3_available()
-                    && !self.proxy.enabled =>
-            {
+        let h3 = self.http_version == HttpVersion::Http3
+            && HttpVersion::http3_available()
+            && !self.proxy.enabled;
+        let conn = Conn {
+            client: self.client.clone(),
+            h3,
+        };
+        match rt.block_on(probe(&conn, &self.url, &self.extra_headers)) {
+            Ok(info) => Ok((conn, info)),
+            Err(e) if h3 => {
                 self.send_status(&format!(
                     "HTTP/3 connection failed ({e}); falling back to HTTP/2 / HTTP/1.1"
                 ));
@@ -806,15 +823,16 @@ impl AdvancedDownloader {
                     &self.proxy,
                     &self.client_options().with_http_version(HttpVersion::Auto),
                 )?;
-                let info = rt.block_on(probe(&client, &self.url, &self.extra_headers))?;
-                Ok((client, info))
+                let conn = Conn { client, h3: false };
+                let info = rt.block_on(probe(&conn, &self.url, &self.extra_headers))?;
+                Ok((conn, info))
             }
             Err(e) => Err(e),
         }
     }
 
     /// The main URL plus every usable mirror, each with its connections.
-    fn build_sources(&self, client: Client, main: RemoteInfo, workers: usize) -> Vec<Source> {
+    fn build_sources(&self, client: Conn, main: RemoteInfo, workers: usize) -> Vec<Source> {
         let mut found = vec![(self.url.clone(), main.clone(), client.clone())];
         if !self.mirrors.is_empty() {
             let probes = runtime().block_on(async {
@@ -871,7 +889,10 @@ impl AdvancedDownloader {
                     let opts = self.client_options().with_http_version(pref);
                     for _ in 1..conns {
                         match http::build_async_client(&self.proxy, &opts) {
-                            Ok(c) => clients.push(c),
+                            Ok(client) => clients.push(Conn {
+                                client,
+                                h3: pref == HttpVersion::Http3,
+                            }),
                             Err(_) => break,
                         }
                     }
@@ -1066,6 +1087,7 @@ impl AdvancedDownloader {
                 .speed_limit
                 .map(|limit| Mutex::new(TokenBucket::new(limit))),
             stop: watch::Sender::new(false),
+            released: tokio::sync::Notify::new(),
             finished: AtomicBool::new(false),
             discard_state: AtomicBool::new(false),
             bar: bar.clone(),
@@ -1224,7 +1246,7 @@ struct Source {
     url: String,
     remote: RemoteInfo,
     /// One client per TCP connection for multiplexed servers, else one pool
-    clients: Vec<Client>,
+    clients: Vec<Conn>,
     alive: AtomicBool,
 }
 
@@ -1248,6 +1270,8 @@ struct Engine {
     throttle: Option<Mutex<TokenBucket>>,
     /// Set on cancellation or when a worker failed: everyone stops
     stop: watch::Sender<bool>,
+    /// A worker released its range (finished, or failed and stopped)
+    released: tokio::sync::Notify,
     finished: AtomicBool,
     /// The remote file changed: the state must not be resumed
     discard_state: AtomicBool,
@@ -1271,7 +1295,10 @@ impl Engine {
             if let Err(e) = r {
                 self.stop.send_replace(true);
                 // Report the root cause, not the cancellations it triggered.
-                if first.as_ref().is_none_or(|f| is_cancel(f) && !is_cancel(&e)) {
+                if first
+                    .as_ref()
+                    .is_none_or(|f| is_cancel(f) && !is_cancel(&e))
+                {
                     first = Some(e);
                 }
             }
@@ -1395,13 +1422,24 @@ impl Engine {
             if self.stopped() {
                 return Err(Box::new(KgetError::Cancelled));
             }
+            // Registered before asking, so a range released meanwhile still wakes us.
+            let released = self.released.notified();
+            tokio::pin!(released);
+            released.as_mut().enable();
             match self.sched.next() {
                 Next::Work(slot) => {
                     let r = self.fetch_slot(id, &slot, &mut rx).await;
                     slot.active.store(false, Ordering::Release);
+                    self.released.notify_waiters();
                     r?;
                 }
-                Next::Wait => self.sleep(Duration::from_millis(200), &mut rx).await,
+                Next::Wait => {
+                    // Re-check periodically: in-flight ranges become stealable.
+                    tokio::select! {
+                        _ = released => {}
+                        _ = self.sleep(Duration::from_millis(200), &mut rx) => {}
+                    }
+                }
                 Next::Done => return Ok(()),
             }
         }
@@ -1472,7 +1510,7 @@ impl Engine {
     async fn attempt(
         &self,
         src_idx: usize,
-        client: &Client,
+        client: &Conn,
         slot: &Slot,
         rx: &mut watch::Receiver<bool>,
     ) -> Result<(), ChunkError> {
@@ -1483,7 +1521,10 @@ impl Engine {
             return Ok(());
         }
         let mut req = http::apply_headers_async(client.get(&src.url), &self.dl.extra_headers)
-            .header(reqwest::header::RANGE, format!("bytes={}-{}", start, end - 1));
+            .header(
+                reqwest::header::RANGE,
+                format!("bytes={}-{}", start, end - 1),
+            );
         // If-Range: if the file changed on the server it answers 200 instead of 206
         if let Some(v) = src.remote.if_range() {
             req = req.header(reqwest::header::IF_RANGE, v);
@@ -1581,10 +1622,10 @@ impl Engine {
         let data = std::mem::replace(buf, Vec::with_capacity(WRITE_BUF));
         let n = data.len() as u64;
         let offset = slot.pos();
-        let file = self.file.clone();
-        tokio::task::spawn_blocking(move || write_all_at(&file, &data, offset))
-            .await
-            .map_err(|e| format!("write task failed: {e}"))?
+        // A positional write into the page cache is short; block_in_place lets
+        // the runtime move other tasks off this worker meanwhile, without the
+        // thread hop (and copy of ownership) of spawn_blocking.
+        tokio::task::block_in_place(|| write_all_at(&self.file, &data, offset))
             .map_err(|e| Box::new(KgetError::Io(e)) as BoxError)?;
         slot.done.fetch_add(n, Ordering::Release);
         self.downloaded.fetch_add(n, Ordering::Relaxed);
@@ -1638,14 +1679,51 @@ mod tests {
         }
     }
 
+    /// Live turbo download over HTTP/3:
+    /// `RUSTFLAGS="--cfg reqwest_unstable" cargo test --features http3 --lib -- --ignored live_turbo_http3`
+    #[cfg(all(feature = "http3", reqwest_unstable))]
+    #[test]
+    #[ignore = "needs network access to an HTTP/3 server"]
+    fn live_turbo_http3() {
+        let dir = std::env::temp_dir().join(format!("kget-h3-{}", std::process::id()));
+        let out = dir.join("h3.bin");
+        let mut dl = AdvancedDownloader::new(
+            "https://www.google.com/robots.txt".into(),
+            out.to_string_lossy().into_owned(),
+            true,
+            ProxyConfig::default(),
+            Optimizer::new(),
+        )
+        .unwrap();
+        dl.set_http_version(HttpVersion::Http3).unwrap();
+        let log: Arc<Mutex<Vec<String>>> = Arc::default();
+        let l = log.clone();
+        dl.set_status_callback(move |m| l.lock().unwrap().push(m));
+        dl.download().unwrap();
+        assert!(std::fs::metadata(&out).unwrap().len() > 0);
+        let _ = std::fs::remove_dir_all(&dir);
+        let log = log.lock().unwrap();
+        assert!(!log.iter().any(|m| m.contains("falling back")), "{log:?}");
+        assert!(
+            log.iter().any(|m| m.contains("negotiated HTTP/3")),
+            "{log:?}"
+        );
+    }
+
     #[test]
     fn state_must_cover_the_file_exactly() {
         assert!(state(&[(0, 5, 5), (5, 10, 0)], 10).covers_file());
         // Splits are appended out of order.
         assert!(state(&[(0, 3, 1), (6, 10, 0), (3, 6, 2)], 10).covers_file());
         assert!(!state(&[(0, 5, 5)], 10).covers_file(), "gap at the end");
-        assert!(!state(&[(0, 6, 0), (5, 10, 0)], 10).covers_file(), "overlap");
-        assert!(!state(&[(0, 5, 6), (5, 10, 0)], 10).covers_file(), "overfull");
+        assert!(
+            !state(&[(0, 6, 0), (5, 10, 0)], 10).covers_file(),
+            "overlap"
+        );
+        assert!(
+            !state(&[(0, 5, 6), (5, 10, 0)], 10).covers_file(),
+            "overfull"
+        );
     }
 
     #[test]
@@ -1676,7 +1754,10 @@ mod tests {
             panic!("expected a split");
         };
         assert_eq!(slot.end.load(Ordering::Relaxed), big / 2);
-        assert_eq!((stolen.start, stolen.end.load(Ordering::Relaxed)), (big / 2, big));
+        assert_eq!(
+            (stolen.start, stolen.end.load(Ordering::Relaxed)),
+            (big / 2, big)
+        );
         assert_eq!(sched.steals.load(Ordering::Relaxed), 1);
         slot.active.store(false, Ordering::Relaxed);
         stolen.done.store(big / 2, Ordering::Relaxed);

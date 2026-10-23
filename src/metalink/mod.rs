@@ -294,8 +294,9 @@ fn download_one_file(
     // Several mirrors: fetch different chunks from all of them at once.
     if file.urls.len() > 1 {
         let urls: Vec<String> = file.urls.iter().map(|u| u.url.clone()).collect();
-        let result = download_from_mirrors(&urls, &dest, quiet, proxy, optimizer, file.sha256.clone())
-            .and_then(|()| verify_file(file, &dest, "parallel mirrors", quiet, status));
+        let result =
+            download_from_mirrors(&urls, &dest, quiet, proxy, optimizer, file.sha256.clone())
+                .and_then(|()| verify_file(file, &dest, "parallel mirrors", quiet, status));
         match result {
             Ok(()) => return Ok(()),
             Err(e) if is_cancelled(e.as_ref()) => return Err(e),

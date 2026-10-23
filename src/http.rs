@@ -25,7 +25,30 @@
 use crate::config::{ProxyConfig, ProxyType};
 use crate::error::KgetError;
 use reqwest::blocking::{Client, RequestBuilder, Response};
+use std::sync::OnceLock;
 use std::time::Duration;
+
+/// The runtime that drives every async (turbo) download.
+///
+/// It is process-wide and never dropped: pooled connections (and QUIC
+/// endpoints) belong to the runtime that opened them, so one shared runtime
+/// lets downloads reuse them.
+pub(crate) fn io_runtime() -> &'static tokio::runtime::Runtime {
+    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RUNTIME.get_or_init(|| {
+        // I/O-bound work: a few threads serve 32 connections. On very fast
+        // links copying the bodies is the bottleneck, so allow up to 8.
+        let workers = std::thread::available_parallelism()
+            .map_or(2, |n| n.get())
+            .clamp(2, 8);
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(workers)
+            .thread_name("kget-io")
+            .enable_all()
+            .build()
+            .expect("failed to start the download runtime")
+    })
+}
 
 /// Which HTTP version a client speaks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -188,6 +211,11 @@ pub fn build_async_client(
         b = b.proxy(p);
     }
     b = apply_version!(b, opts.http_version, proxy.enabled);
+    // The HTTP/3 (QUIC) endpoint binds its UDP socket to the current runtime:
+    // outside one, bind it to the shared download runtime.
+    let _guard = (opts.http_version == HttpVersion::Http3
+        && tokio::runtime::Handle::try_current().is_err())
+    .then(|| io_runtime().enter());
     b.build()
         .map_err(|e| KgetError::Protocol(format!("Failed to create HTTP client: {e}")))
 }
@@ -311,8 +339,28 @@ mod tests {
             ..ProxyConfig::default()
         };
         let opts = ClientOptions::default().with_http_version(HttpVersion::Http3);
-        assert!(build_async_client(&proxy, &opts).is_ok());
-        assert!(build_async_client(&ProxyConfig::default(), &opts).is_ok());
+        build_async_client(&proxy, &opts).unwrap();
+        build_async_client(&ProxyConfig::default(), &opts).unwrap();
+    }
+
+    /// Live check of the HTTP/3 path:
+    /// `RUSTFLAGS="--cfg reqwest_unstable" cargo test --features http3 --lib -- --ignored live_http3`
+    #[cfg(all(feature = "http3", reqwest_unstable))]
+    #[test]
+    #[ignore = "needs network access to an HTTP/3 server"]
+    fn live_http3_request() {
+        let opts = ClientOptions::default().with_http_version(HttpVersion::Http3);
+        let client = build_async_client(&ProxyConfig::default(), &opts).unwrap();
+        let version = io_runtime().block_on(async {
+            let resp = client
+                .head("https://cloudflare-quic.com/")
+                .version(reqwest::Version::HTTP_3)
+                .send()
+                .await
+                .unwrap();
+            resp.version()
+        });
+        assert_eq!(version, reqwest::Version::HTTP_3);
     }
 
     #[test]
