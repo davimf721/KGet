@@ -1,0 +1,31 @@
+[package]
+name = "kget-ffi"
+version = "1.7.1"
+edition = "2024"
+description = "UniFFI bindings (Swift, Kotlin) over the KGet job engine"
+authors = ["Davi Moreira Fuzatto <davimoreiraf@gmail.com>"]
+license = "MIT"
+repository = "https://github.com/davimf721/KGet"
+publish = false
+
+[lib]
+name = "kget_ffi"
+# `lib` for Rust tests, `staticlib` for XCFrameworks (iOS/macOS),
+# `cdylib` for Kotlin/JNA and for binding generation in library mode.
+crate-type = ["lib", "staticlib", "cdylib"]
+
+# Standard UniFFI pattern: the bindings generator pinned to the same uniffi
+# version as the scaffolding (see scripts/gen-bindings.sh).
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+
+[dependencies]
+# No `tui` (terminal UI deps are useless in an app); keychain stays on.
+kget = { package = "Kget", path = "../..", default-features = false, features = ["keychain"] }
+uniffi = { version = "0.32.2", features = ["cli"] }
+
+[dev-dependencies]
+tempfile = "3.10"
+tokio = { version = "1.0", features = ["full"] }
+wiremock = "0.6"

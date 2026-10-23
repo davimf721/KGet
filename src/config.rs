@@ -388,10 +388,33 @@ impl Default for Config {
     }
 }
 
+/// Directory set by [`set_config_dir_override`].
+static CONFIG_DIR_OVERRIDE: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
+
+/// Use `dir` as the config directory for the rest of the process, ahead of
+/// `KGET_CONFIG_DIR` and the OS default; `None` restores the normal lookup.
+///
+/// Meant for embedders (`kget-ffi`): sandboxed apps pass their container
+/// directory, and iOS has no OS config dir at all. Unlike setting the
+/// environment variable, this is safe while other threads are running.
+pub fn set_config_dir_override(dir: Option<PathBuf>) {
+    *CONFIG_DIR_OVERRIDE
+        .write()
+        .unwrap_or_else(|e| e.into_inner()) = dir;
+}
+
 /// Directory holding `config.json` and `history.db`.
 ///
-/// Honours `KGET_CONFIG_DIR`; otherwise `<OS config dir>/kget`.
+/// Honours [`set_config_dir_override`], then `KGET_CONFIG_DIR`; otherwise
+/// `<OS config dir>/kget`.
 pub fn config_dir() -> Result<PathBuf, io::Error> {
+    if let Some(dir) = CONFIG_DIR_OVERRIDE
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+    {
+        return Ok(dir);
+    }
     if let Some(dir) = std::env::var_os("KGET_CONFIG_DIR").filter(|d| !d.is_empty()) {
         return Ok(PathBuf::from(dir));
     }
