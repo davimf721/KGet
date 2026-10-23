@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>KGet</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body class="popup">
+    <header>
+      <img src="icons/icon-32.png" alt="" width="20" height="20" />
+      <h1>KGet</h1>
+      <a href="#" id="open-options" title="Options">Options</a>
+    </header>
+
+    <section id="not-installed" hidden>
+      <h2>KGet is not connected</h2>
+      <pre id="hint"></pre>
+      <p class="muted">
+        Install KGet from <a href="https://github.com/davimf721/KGet" target="_blank" rel="noopener">github.com/davimf721/KGet</a>,
+        register the native host, then restart the browser.
+      </p>
+      <button id="retry">Try again</button>
+    </section>
+
+    <form id="add-form">
+      <input id="add-url" type="url" placeholder="Paste a link to download" required />
+      <button type="submit">Add</button>
+    </form>
+
+    <p id="error" class="error" hidden></p>
+
+    <ul id="jobs"></ul>
+    <p id="empty" class="muted">No downloads yet. Right-click a link and choose “Download with KGet”.</p>
+
+    <footer>
+      <button id="clear" class="link">Clear finished</button>
+    </footer>
+
+    <script src="lib.js"></script>
+    <script src="popup.js"></script>
+  </body>
+</html>

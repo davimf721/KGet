@@ -90,6 +90,7 @@ pub mod http;
 pub mod jobs;
 pub mod mcp;
 pub mod metalink;
+pub mod native_host;
 pub mod optimization;
 pub mod progress;
 pub mod protocol;
