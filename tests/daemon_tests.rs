@@ -154,7 +154,9 @@ async fn submit_streams_events_until_completed() {
 
         let v = c.call("version", Value::Null).unwrap();
         assert_eq!(v["protocol"], 1);
-        assert_eq!(v["transport"], "unix");
+        // Unix sockets by default; Windows falls back to token-guarded TCP.
+        let expected_transport = if cfg!(unix) { "unix" } else { "tcp" };
+        assert_eq!(v["transport"], expected_transport);
 
         let events = c.events(&SubscribeParams::default()).unwrap();
         let mut params = SubmitParams::new(url);
