@@ -199,7 +199,7 @@ pub struct FileProgressEntry {
 /// {"v":1,"event":"duplicate","kind":"url","action":"skip","path":"/abs/x.iso","existing_id":"…"}
 /// {"v":1,"event":"duplicate","kind":"content","action":"linked","path":"/abs/old.iso","existing_id":"…","sha256":"…"}
 /// ```
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum JsonEvent {
     /// The download started.

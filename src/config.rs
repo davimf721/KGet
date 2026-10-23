@@ -274,6 +274,48 @@ impl Default for SftpConfig {
     }
 }
 
+/// Settings of the background daemon (`kget daemon`) and the MCP server
+/// (`kget mcp`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DaemonConfig {
+    /// Directory jobs submitted to the daemon are saved in, and the only one
+    /// they may write to unless `allow_outside_download_dir` is set
+    /// (`None` = the OS download directory, e.g. `~/Downloads`)
+    pub download_dir: Option<String>,
+    /// Let clients choose output paths outside `download_dir`
+    pub allow_outside_download_dir: bool,
+    /// Number of jobs the daemon runs at the same time
+    pub max_concurrent: usize,
+}
+
+impl Default for DaemonConfig {
+    fn default() -> Self {
+        Self {
+            download_dir: None,
+            allow_outside_download_dir: false,
+            max_concurrent: crate::jobs::DEFAULT_MAX_CONCURRENT,
+        }
+    }
+}
+
+impl DaemonConfig {
+    /// The download directory: the configured one (with `~` expanded), else
+    /// the OS download directory, else `~/Downloads`, else `./downloads`.
+    pub fn resolved_download_dir(&self) -> PathBuf {
+        if let Some(dir) = self
+            .download_dir
+            .as_deref()
+            .filter(|d| !d.trim().is_empty())
+        {
+            return PathBuf::from(crate::utils::expand_tilde(dir));
+        }
+        dirs::download_dir()
+            .or_else(|| dirs::home_dir().map(|h| h.join("Downloads")))
+            .unwrap_or_else(|| PathBuf::from("downloads"))
+    }
+}
+
 /// Main configuration structure containing all KGet settings.
 ///
 /// This is the top-level configuration object that aggregates
@@ -324,6 +366,8 @@ pub struct Config {
     pub organize_dir: Option<String>,
     /// User-defined smart rules, in order: the first match wins
     pub rules: Vec<crate::rules::Rule>,
+    /// Daemon and MCP server settings
+    pub daemon: DaemonConfig,
 }
 
 impl Default for Config {
@@ -339,6 +383,7 @@ impl Default for Config {
             builtin_rules: true,
             organize_dir: None,
             rules: Vec::new(),
+            daemon: DaemonConfig::default(),
         }
     }
 }

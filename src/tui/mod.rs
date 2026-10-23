@@ -29,7 +29,7 @@ use ratatui::layout::{Position, Rect};
 use std::io::{self, Stdout};
 use std::time::{Duration, Instant};
 
-pub use source::{JobSource, LocalSource};
+pub use source::{DaemonSource, JobSource, LocalSource};
 use state::{Action, App, Focus, Tab};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -37,11 +37,32 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 /// How often the screen is redrawn and events are drained.
 const TICK: Duration = Duration::from_millis(200);
 
-/// Run the terminal UI with downloads in this process.
-pub fn run(config: Config) -> Result<(), BoxError> {
-    let manager = JobManager::new(config);
-    let mut source = LocalSource::new(manager);
-    run_with_source(&mut source)
+/// Where `kget tui` runs downloads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// The running daemon if there is one, else this process
+    Auto,
+    /// Always this process (`--local`)
+    Local,
+    /// The daemon, started if needed (`--daemon`)
+    Daemon,
+}
+
+/// Run the terminal UI.
+pub fn run(config: Config, mode: Mode) -> Result<(), BoxError> {
+    let daemon = match mode {
+        Mode::Local => None,
+        Mode::Auto => DaemonSource::connect(false).ok(),
+        Mode::Daemon => Some(DaemonSource::connect(true)?),
+    };
+    match daemon {
+        Some(mut source) => run_with_source(&mut source),
+        None => {
+            let manager = JobManager::new(config);
+            let mut source = LocalSource::new(manager);
+            run_with_source(&mut source)
+        }
+    }
 }
 
 /// Run the terminal UI against any job source (in-process, daemon…).

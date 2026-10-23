@@ -1,10 +1,12 @@
 //! Where the TUI gets jobs and events from, and where it sends commands.
 //!
 //! The UI only talks to a [`JobSource`]. [`LocalSource`] runs downloads in
-//! this process on a [`JobManager`]; a client of `kget daemon` only needs
-//! another implementation of the trait (submit/pause/… as requests, events
-//! from the daemon's stream) and a constructor in [`super::run`].
+//! this process on a [`JobManager`]; [`DaemonSource`] drives the queue of a
+//! running `kget daemon` (requests for commands, its event stream for
+//! updates), so downloads keep going after the UI exits.
 
+use kget::daemon::client::DaemonClient;
+use kget::daemon::protocol::{SubmitParams, SubscribeParams};
 use kget::jobs::{JobEvent, JobId, JobInfo, JobManager};
 use kget::queue::{DownloadHistory, HistoryEntry, HistoryQuery};
 use kget::runner::DownloadJob;
@@ -97,5 +99,105 @@ impl JobSource for LocalSource {
         }
         // Give the workers a moment to flush their partial data.
         self.manager.wait_idle(Some(Duration::from_secs(5)));
+    }
+}
+
+/// Jobs run by the background daemon (`kget daemon`).
+pub struct DaemonSource {
+    client: DaemonClient,
+    events: Receiver<serde_json::Value>,
+    label: String,
+}
+
+impl DaemonSource {
+    /// Attach to the running daemon; with `start`, start one if needed.
+    pub fn connect(start: bool) -> Result<Self, String> {
+        let client = if start {
+            DaemonClient::ensure_running()
+        } else {
+            DaemonClient::connect_default()
+        }
+        .map_err(|e| e.to_string())?;
+        // Subscribe before the first snapshot so no event is missed.
+        let events = client
+            .events(&SubscribeParams::default())
+            .map_err(|e| e.to_string())?;
+        let version = client
+            .call("version", serde_json::Value::Null)
+            .map_err(|e| e.to_string())?;
+        let label = match version.get("download_dir").and_then(|d| d.as_str()) {
+            Some(dir) => format!("daemon, {dir}"),
+            None => "daemon".to_string(),
+        };
+        Ok(Self {
+            client,
+            events,
+            label,
+        })
+    }
+
+    fn action(&self, method: &str, id: JobId) -> Result<(), String> {
+        self.client
+            .call(method, serde_json::json!({ "id": id }))
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+}
+
+impl JobSource for DaemonSource {
+    fn label(&self) -> String {
+        self.label.clone()
+    }
+
+    fn submit(&self, job: DownloadJob) -> Result<JobId, String> {
+        let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+        let info = self
+            .client
+            .submit(&SubmitParams::from_job(&job, &cwd))
+            .map_err(|e| e.to_string())?;
+        info.get("id")
+            .and_then(|id| id.as_u64())
+            .ok_or_else(|| "The daemon returned no job id".to_string())
+    }
+
+    fn pause(&self, id: JobId) -> Result<(), String> {
+        self.action("pause", id)
+    }
+
+    fn resume(&self, id: JobId) -> Result<(), String> {
+        self.action("resume", id)
+    }
+
+    fn cancel(&self, id: JobId) -> Result<(), String> {
+        self.action("cancel", id)
+    }
+
+    fn remove(&self, id: JobId) -> Result<(), String> {
+        self.action("remove", id)
+    }
+
+    fn snapshot(&self) -> Vec<JobInfo> {
+        self.client
+            .list()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|v| serde_json::from_value(v).ok())
+            .collect()
+    }
+
+    fn poll_events(&mut self) -> Vec<JobEvent> {
+        self.events
+            .try_iter()
+            .filter_map(|v| serde_json::from_value(v).ok())
+            .collect()
+    }
+
+    fn history(&self, query: &HistoryQuery) -> Result<Vec<HistoryEntry>, String> {
+        // The daemon is local and records into the same history database.
+        DownloadHistory::query(query).map_err(|e| e.to_string())
+    }
+
+    fn shutdown(&mut self) {
+        // Downloads belong to the daemon and keep running.
     }
 }

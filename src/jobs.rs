@@ -166,7 +166,7 @@ pub struct JobInfo {
 }
 
 /// Event broadcast to every subscriber of a [`JobManager`].
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum JobEvent {
     /// A job changed state (including `Queued` when it is submitted or
@@ -360,6 +360,48 @@ impl JobManager {
         }
         self.inner.schedule();
         id
+    }
+
+    /// Re-create a job saved by an earlier process (the daemon's persistent
+    /// queue), keeping its id. A `Queued`, `Running` or `Verifying` snapshot
+    /// is queued again and continues from its partial data; any other state
+    /// is restored as is. Ids handed out later are greater than `info.id`.
+    ///
+    /// Returns `false` (and changes nothing) when the id is already in use.
+    pub fn restore(&self, mut info: JobInfo) -> bool {
+        let id = info.id;
+        let queued = matches!(
+            info.state,
+            DownloadState::Queued | DownloadState::Running | DownloadState::Verifying
+        );
+        if queued {
+            info.state = DownloadState::Queued;
+            info.job.resume = true;
+            info.finished_at = None;
+            info.error = None;
+        }
+        {
+            let mut st = self.inner.lock();
+            if st.jobs.contains_key(&id) {
+                return false;
+            }
+            self.inner.next_id.fetch_max(id + 1, Ordering::Relaxed);
+            st.jobs.insert(
+                id,
+                Entry {
+                    info,
+                    cancel: Arc::new(AtomicBool::new(false)),
+                    stop: None,
+                },
+            );
+            if queued {
+                st.queue.push_back(id);
+                self.inner
+                    .broadcast(state_event(id, DownloadState::Queued, None));
+            }
+        }
+        self.inner.schedule();
+        true
     }
 
     /// Cancel a queued or running job. Partial data is kept, so the job can
@@ -746,6 +788,35 @@ mod tests {
             serde_json::to_string(&DownloadState::Completed).unwrap(),
             "\"completed\""
         );
+    }
+
+    #[test]
+    fn job_events_round_trip_through_json() {
+        // Daemon clients (the TUI's DaemonSource) parse the events back.
+        let events = [
+            state_event(3, DownloadState::Failed, Some("boom".into())),
+            JobEvent::Download {
+                id: 3,
+                event: JsonEvent::Phase {
+                    phase: Phase::Verifying,
+                    algorithm: Some("sha256".into()),
+                },
+            },
+            JobEvent::Download {
+                id: 3,
+                event: JsonEvent::TorrentStats(Box::default()),
+            },
+            JobEvent::Removed { id: 3 },
+        ];
+        for ev in events {
+            let json = serde_json::to_string(&ev).unwrap();
+            let back: JobEvent = serde_json::from_str(&json).unwrap();
+            assert_eq!(serde_json::to_string(&back).unwrap(), json);
+        }
+        // `--jsonl` lines (with "v" and a batch "url") parse too.
+        let line = r#"{"v":1,"url":"https://x/y","event":"saved","path":"/a","bytes":2}"#;
+        let ev: JsonEvent = serde_json::from_str(line).unwrap();
+        assert!(matches!(ev, JsonEvent::Saved { bytes: 2, .. }));
     }
 
     #[test]
