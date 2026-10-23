@@ -33,21 +33,26 @@ use std::time::Duration;
 /// It is process-wide and never dropped: pooled connections (and QUIC
 /// endpoints) belong to the runtime that opened them, so one shared runtime
 /// lets downloads reuse them.
-pub(crate) fn io_runtime() -> &'static tokio::runtime::Runtime {
+pub(crate) fn io_runtime() -> Result<&'static tokio::runtime::Runtime, KgetError> {
     static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-    RUNTIME.get_or_init(|| {
-        // I/O-bound work: a few threads serve 32 connections. On very fast
-        // links copying the bodies is the bottleneck, so allow up to 8.
-        let workers = std::thread::available_parallelism()
-            .map_or(2, |n| n.get())
-            .clamp(2, 8);
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(workers)
-            .thread_name("kget-io")
-            .enable_all()
-            .build()
-            .expect("failed to start the download runtime")
-    })
+    if let Some(rt) = RUNTIME.get() {
+        return Ok(rt);
+    }
+    // I/O-bound work: a few threads serve 32 connections. On very fast
+    // links copying the bodies is the bottleneck, so allow up to 8.
+    let workers = std::thread::available_parallelism()
+        .map_or(2, |n| n.get())
+        .clamp(2, 8);
+    // Built outside `get_or_init` so a failure (no threads left) is an error
+    // the next download can retry, not a panic. If two threads race here,
+    // the loser's runtime is dropped unused.
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(workers)
+        .thread_name("kget-io")
+        .enable_all()
+        .build()
+        .map_err(|e| KgetError::Other(format!("Cannot start the download runtime: {e}")))?;
+    Ok(RUNTIME.get_or_init(|| rt))
 }
 
 /// Which HTTP version a client speaks.
@@ -269,9 +274,14 @@ pub fn build_async_client(
     b = apply_version!(b, opts.http_version, proxy.enabled);
     // The HTTP/3 (QUIC) endpoint binds its UDP socket to the current runtime:
     // outside one, bind it to the shared download runtime.
-    let _guard = (opts.http_version == HttpVersion::Http3
-        && tokio::runtime::Handle::try_current().is_err())
-    .then(|| io_runtime().enter());
+    let rt = if opts.http_version == HttpVersion::Http3
+        && tokio::runtime::Handle::try_current().is_err()
+    {
+        Some(io_runtime()?)
+    } else {
+        None
+    };
+    let _guard = rt.map(|rt| rt.enter());
     b.build()
         .map_err(|e| KgetError::Protocol(format!("Failed to create HTTP client: {e}")))
 }
@@ -433,7 +443,7 @@ mod tests {
     fn live_http3_request() {
         let opts = ClientOptions::default().with_http_version(HttpVersion::Http3);
         let client = build_async_client(&ProxyConfig::default(), &opts).unwrap();
-        let version = io_runtime().block_on(async {
+        let version = io_runtime().unwrap().block_on(async {
             let resp = client
                 .head("https://cloudflare-quic.com/")
                 .version(reqwest::Version::HTTP_3)

@@ -67,16 +67,18 @@ pub fn create_progress_bar(
         let template = "{msg}\n{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({percent}%) eta: {eta} speed: {binary_bytes_per_sec}";
 
         bar.set_style(
+            // Constant templates: the fallbacks only guard against an
+            // indicatif upgrade rejecting them.
             ProgressStyle::default_bar()
                 .template(template)
-                .unwrap()
+                .unwrap_or_else(|_| ProgressStyle::default_bar())
                 .progress_chars("=>-"),
         );
     } else {
         bar.set_style(
             ProgressStyle::default_spinner()
                 .template("{spinner:.green} {msg} {elapsed}")
-                .unwrap(),
+                .unwrap_or_else(|_| ProgressStyle::default_spinner()),
         );
     }
 

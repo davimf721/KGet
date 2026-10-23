@@ -200,8 +200,19 @@ fn accept_loop(listener: &Listener, service: &Service, shutdown: &Arc<AtomicBool
                 let spawned = std::thread::Builder::new()
                     .name("kget-daemon-conn".into())
                     .spawn(move || {
-                        if let Ok(conn) = Connection::new(stream, service, token) {
-                            conn.serve();
+                        let log_to = service.clone();
+                        // A panic drops this client only; the slot is freed
+                        // either way (a leaked one used to count toward
+                        // MAX_CONNECTIONS forever).
+                        let served = crate::guard::catch(|| {
+                            if let Ok(conn) = Connection::new(stream, service, token) {
+                                conn.serve();
+                            }
+                        });
+                        if let Err(msg) = served {
+                            log_to
+                                .logger()
+                                .warn(&format!("connection handler panicked: {msg}"));
                         }
                         count.fetch_sub(1, Ordering::SeqCst);
                     });
@@ -402,7 +413,14 @@ impl Connection {
                 m if self.service.shutdown_flag().load(Ordering::SeqCst) && m != "version" => Err(
                     RpcError::new(codes::SHUTTING_DOWN, "The daemon is shutting down"),
                 ),
-                m => self.service.handle(m, params),
+                // A panicking method gets an error reply; the connection and
+                // the daemon keep serving.
+                m => crate::guard::catch(|| self.service.handle(m, params)).unwrap_or_else(|msg| {
+                    self.service
+                        .logger()
+                        .warn(&format!("method '{m}' panicked: {msg}"));
+                    Err(RpcError::internal(format!("'{m}' panicked: {msg}")))
+                }),
             }
         };
 

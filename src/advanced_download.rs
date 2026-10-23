@@ -67,6 +67,7 @@
 use crate::DownloadOptions;
 use crate::config::ProxyConfig;
 use crate::error::KgetError;
+use crate::guard;
 use crate::http::{self, ClientOptions, HttpVersion};
 use crate::optimization::Optimizer;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -809,7 +810,7 @@ impl AdvancedDownloader {
             .max_connections()
             .min(remaining.div_ceil(MIN_SPLIT).max(1) as usize)
             .max(1);
-        let sources = self.build_sources(client, remote, workers);
+        let sources = self.build_sources(client, remote, workers)?;
 
         let result = self.download_chunks(file.clone(), state, &state_path, sources, workers);
         if let Err(e) = result {
@@ -837,7 +838,7 @@ impl AdvancedDownloader {
 
     /// Probe the main URL; an HTTP/3 failure falls back to HTTP/2 / HTTP/1.1.
     fn probe_main(&self) -> Result<(Conn, RemoteInfo), BoxError> {
-        let rt = runtime();
+        let rt = runtime()?;
         let h3 = self.http_version == HttpVersion::Http3
             && HttpVersion::http3_available()
             && !self.proxy.enabled;
@@ -864,10 +865,15 @@ impl AdvancedDownloader {
     }
 
     /// The main URL plus every usable mirror, each with its connections.
-    fn build_sources(&self, client: Conn, main: RemoteInfo, workers: usize) -> Vec<Source> {
+    fn build_sources(
+        &self,
+        client: Conn,
+        main: RemoteInfo,
+        workers: usize,
+    ) -> Result<Vec<Source>, BoxError> {
         let mut found = vec![(self.url.clone(), main.clone(), client.clone())];
         if !self.mirrors.is_empty() {
-            let probes = runtime().block_on(async {
+            let probes = runtime()?.block_on(async {
                 let mut set = JoinSet::new();
                 for (i, url) in self.mirrors.iter().cloned().enumerate() {
                     let (client, headers) = (client.clone(), self.extra_headers.clone());
@@ -901,7 +907,7 @@ impl AdvancedDownloader {
         }
 
         let n = found.len();
-        found
+        Ok(found
             .into_iter()
             .enumerate()
             .map(|(i, (url, remote, client))| {
@@ -941,7 +947,7 @@ impl AdvancedDownloader {
                     alive: AtomicBool::new(true),
                 }
             })
-            .collect()
+            .collect())
     }
 
     /// Server without range support (or unknown size): one stream, still via `.part`.
@@ -1087,7 +1093,7 @@ impl AdvancedDownloader {
                 ProgressStyle::with_template(
                     "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})",
                 )
-                .unwrap()
+                .unwrap_or_else(|_| ProgressStyle::default_bar())
                 .progress_chars("#>-"),
             );
         }
@@ -1128,7 +1134,7 @@ impl AdvancedDownloader {
             state_path: state_path.to_path_buf(),
         });
 
-        let result = runtime().block_on(engine.clone().run(workers));
+        let result = runtime()?.block_on(engine.clone().run(workers));
 
         // Always persist the final state so an interrupted run can resume.
         let final_state = engine.snapshot();
@@ -1198,8 +1204,7 @@ impl Slot {
 
     fn claim(&self) {
         self.active.store(true, Ordering::Release);
-        *self.claim.lock().expect("slot poisoned") =
-            (Instant::now(), self.done.load(Ordering::Acquire));
+        *guard::lock(&self.claim) = (Instant::now(), self.done.load(Ordering::Acquire));
     }
 }
 
@@ -1219,7 +1224,7 @@ impl Scheduler {
     /// The next range for an idle worker: an unclaimed one, else half of the
     /// in-flight range expected to finish last.
     fn next(&self) -> Next {
-        let mut slots = self.slots.lock().expect("scheduler poisoned");
+        let mut slots = guard::lock(&self.slots);
         if let Some(s) = slots
             .iter()
             .find(|s| !s.active.load(Ordering::Acquire) && s.remaining() > 0)
@@ -1235,7 +1240,7 @@ impl Scheduler {
             if remaining < 2 * MIN_SPLIT {
                 continue;
             }
-            let (at, done_then) = *s.claim.lock().expect("slot poisoned");
+            let (at, done_then) = *guard::lock(&s.claim);
             let elapsed = now.duration_since(at);
             if elapsed < STEAL_GRACE {
                 continue;
@@ -1386,7 +1391,7 @@ impl Engine {
     }
 
     fn snapshot(&self) -> ResumeState {
-        let slots = self.sched.slots.lock().expect("scheduler poisoned");
+        let slots = guard::lock(&self.sched.slots);
         let mut chunks: Vec<ChunkState> = slots
             .iter()
             .map(|s| {
@@ -1428,7 +1433,7 @@ impl Engine {
 
     /// Drop a failing source if another one is still alive.
     fn drop_source(&self, idx: usize, reason: &str) -> bool {
-        let _guard = self.source_lock.lock().expect("source lock poisoned");
+        let _guard = guard::lock(&self.source_lock);
         let live = self
             .sources
             .iter()
@@ -1621,7 +1626,9 @@ impl Engine {
                 if room == 0 {
                     break;
                 }
-                let n = rest.len().min(WRITE_BUF - buf.len()).min(room as usize);
+                // Saturate: on 32-bit targets `room` may not fit in a usize.
+                let room = usize::try_from(room).unwrap_or(usize::MAX);
+                let n = rest.len().min(WRITE_BUF - buf.len()).min(room);
                 buf.extend_from_slice(&rest[..n]);
                 rest = &rest[n..];
                 pos += n as u64;
@@ -1633,10 +1640,7 @@ impl Engine {
                 }
             }
             if let Some(bucket) = &self.throttle {
-                let wait = bucket
-                    .lock()
-                    .expect("throttle bucket poisoned")
-                    .consume(taken);
+                let wait = guard::lock(bucket).consume(taken);
                 if let Some(d) = wait {
                     self.sleep(d, rx).await;
                 }

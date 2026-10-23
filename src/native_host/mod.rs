@@ -329,7 +329,11 @@ impl NativeHost {
     pub fn handle(&self, msg: &Value) -> Value {
         let id = msg.get("id").cloned().unwrap_or(Value::Null);
         let ty = msg.get("type").and_then(Value::as_str).unwrap_or("");
-        match self.dispatch(ty, msg) {
+        // A panicking request gets an error reply; the session (and any
+        // in-process downloads) keeps running.
+        let result = crate::guard::catch(|| self.dispatch(ty, msg))
+            .unwrap_or_else(|p| Err(RpcError::internal(format!("request panicked: {p}"))));
+        match result {
             Ok(result) => json!({"id": id, "type": ty, "ok": true, "result": result}),
             Err(e) => error_reply(&id, ty, &e),
         }

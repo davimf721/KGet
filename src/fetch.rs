@@ -274,7 +274,7 @@ pub fn fetch_all(items: &[FetchItem], opts: &TransferOptions) -> Result<FetchSta
                             }
                             Err(e) => {
                                 failed.store(true, Ordering::SeqCst);
-                                let mut slot = first_error.lock().expect("error slot poisoned");
+                                let mut slot = crate::guard::lock(&first_error);
                                 if slot.is_none() {
                                     *slot = Some(e);
                                 }
@@ -286,12 +286,25 @@ pub fn fetch_all(items: &[FetchItem], opts: &TransferOptions) -> Result<FetchSta
             })
             .collect();
         for w in workers {
-            let _ = w.join();
+            // A panicking worker fails the fetch; ignoring it used to report
+            // success with files missing.
+            if let Err(p) = w.join() {
+                failed.store(true, Ordering::SeqCst);
+                crate::guard::lock(&first_error).get_or_insert_with(|| {
+                    KgetError::Other(format!(
+                        "Download worker panicked: {}",
+                        crate::guard::panic_message(&*p)
+                    ))
+                });
+            }
         }
         finished.store(true, Ordering::Relaxed);
     });
 
-    if let Some(e) = first_error.into_inner().expect("error slot poisoned") {
+    if let Some(e) = first_error
+        .into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    {
         bar.abandon();
         return Err(e);
     }

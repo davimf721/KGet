@@ -205,7 +205,9 @@ impl FtpDownloader {
         if size.is_some_and(|s| offset > s) {
             offset = 0;
         }
-        if offset > 0 && ftp.resume_transfer(offset as usize).is_err() {
+        // An offset past usize::MAX (32-bit targets) restarts rather than
+        // resuming at a truncated position.
+        if offset > 0 && !usize::try_from(offset).is_ok_and(|o| ftp.resume_transfer(o).is_ok()) {
             print(
                 "Server does not support resume (REST); restarting",
                 self.quiet_mode,

@@ -8,10 +8,28 @@
 //!
 //! Bindings are generated with `scripts/gen-bindings.sh` (library mode, from
 //! the compiled `cdylib`).
+//!
+//! UniFFI stops a panic at the FFI boundary, but the generated bindings turn
+//! one in a non-throwing method into a crash of the host app, so nothing here
+//! may panic on bad input. The event thread catches panics from listeners.
+
+// Embedded in apps: a panic here takes the host app down. Same lint policy
+// as the core library.
+#![cfg_attr(
+    not(test),
+    warn(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::todo,
+        clippy::unimplemented
+    )
+)]
 
 use kget::config::{self, Config};
 use kget::jobs::JobManager;
 use kget::queue::{DownloadHistory, HistoryStore};
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
@@ -209,7 +227,11 @@ impl KgetEngine {
                     // `set_listener` / `clear_listener` itself.
                     let current = lock(&listener).clone();
                     if let Some(l) = current {
-                        l.on_event(event.into());
+                        // A listener that panics (including a foreign callback
+                        // failure UniFFI reports as a panic) loses that event
+                        // only; this thread keeps forwarding.
+                        let event = event.into();
+                        let _ = std::panic::catch_unwind(AssertUnwindSafe(|| l.on_event(event)));
                     }
                 }
             })
@@ -227,6 +249,10 @@ impl Drop for KgetEngine {
     }
 }
 
+/// Lock `m`, recovering from poisoning: the guarded values (the listener
+/// slot) stay valid if a thread panicked while holding them, and one bad
+/// callback must not wedge every later engine call. Same policy as the core
+/// library.
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }

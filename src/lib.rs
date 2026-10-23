@@ -74,6 +74,22 @@
 //! - `torrent-transmission` - Transmission RPC integration
 //! - `keychain` (default) - Save passwords in the OS credential store ([`credentials`])
 
+// Library code runs inside long-lived hosts (the daemon, the MCP server, apps
+// embedding `kget-ffi`) where a panic takes the host down: new `unwrap` /
+// `expect` / `panic!` calls are flagged outside tests. Each remaining one has
+// an `#[allow]` with the reason it cannot fail. See `guard` for the policy on
+// poisoned locks and spawned threads.
+#![cfg_attr(
+    not(test),
+    warn(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::todo,
+        clippy::unimplemented
+    )
+)]
+
 // Core modules
 pub mod advanced_download;
 pub mod app;
@@ -90,6 +106,7 @@ pub mod events;
 pub mod fetch;
 #[doc(hidden)]
 pub mod fuzz_api;
+pub(crate) mod guard;
 pub mod http;
 pub mod jobs;
 pub mod mcp;

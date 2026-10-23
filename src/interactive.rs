@@ -1371,8 +1371,9 @@ fn looks_like_url(s: &str) -> bool {
 
 /// Execute one REPL line. Returns `false` to exit.
 fn execute(s: &mut Session, parts: &[&str]) -> Result<bool, BoxError> {
-    let cmd = parts[0];
-    let rest = &parts[1..];
+    let Some((&cmd, rest)) = parts.split_first() else {
+        return Ok(true);
+    };
 
     // URLs pasted on their own (one or several) start a download.
     if looks_like_url(cmd) {

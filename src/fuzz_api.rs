@@ -4,6 +4,10 @@
 //! invariant is broken, so a fuzzer crash is always a real bug. Not a stable
 //! API.
 
+// Panicking on a broken invariant is this module's job (the fuzzer and the
+// regression test catch it); nothing else in the library calls it.
+#![allow(clippy::expect_used, clippy::panic)]
+
 use crate::advanced_download::ResumeState;
 use crate::download::SingleStreamState;
 

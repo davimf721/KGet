@@ -683,7 +683,7 @@ fn event_progress(reporter: &Reporter) -> Option<ByteProgressCallback> {
     let sink = reporter.events.clone()?;
     let meter = Mutex::new(SpeedMeter::new());
     Some(Arc::new(move |bytes, total| {
-        let ev = meter.lock().expect("meter poisoned").progress(bytes, total);
+        let ev = crate::guard::lock(&meter).progress(bytes, total);
         sink(&ev);
     }))
 }
@@ -768,7 +768,7 @@ fn dispatch(
                 cancel,
                 |ev| match ev {
                     VideoEvent::Progress(p) if jsonl => {
-                        let mut e = meter.lock().expect("meter poisoned").progress(0, None);
+                        let mut e = crate::guard::lock(&meter).progress(0, None);
                         if let JsonEvent::Progress {
                             percent, progress, ..
                         } = &mut e
@@ -909,7 +909,7 @@ fn dispatch(
                 reporter.events.clone().map(|sink| {
                     let sizes = sizes.clone();
                     Arc::new(move |done: Vec<u64>| {
-                        let sizes = sizes.lock().expect("sizes poisoned");
+                        let sizes = crate::guard::lock(&sizes);
                         let files = done
                             .iter()
                             .enumerate()
@@ -935,8 +935,7 @@ fn dispatch(
                 let sizes = sizes.clone();
                 let select = job.torrent.select.clone();
                 Arc::new(move |files: Vec<(String, u64)>| {
-                    *sizes.lock().expect("sizes poisoned") =
-                        files.iter().map(|(_, size)| *size).collect();
+                    *crate::guard::lock(&sizes) = files.iter().map(|(_, size)| *size).collect();
                     sink(&JsonEvent::Files {
                         files: torrent_file_entries(files, &select),
                     });

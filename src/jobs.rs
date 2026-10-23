@@ -649,10 +649,14 @@ impl Inner {
                 Arc::new(move |ev: &JsonEvent| inner.on_event(id, ev))
             }),
         };
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // A panic anywhere in a download fails that job only: the slot is
+        // freed and the queue keeps going (state locks recover from poison).
+        let result = crate::guard::catch(|| {
+            #[cfg(test)]
+            tests::inject_panic(&job);
             runner::run_job(&job, &ctx, &reporter)
-        }))
-        .unwrap_or_else(|_| Err("Download thread panicked".into()));
+        })
+        .unwrap_or_else(|msg| Err(format!("Download thread panicked: {msg}").into()));
         self.finish(id, result);
     }
 
@@ -817,6 +821,61 @@ mod tests {
         let line = r#"{"v":1,"url":"https://x/y","event":"saved","path":"/a","bytes":2}"#;
         let ev: JsonEvent = serde_json::from_str(line).unwrap();
         assert!(matches!(ev, JsonEvent::Saved { bytes: 2, .. }));
+    }
+
+    /// Jobs with this URL panic inside the worker (test builds only).
+    const PANIC_URL: &str = "kget-test://panic";
+
+    pub(super) fn inject_panic(job: &DownloadJob) {
+        if job.url == PANIC_URL {
+            panic!("injected test panic");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn panicking_job_fails_and_the_manager_keeps_working() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/ok.bin"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"still alive".to_vec()))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+
+        // One slot: the healthy job only starts if the panic freed it.
+        let m = JobManager::with_concurrency(Config::default(), 1);
+        m.set_record_history(false);
+        let bad = m.submit(DownloadJob::new(PANIC_URL));
+        let mut good = DownloadJob::new(format!("{}/ok.bin", server.uri()));
+        let out = dir.path().join("ok.bin");
+        good.output = Some(out.to_string_lossy().into_owned());
+        good.retries = 1;
+        let good = m.submit(good);
+
+        let m2 = m.clone();
+        let idle = tokio::task::spawn_blocking(move || m2.wait_idle(Some(Duration::from_secs(20))))
+            .await
+            .unwrap();
+        assert!(idle, "the manager stalled after a panicking job");
+
+        let bad = m.get(bad).unwrap();
+        assert_eq!(bad.state, DownloadState::Failed);
+        let err = bad.error.unwrap();
+        assert!(
+            err.contains("panicked") && err.contains("injected test panic"),
+            "{err}"
+        );
+        assert_eq!(m.get(good).unwrap().state, DownloadState::Completed);
+        assert_eq!(std::fs::read(&out).unwrap(), b"still alive");
+        assert_eq!(m.running(), 0);
+
+        // The manager still accepts and runs work afterwards.
+        let again = m.submit(DownloadJob::new(PANIC_URL));
+        assert!(m.wait_idle(Some(Duration::from_secs(20))));
+        assert_eq!(m.get(again).unwrap().state, DownloadState::Failed);
     }
 
     #[test]

@@ -563,7 +563,7 @@ impl DownloadBuilder {
                         }
                         _ => return,
                     };
-                    let _ = tx.lock().expect("event sender poisoned").send(msg);
+                    let _ = crate::guard::lock(&tx).send(msg);
                 }))
             }
             None if self.quiet => Reporter::quiet(),
@@ -694,10 +694,7 @@ impl DownloadBuilder {
                     speed_bps,
                     eta_secs,
                     ..
-                } = meter
-                    .lock()
-                    .expect("speed meter poisoned")
-                    .progress(bytes, total)
+                } = crate::guard::lock(&meter).progress(bytes, total)
             {
                 let _ = tx.send(DownloadEvent::Progress {
                     percent: percent.unwrap_or(0.0),
@@ -947,10 +944,25 @@ impl BatchBuilder {
     pub fn download_all(self) -> Vec<BatchResult> {
         use rayon::prelude::*;
 
-        let pool = rayon::ThreadPoolBuilder::new()
+        let pool = match rayon::ThreadPoolBuilder::new()
             .num_threads(self.concurrency)
             .build()
-            .expect("failed to build rayon thread pool");
+        {
+            Ok(pool) => pool,
+            // No threads available: every URL fails instead of panicking.
+            Err(e) => {
+                return self
+                    .urls
+                    .iter()
+                    .map(|url| BatchResult {
+                        url: url.clone(),
+                        result: Err(KgetError::Other(format!(
+                            "Cannot start the download threads: {e}"
+                        ))),
+                    })
+                    .collect();
+            }
+        };
 
         let output_dir = Arc::new(self.output_dir.clone());
         let proxy_url = Arc::new(self.proxy_url.clone());
@@ -1022,7 +1034,9 @@ impl BatchBuilder {
             let sl = self.speed_limit;
             let quiet = self.quiet;
 
-            let permit = sem.acquire_owned().await.unwrap();
+            // `acquire_owned` only fails once the semaphore is closed, and
+            // this one never is.
+            let permit = sem.acquire_owned().await.ok();
             let _ = od;
             let url_for_panic = url.clone();
             let h = spawn_blocking(move || {

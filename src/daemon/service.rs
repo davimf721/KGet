@@ -179,21 +179,31 @@ impl Service {
                         Err(RecvTimeoutError::Timeout) => continue,
                         Err(RecvTimeoutError::Disconnected) => break,
                     };
-                    let store = store.lock().unwrap_or_else(|e| e.into_inner());
-                    let result = match &event {
-                        JobEvent::Removed { id } => store.delete(*id),
-                        JobEvent::State { id, .. }
-                        | JobEvent::Download {
-                            id,
-                            event: JsonEvent::Saved { .. },
-                        } => match manager.get(*id) {
-                            Some(info) => store.save(&info),
-                            None => Ok(()),
-                        },
-                        JobEvent::Download { .. } => Ok(()),
-                    };
-                    if let Err(e) = result {
-                        logger.warn(&format!("cannot save job {}: {e}", event.id()));
+                    // A panic while saving one event is logged and skipped;
+                    // persistence carries on with the next one.
+                    let result = crate::guard::catch(|| {
+                        let store = crate::guard::lock(&store);
+                        match &event {
+                            JobEvent::Removed { id } => store.delete(*id),
+                            JobEvent::State { id, .. }
+                            | JobEvent::Download {
+                                id,
+                                event: JsonEvent::Saved { .. },
+                            } => match manager.get(*id) {
+                                Some(info) => store.save(&info),
+                                None => Ok(()),
+                            },
+                            JobEvent::Download { .. } => Ok(()),
+                        }
+                    });
+                    match result {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => {
+                            logger.warn(&format!("cannot save job {}: {e}", event.id()));
+                        }
+                        Err(msg) => {
+                            logger.warn(&format!("saving job {} panicked: {msg}", event.id()));
+                        }
                     }
                 }
             })

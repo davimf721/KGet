@@ -626,6 +626,11 @@ fn parse_algorithm(name: &str) -> Result<ChecksumAlgorithm, RpcError> {
 
 fn config(ctx: &ToolContext) -> Result<ToolResult, RpcError> {
     let mut v = ctx.backend.call("config.get", Value::Null)?;
+    // Inserting keys into a non-object `Value` panics; a daemon reply that is
+    // not an object is passed through under "config".
+    if !v.is_object() {
+        v = json!({ "config": v });
+    }
     v["backend"] = json!(ctx.backend.mode());
     v["allowed_root"] = json!(ctx.policy.root());
     Ok(ToolResult::ok(

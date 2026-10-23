@@ -234,6 +234,8 @@ impl Keychain {
 
     /// A new, empty in-memory store. Nothing touches the real keychain.
     pub fn mock() -> Keychain {
+        // keyring-core's mock `Store::new` always returns `Ok`.
+        #[allow(clippy::expect_used)]
         let store: Arc<keyring_core::CredentialStore> =
             keyring_core::mock::Store::new().expect("the mock store cannot fail");
         Keychain { store }

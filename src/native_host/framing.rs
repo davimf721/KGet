@@ -80,11 +80,12 @@ pub fn read_message<R: Read>(reader: &mut R, max: usize) -> Result<Option<Value>
 /// Encode `msg` as one frame, refusing bodies larger than `max`.
 pub fn encode_message(msg: &Value, max: usize) -> Result<Vec<u8>, FrameError> {
     let body = serde_json::to_vec(msg).map_err(|e| FrameError::InvalidJson(e.to_string()))?;
-    if body.len() > max {
-        return Err(FrameError::TooLarge(body.len()));
-    }
+    let len = u32::try_from(body.len())
+        .ok()
+        .filter(|_| body.len() <= max)
+        .ok_or(FrameError::TooLarge(body.len()))?;
     let mut frame = Vec::with_capacity(body.len() + 4);
-    frame.extend_from_slice(&(body.len() as u32).to_ne_bytes());
+    frame.extend_from_slice(&len.to_ne_bytes());
     frame.extend_from_slice(&body);
     Ok(frame)
 }

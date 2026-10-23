@@ -5,6 +5,18 @@
 //! verification, history, JSONL), [`kget::cli`] (terminal helpers) and
 //! [`kget::app`] / [`kget::jobs`] (GUI worker and job manager).
 
+// Same lint policy as the library: a panic on bad input is a bug here too.
+#![cfg_attr(
+    not(test),
+    warn(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::todo,
+        clippy::unimplemented
+    )
+)]
+
 #[cfg(not(feature = "gui"))]
 use clap::CommandFactory;
 use clap::Parser;

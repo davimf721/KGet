@@ -268,7 +268,10 @@ impl McpServer {
             .spawn(move || {
                 let name = params.get("name").and_then(Value::as_str).unwrap_or("");
                 let args = params.get("arguments").cloned().unwrap_or(json!({}));
-                let result = tools::call(&ctx, name, &args);
+                // A panicking tool still answers (and leaves `in_flight`), so
+                // the client is not left waiting forever.
+                let result = crate::guard::catch(|| tools::call(&ctx, name, &args))
+                    .unwrap_or_else(|msg| Err(RpcError::internal(format!("tool panicked: {msg}"))));
                 in_flight
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
