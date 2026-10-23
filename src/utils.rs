@@ -257,41 +257,71 @@ pub fn auto_extract(
     quiet: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let path_str = path.to_str().ok_or("Invalid UTF-8 in path")?;
-    let dir_str = path
+    let output_dir = path
         .parent()
-        .and_then(|d| d.to_str())
-        .filter(|s| !s.is_empty())
-        .unwrap_or(".");
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let dir_str = output_dir.to_str().ok_or("Invalid UTF-8 in output path")?;
     let name = path
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("")
         .to_lowercase();
 
+    // Never extract directly into an existing download directory.  Archive
+    // tools may follow a symlink created by an earlier archive entry, letting
+    // a later entry overwrite a file outside that directory.  A fresh sibling
+    // directory has no such pre-existing links; inspect its result before
+    // publishing it to the requested destination.
+    let staging = ExtractionDir::new(output_dir)?;
+    let staging_str = staging
+        .path()
+        .to_str()
+        .ok_or("Invalid UTF-8 in staging path")?;
     let (cmd, args): (&str, Vec<String>) = if name.ends_with(".zip") {
         (
             "unzip",
-            vec!["-o".into(), path_str.into(), "-d".into(), dir_str.into()],
+            vec![
+                "-o".into(),
+                path_str.into(),
+                "-d".into(),
+                staging_str.into(),
+            ],
         )
     } else if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
         (
             "tar",
-            vec!["-xzf".into(), path_str.into(), "-C".into(), dir_str.into()],
+            vec![
+                "-xzf".into(),
+                path_str.into(),
+                "-C".into(),
+                staging_str.into(),
+            ],
         )
     } else if name.ends_with(".tar.bz2") || name.ends_with(".tbz2") {
         (
             "tar",
-            vec!["-xjf".into(), path_str.into(), "-C".into(), dir_str.into()],
+            vec![
+                "-xjf".into(),
+                path_str.into(),
+                "-C".into(),
+                staging_str.into(),
+            ],
         )
     } else if name.ends_with(".tar.xz") || name.ends_with(".txz") {
         (
             "tar",
-            vec!["-xJf".into(), path_str.into(), "-C".into(), dir_str.into()],
+            vec![
+                "-xJf".into(),
+                path_str.into(),
+                "-C".into(),
+                staging_str.into(),
+            ],
         )
     } else if name.ends_with(".7z") {
         (
             "7z",
-            vec!["x".into(), path_str.into(), format!("-o{dir_str}")],
+            vec!["x".into(), path_str.into(), format!("-o{staging_str}")],
         )
     } else {
         return Ok(());
@@ -317,8 +347,112 @@ pub fn auto_extract(
         return Err(format!("`{cmd}`: extraction failed (exit {:?})", status.code()).into());
     }
 
+    publish_extraction(staging.path(), output_dir)?;
+
     if !quiet {
         println!("Extracted to: {dir_str}");
     }
     Ok(())
+}
+
+/// A uniquely-created, sibling staging directory for an archive extraction.
+/// It is removed on every return path.
+struct ExtractionDir(std::path::PathBuf);
+
+impl ExtractionDir {
+    fn new(parent: &std::path::Path) -> std::io::Result<Self> {
+        std::fs::create_dir_all(parent)?;
+        let pid = std::process::id();
+        for attempt in 0..128u32 {
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let path = parent.join(format!(".kget-extract-{pid}-{nonce}-{attempt}"));
+            match std::fs::create_dir(&path) {
+                Ok(()) => return Ok(Self(path)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "could not create a unique extraction directory",
+        ))
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for ExtractionDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Refuse links in extracted content, then move only top-level entries into
+/// the destination.  Refusing pre-existing targets makes publication unable to
+/// traverse or overwrite an attacker-controlled link in that destination.
+fn publish_extraction(
+    staging: &std::path::Path,
+    output_dir: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    reject_symlinks(staging)?;
+    let entries: Vec<std::path::PathBuf> = std::fs::read_dir(staging)?
+        .map(|entry| entry.map(|e| e.path()))
+        .collect::<Result<_, _>>()?;
+    for source in &entries {
+        let name = source.file_name().ok_or("Invalid extracted file name")?;
+        if output_dir.join(name).symlink_metadata().is_ok() {
+            return Err(format!(
+                "refusing to overwrite existing extracted path: {}",
+                name.to_string_lossy()
+            )
+            .into());
+        }
+    }
+    for source in entries {
+        let name = source.file_name().ok_or("Invalid extracted file name")?;
+        std::fs::rename(&source, output_dir.join(name))?;
+    }
+    Ok(())
+}
+
+fn reject_symlinks(dir: &std::path::Path) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let ty = std::fs::symlink_metadata(&path)?.file_type();
+        if ty.is_symlink() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("archive contains a symbolic link: {}", path.display()),
+            ));
+        }
+        if ty.is_dir() {
+            reject_symlinks(&path)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod extraction_tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn extracted_symlinks_are_rejected_before_publish() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let staging = root.path().join("staging");
+        let out = root.path().join("out");
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::create_dir_all(&out).unwrap();
+        symlink("/tmp", staging.join("escape")).unwrap();
+        assert!(publish_extraction(&staging, &out).is_err());
+        assert!(!out.join("escape").exists());
+    }
 }

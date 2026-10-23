@@ -10,6 +10,70 @@ e este projeto adere ao [Versionamento Semântico](https://semver.org/spec/v2.0.
 ## [Não lançado]
 
 ### Adicionado
+- **Download de modelos de IA (`hf://`, `ollama://`):** `kget hf://org/repo[@rev][/caminho]` baixa um modelo,
+  dataset (`hf://datasets/…`) ou space (`hf://spaces/…`) do Hugging Face, e URLs `huggingface.co/…/resolve|blob|tree/…`
+  também funcionam. Filtre arquivos com globs em `--include`/`--exclude`, escolha branch, tag ou commit com
+  `--revision` e use `--hf-cache` para gravar no cache padrão do hub, para que o `transformers` reaproveite os
+  arquivos. Arquivos LFS são verificados pelo SHA-256. O token vem de `HF_TOKEN`, `HUGGING_FACE_HUB_TOKEN`, do
+  arquivo de token do `hf auth login` ou do chaveiro (`hf://token@huggingface.co`).
+  `kget ollama://llama3.2:3b` baixa um modelo para o diretório de modelos do Ollama (`OLLAMA_MODELS`), para que o
+  `ollama run` o encontre, e verifica o digest de cada blob. Com `-O <dir>`, salva arquivos comuns. Os dois baixam
+  `-j` arquivos por vez com o motor turbo, e um download interrompido pula os arquivos que já estão completos.
+- **Daemon e fila em segundo plano:** `kget daemon` (`--foreground`, `status`, `stop`) roda um serviço local de
+  downloads com fila persistente (`jobs.db`): jobs não terminados continuam após reiniciar. Gerencie com
+  `kget queue add|list|status|cancel|pause|resume|rm|watch`, ou envie um único download com `kget <url> --via-daemon`.
+  Os clientes falam JSON-RPC 2.0 delimitado por linhas num socket Unix (TCP de loopback com token no Windows).
+  Configure na nova seção `daemon` do `config.json`.
+- **Servidor MCP para agentes de IA (`kget mcp`):** o Claude Code e outros clientes MCP podem baixar, acompanhar o
+  progresso, pausar, retomar, cancelar, pesquisar o histórico, verificar checksums e ler a configuração (9 ferramentas).
+  Registre com `claude mcp add kget -- kget mcp`. As gravações ficam restritas a `--root` (padrão: o diretório de
+  downloads do daemon). Usa o daemon quando há um rodando (`--no-daemon`, `--start-daemon`).
+- **Interface de terminal (`kget tui`):** telas de fila, detalhes e histórico em tela cheia. Adicione URLs,
+  pause/retome, cancele, tente de novo, remova, abra arquivos e pesquise ou filtre o histórico pelo teclado. Usa o
+  daemon quando há um rodando (`--daemon` inicia um, `--local` roda os downloads no próprio processo).
+- **Extensão de navegador (`browser-extension/`):** extensão Manifest V3 para Chrome, Chromium, Edge, Brave e
+  Firefox. Adiciona o menu de contexto "Download with KGet", um popup com progresso ao vivo, interceptação opcional
+  dos downloads do navegador e envio opcional de cookies. `kget native-host install|uninstall [--browser …]
+  [--extension-id …]` registra a ponte de native messaging com o daemon.
+- **Regras inteligentes, tags e duplicados:** regras no `config.json` organizam downloads em pastas (`{category}`,
+  `{domain}`, `{ext}`, `{protocol}`, `{date:%Y-%m}`), adicionam tags e definem conexões, limite de velocidade,
+  extração ou checksum obrigatório. As regras podem casar por domínio, regex, glob, extensão, categoria, tipo MIME,
+  tamanho ou protocolo, e a primeira que casar vence. Há pastas por categoria embutidas e opcionais. Gerencie as
+  regras com `--rules list|test|add|remove|enable|disable` e aplique-as com `--organize`/`--no-organize`.
+  `--rules suggest` sugere regras a partir do histórico; com `--ai`, consulta o Claude e envia só contagens
+  agregadas, depois da sua confirmação.
+  `--tag` grava tags no histórico. `--duplicates skip|ask|download|link` decide o que acontece quando uma URL já foi
+  baixada. `--dedupe` troca conteúdo idêntico por um hard link.
+- **Senhas salvas no chaveiro do sistema:** Chaves do macOS, Gerenciador de Credenciais do Windows ou Secret
+  Service no Linux/BSD (feature `keychain`, ativa por padrão, Rust puro). Senhas de FTP, SFTP (senha e frase da
+  chave), WebDAV e proxy são buscadas quando a URL tem usuário mas não tem senha. O KGet pergunta no terminal e
+  oferece salvar a senha. `--save-credentials` salva sem perguntar. Gerencie as senhas com
+  `--credentials list|status|add|delete` (também o comando `credentials` no REPL). `KGET_KEYCHAIN=off` desativa.
+- **Busca no histórico:** `--history` filtra por `--status`, `--domain`, `--type`, `--protocol`, `--since`/`--until`
+  (`7d`, `12h`, `today`, datas), `--search` e `--tag`. Ordena com `--sort newest|oldest|largest|smallest|name|fastest`,
+  pagina com `--history-limit`/`--history-offset` e imprime JSON com `--json` (JSON Lines com `--jsonl`). O comando
+  `history` do REPL aceita os mesmos filtros. As entradas agora registram protocolo, duração, velocidade média,
+  resultado do checksum e tags.
+- **Seleção de arquivos e seed de torrents:** `--list-files` lista o conteúdo numerado de um magnet link ou arquivo
+  `.torrent`. `--select 1,3-5` e `--select-glob "*.mkv"` baixam só uma parte. `--seed-ratio 1.5` e `--seed-time 2h`
+  continuam semeando depois (padrões: `torrent.seed_ratio` / `torrent.seed_time_secs`). As estatísticas do swarm
+  (peers, seeders, velocidades, ratio, trackers) chegam como eventos `torrent_stats` e aparecem na TUI, na GUI egui
+  e no app macOS. Seleção, listagem de arquivos e tempo de seed exigem o cliente nativo (`torrent-native`); o
+  Transmission suporta a seleção e o ratio de seed.
+- **HTTP/2, HTTP/3 e mirrors em paralelo:** `--http-version auto|1.1|2|3` (ou `optimization.http_version`) para
+  downloads turbo. `auto` negocia HTTP/2 via ALPN. O HTTP/3 é experimental e exige um build com a feature `http3` e
+  `RUSTFLAGS="--cfg reqwest_unstable"`. Downloads Metalink buscam chunks de todos os mirrors ao mesmo tempo e
+  descartam os mirrors que falham.
+- **Eventos JSONL** (ainda `"v":1`): `phase` (`verifying` com `algorithm`, ou `extracting`), `rule`, `duplicate` e
+  `torrent_stats`. Entradas de `files` trazem `selected` quando há uma seleção.
+- **Biblioteca:** `jobs::JobManager` (fila com concorrência limitada, pausar/retomar, `JobEvent`s por assinante),
+  `runner::{DownloadJob, RunContext, Reporter, run_job}`, `queue::{HistoryQuery, HistoryStore, HistorySort}`,
+  `credentials`, `hf`, `ollama`, `fetch`, `rules`, `dedupe`, `daemon::client::DaemonClient`, `http::HttpVersion`,
+  `AdvancedDownloader::{set_mirrors, set_http_version}`, os métodos do builder `.include()`, `.exclude()`,
+  `.revision()`, `.hf_cache()` e `.parallel_files()`, e `config::set_config_dir_override`. `JsonEvent`/`JobEvent`
+  também implementam `Deserialize`.
+- **App macOS:** lê o histórico via `kget --history --json`, mostra o estado "extraindo" e o algoritmo do checksum
+  a partir dos eventos `phase`, e mostra um resumo do swarm do torrent.
 - **Modo interativo (`kget -i`) agora cobre a CLI:** todas as flags de download (`--checksum`, `--checksum-url`,
   `--extract`, `-c`, `--no-clobber`, `-H`, `--retries`, `--timeout`, `--at`, `-j`, protocolos forçados) e
   `-l`/`-p` por download, sem salvar. Novos comandos: `batch`, `info`, `retry`, `open`, `reveal`,
@@ -17,10 +81,77 @@ e este projeto adere ao [Versionamento Semântico](https://semver.org/spec/v2.0.
   `config path|reset`, `version`, `help <tópico>`. Tab para completar, histórico salvo entre sessões,
   várias URLs por linha, e Ctrl+C para o download em andamento (mantendo o `.part`) em vez de ser ignorado.
 
+### Alterado
+- **Novo motor turbo:** as requisições de faixa agora rodam como tarefas tokio com reqwest assíncrono, em vez de um
+  pool rayon de clientes bloqueantes. Uma conexão ociosa divide a faixa que terminaria por último (work stealing,
+  até 512 KiB), e o HTTP/2 multiplexa as faixas em poucas conexões. O formato de retomada `.kget` não mudou.
+- **O histórico fica em SQLite** (`history.db`, WAL, seguro com vários processos) em vez de `history.json`, e guarda
+  as últimas 10.000 entradas. `--history` ganhou a coluna Size.
+- Um caminho de download compartilhado (`kget::runner`) para a CLI, o modo batch, o REPL, a GUI egui, o daemon e o
+  MCP. Credenciais salvas, eventos de fase e detalhes do histórico (duração, velocidade) funcionam igual em todos.
+- `--save-config` guarda a senha do proxy no chaveiro do sistema. Ela continua nunca sendo gravada no `config.json`.
+- No terminal, o KGet pergunta antes de baixar de novo uma URL cujo arquivo anterior ainda existe (escolha com
+  `--duplicates`). Execuções não interativas baixam de novo, como antes.
+- SIGTERM e SIGHUP param os downloads da CLI de forma limpa, como o Ctrl+C: os dados parciais ficam para retomar.
+- `tokio` agora é uma dependência central. A feature `async` só controla os helpers assíncronos do builder.
+- As features padrão agora são `keychain` e `tui`.
+
 ### Corrigido
+- Retomar um download simples depois que o arquivo remoto mudou podia emendar bytes antigos e novos. O KGet agora
+  salva os validadores em `<arquivo>.kget`, envia `If-Range` e reinicia quando o arquivo mudou.
+- Um download simples que retoma um `.part` do modo turbo agora confia só no prefixo completo.
+- Erros de escrita (disco cheio, cota, arquivo grande demais) eram repetidos com um offset dessincronizado. Agora o
+  download falha na hora e mantém o arquivo parcial para `-c`.
+- Um estado `.kget` corrompido ou inconsistente (chunks sobrepostos ou fora de ordem) é rejeitado em vez de usado.
+- Quando um servidor responde à faixa de um chunk com `200` ou `416`, o KGet agora tenta outro mirror ou reinicia o
+  download como fluxo único em vez de falhar.
 - Retomar (`-c`) num servidor que ignora `Range` e reenvia o arquivo inteiro travava builds de debug
   e quebrava o limite de velocidade nos builds de release.
+- `sanitize_filename` podia deixar pontos ou espaços no final depois de truncar (`. . a`).
+- O parser de arquivos de checksum entrava em pânico com linhas como `) (` e aceitava hashes não hexadecimais.
 - Um download com falha ou cancelado salvo com `-O arquivo` fica registrado com esse nome, para poder ser retomado.
+
+### Segurança
+- `ProxyConfig` nunca serializa a senha do proxy e a oculta na saída de `Debug`. Senhas nunca aparecem no
+  `config.json`, no histórico, nos logs ou nos eventos JSONL.
+- Daemon: o socket Unix tem modo `0600` num diretório `0700`. O modo TCP só aceita loopback, com um token de 256 bits
+  num arquivo acessível só ao dono. As requisições têm limite de 1 MiB, e cabeçalhos e URLs são validados. As saídas
+  ficam dentro do diretório de downloads (sem `..`, fugas por symlink ou nomes aninhados), a menos que
+  `daemon.allow_outside_download_dir` esteja ativo. Segredos são ocultados nas respostas e no `daemon.log`.
+- MCP: toda gravação, e todo arquivo lido por `verify_checksum`, fica restrito a `--root`.
+- Host nativo: confere a extensão chamadora em `allowed_origins.json`, repassa só nomes de arquivo e remove
+  `Cookie`/`Authorization`/`Proxy-Authorization`, a menos que os cookies estejam ativados. Aceita só links
+  http(s), ftp(s) e magnet, e `open` recusa executáveis.
+- Tokens do Hugging Face nunca vão para os logs e são descartados em redirecionamentos para outro host.
+
+### Desenvolvimento
+- Workspace Cargo com `crates/kget-ffi`: bindings UniFFI 0.32 (Swift, Kotlin) sobre o `JobManager` (`KgetEngine`,
+  listener de eventos). `scripts/gen-bindings.sh`, `scripts/build-xcframework.sh` e `scripts/swift-smoke-test.sh`
+  geram e testam os bindings. `default-members = ["."]` mantém os comandos `cargo` simples no pacote `Kget`.
+- Novas suítes de teste: `job_manager_tests`, `history_tests`, `robustness_tests`, `fuzz_regressions`, `model_tests`,
+  `model_env_tests`, `smart_rules_tests`, `daemon_tests`, `mcp_tests`, `native_host_tests`, `bench_turbo` (benchmark
+  ignorado por padrão), testes do engine do `kget-ffi` e a suíte `node --test` da extensão.
+- `fuzz/`: crate cargo-fuzz com 12 alvos sobre `kget::fuzz_api`. A CI ganhou um job rápido de fuzz e um job FFI no
+  macOS (bindings e um smoke test em Swift).
+- Variáveis para testes: `KGET_HF_ENDPOINT`, `KGET_OLLAMA_REGISTRY`, `KGET_KEYCHAIN=mock`, `KGET_RUNTIME_DIR`,
+  `KGET_DAEMON_TRANSPORT=tcp`, `KGET_NATIVE_HOST_DIR`, `KGET_ANTHROPIC_BASE_URL`.
+
+### Notas de atualização
+- **Histórico:** a primeira execução importa o `history.json` para o `history.db` e mantém o arquivo antigo como
+  `history.json.bak`. Um banco ilegível é movido para `history.db.corrupt`. Binários `kget` antigos continuam lendo
+  o `history.json` e não veem as entradas novas. O app macOS volta a ler o `history.json` com um binário antigo.
+- **Configuração:** novos campos opcionais, todos com padrão, então arquivos existentes carregam sem mudanças:
+  `rules_enabled` (`false`), `builtin_rules` (`true`), `organize_dir`, `rules`,
+  `daemon.{download_dir, allow_outside_download_dir, max_concurrent}`, `optimization.http_version` e
+  `torrent.{seed_ratio, seed_time_secs}`.
+- **Biblioteca (pode quebrar):** `http::ClientOptions` tem o novo campo público `http_version`, então adicione
+  `..Default::default()` aos literais. Matches exaustivos precisam de novos braços: `Protocol::{HuggingFace, Ollama}`,
+  `JsonEvent::{Phase, Rule, Duplicate, TorrentStats}` e `WorkerToGuiMessage::TorrentStats`. `FileEntry` tem o novo
+  campo `selected`. `app::JobId` agora é um re-export de `jobs::JobId` (continua `u64`).
+- **Features:** `keychain` e `tui` vêm ativas por padrão (`--no-default-features` compila sem elas). `http3` é
+  experimental e exige `RUSTFLAGS="--cfg reqwest_unstable"`. `async` agora só ativa `download_async()` /
+  `download_all_async()`.
+- **Consumidores de JSONL:** o protocolo continua `"v":1`. Ignore tipos de evento e campos que você não conhece.
 
 ## [1.7.1] - 2026-10-18
 

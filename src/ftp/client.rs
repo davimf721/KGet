@@ -159,6 +159,12 @@ impl FtpDownloader {
                 .and_then(|(r, t)| r.resolve(t, "FTP password"))
                 .unwrap_or_else(|| "anonymous".to_string()),
         };
+        // suppaftp writes these values into line-oriented FTP commands.  URL
+        // percent-decoding happens above, so reject control characters after
+        // decoding to prevent a URL from injecting an extra FTP command.
+        validate_command_arg("FTP user", &username)?;
+        validate_command_arg("FTP password", &password)?;
+        validate_command_arg("FTP path", &path)?;
 
         print(
             &format!("Connecting to FTP server {}:{}...", host, port),
@@ -319,5 +325,24 @@ impl FtpDownloader {
                 Ok(FtpStream::connect_with_stream(stream.into_inner())?)
             }
         }
+    }
+}
+
+fn validate_command_arg(field: &str, value: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+    if value.contains(['\r', '\n']) {
+        return Err(format!("{field} must not contain CR or LF").into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_command_arg;
+
+    #[test]
+    fn ftp_command_arguments_reject_newlines() {
+        assert!(validate_command_arg("path", "file%0A").is_ok());
+        assert!(validate_command_arg("path", "file\r\nDELE important").is_err());
+        assert!(validate_command_arg("user", "alice\nNOOP").is_err());
     }
 }

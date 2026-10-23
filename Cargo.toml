@@ -44,7 +44,7 @@ serde_json = "1.0.149"
 dirs = "6.0.0"
 ssh2 = { version = "0.9", features = ["vendored-openssl"] }
 url = "2.4"
-suppaftp = "8.0.2"
+suppaftp = "10.0.2"
 socks = "0.3"
 sha2 = "0.10.9"
 sha1 = "0.10"

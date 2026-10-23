@@ -19,7 +19,14 @@ Kget = { version = "1.7.1", features = ["torrent-native"] }
 
 # Optional: async API
 Kget = { version = "1.7.1", features = ["async"] }
+
+# Library only: skip the terminal UI (the `tui` default feature), keep the keychain
+Kget = { version = "1.7.1", default-features = false, features = ["keychain"] }
 ```
+
+Default features are `keychain` (OS credential store) and `tui` (the `kget tui`
+binary only). `http3` enables experimental HTTP/3 and needs
+`RUSTFLAGS="--cfg reqwest_unstable"`.
 
 Inside this repository, examples can use:
 
@@ -74,7 +81,7 @@ Terminal methods:
 | `.download()` | `Result<DownloadResult, KgetError>` | Download to disk |
 | `.download_to_bytes()` | `Result<Vec<u8>, KgetError>` | Download into memory |
 | `.download_to_reader()` | `Result<impl Read, KgetError>` | Streaming reader |
-| `.spawn()` | `Result<(JoinHandle, Receiver<DownloadEvent>), KgetError>` | Background thread with event channel |
+| `.spawn()` | `(JoinHandle<Result<DownloadResult, KgetError>>, Receiver<DownloadEvent>)` | Background thread with event channel |
 | `.download_async()` | `impl Future<…>` | Async API (feature `async`) |
 
 ### DownloadResult
@@ -83,7 +90,7 @@ Terminal methods:
 pub struct DownloadResult {
     pub path: String,
     pub bytes_downloaded: u64,
-    pub avg_speed_bps: f64,
+    pub avg_speed_bps: u64,
     pub duration: std::time::Duration,
     pub connections_used: usize,
     pub checksums: ComputedChecksums,
@@ -105,7 +112,7 @@ let results = kget::batch([
 
 for r in results {
     match r.result {
-        Ok(d) => println!("✓ {} — {:.1} MB/s avg", r.url, d.avg_speed_bps / 1e6),
+        Ok(d) => println!("✓ {} — {:.1} MB/s avg", r.url, d.avg_speed_bps as f64 / 1e6),
         Err(e) => eprintln!("✗ {}: {}", r.url, e),
     }
 }
@@ -123,21 +130,22 @@ use kget::{DownloadEvent, KgetError};
 
 let (handle, rx) = kget::builder("https://example.com/large.iso")
     .connections(4)
-    .spawn()?;
+    .spawn();
 
 for event in rx {
     match event {
         DownloadEvent::Progress { percent, speed_bps, eta_secs } => {
-            print!("\r{:.1}%  {:.1} MB/s  eta {}s", percent, speed_bps / 1e6, eta_secs.unwrap_or(0));
+            print!("\r{:.1}%  {:.1} MB/s  eta {}s", percent, speed_bps as f64 / 1e6, eta_secs.unwrap_or(0));
         }
         DownloadEvent::Status(msg) => eprintln!("[status] {msg}"),
-        DownloadEvent::Completed { path, bytes, avg_speed_bps, .. } => {
-            println!("\nSaved {bytes} bytes to {path}  ({:.1} MB/s avg)", avg_speed_bps / 1e6);
+        DownloadEvent::Completed { path, sha256 } => {
+            println!("\nSaved to {path} (sha256: {})", sha256.unwrap_or_default());
         }
         DownloadEvent::Error(e) => eprintln!("Error: {e}"),
     }
 }
-handle.join().ok();
+let result = handle.join().expect("download thread panicked")?;
+println!("{:.1} MB/s avg", result.avg_speed_bps as f64 / 1e6);
 # Ok::<(), KgetError>(())
 ```
 
@@ -167,7 +175,7 @@ retried regardless of the `RetryConfig`.
 ```rust,no_run
 use kget::checksum::{compute_checksum, ChecksumAlgorithm};
 
-let hash = compute_checksum(ChecksumAlgorithm::Blake3, std::path::Path::new("file.bin"))?;
+let hash = compute_checksum(std::path::Path::new("file.bin"), &ChecksumAlgorithm::Blake3)?;
 println!("BLAKE3: {hash}");
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
@@ -257,9 +265,43 @@ downloader.download()?;
 # Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 ```
 
-`AdvancedDownloader` splits the file into byte ranges and downloads them in
-parallel via rayon. The global `TokenBucket` throttle (if configured) enforces
-the aggregate speed limit across all threads.
+`AdvancedDownloader` splits the file into byte ranges and downloads them as
+async tasks on a shared tokio runtime (the blocking API above is unchanged).
+Idle connections split the range that would finish last (work stealing), and
+HTTP/2 multiplexes ranges over a few connections. The global `TokenBucket`
+throttle (if configured) enforces the aggregate speed limit across all
+connections.
+
+### HTTP version and mirrors
+
+```rust,no_run
+use kget::http::HttpVersion;
+use kget::{AdvancedDownloader, Optimizer, ProxyConfig};
+
+let mut dl = AdvancedDownloader::new(
+    "https://mirror1.example.com/big.iso".to_string(),
+    "big.iso".to_string(),
+    true,
+    ProxyConfig::default(),
+    Optimizer::new(),
+)?;
+dl.set_resume_policy(kget::ResumePolicy::AlwaysResume);
+let version: HttpVersion = "auto".parse()?;     // "1.1", "2", "3" also accepted
+dl.set_http_version(version.ensure_available()?)?;
+dl.set_mirrors(vec!["https://mirror2.example.com/big.iso".to_string()]);
+dl.set_expected_sha256("expected_lowercase_sha256_hash"); // catches a mirror with other content
+dl.download()?;
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+```
+
+`HttpVersion::Auto` (default) negotiates HTTP/2 through TLS ALPN;
+`Http1Only` never uses HTTP/2; `Http2PriorKnowledge` speaks HTTP/2 without
+negotiation (also cleartext h2c); `Http3` needs the `http3` feature built with
+`--cfg reqwest_unstable` (`HttpVersion::http3_available()`), otherwise
+`ensure_available()` returns an error. Mirrors with the same size and range
+support each download their share of the chunks; a failing mirror is dropped.
+`kget::http::ClientOptions` has a matching `http_version` field (build it with
+`..Default::default()`).
 
 ## Basic Single-Stream Download
 
@@ -467,6 +509,34 @@ if is_metalink("release.meta4") {
 
 ## Download History
 
+The history is a SQLite database (`history.db`, WAL mode, safe with several
+`kget` processes). Search it with `HistoryQuery`:
+
+```rust,no_run
+use kget::queue::{parse_date_bound, DownloadHistory, EntryStatus, HistoryQuery, HistorySort};
+
+let query = HistoryQuery::new()
+    .status(EntryStatus::Failed)
+    .domain("example.com")            // also matches subdomains
+    .file_type("video")               // category, or "iso,zip"
+    .since(parse_date_bound("7d", false)?)
+    .search("ubuntu")
+    .tag("linux")
+    .sort(HistorySort::Largest)
+    .limit(20);
+
+for e in DownloadHistory::query(&query)? {
+    println!("{} {} {} {:?}", e.created_at_display(), e.status, e.filename, e.tags);
+}
+let failed = DownloadHistory::count(&HistoryQuery::new().status(EntryStatus::Failed))?;
+let removed = DownloadHistory::delete(&HistoryQuery::new().status(EntryStatus::Completed))?;
+println!("{failed} failed, removed {removed} completed");
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+```
+
+Record entries yourself (downloads run through `kget::runner` or `JobManager`
+are recorded automatically):
+
 ```rust,no_run
 use kget::queue::{DownloadHistory, EntryStatus, HistoryEntry};
 
@@ -475,31 +545,200 @@ let entry = HistoryEntry::new(
     "/home/user/Downloads",
     Some("expected_sha256_hex"),
 );
-// Atomic and safe with several kget processes writing at once
 DownloadHistory::append(entry, EntryStatus::Completed, None)?;
 
 for e in DownloadHistory::load().recent(10) {
     println!("{} {} {}", e.created_at_display(), e.status, e.filename);
 }
-
-// Read-modify-write under the history lock
-DownloadHistory::update(|entries| entries.retain(|e| e.status == EntryStatus::Failed))?;
 # Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 ```
 
-The history is a SQLite database (WAL mode, safe with several `kget`
-processes). `DownloadHistory::query(&HistoryQuery)` filters by status, domain,
-file type, protocol, date range and text, with sorting and paging;
-`DownloadHistory::count` / `DownloadHistory::delete` take the same query.
-User names and passwords are stripped from stored URLs, the database keeps the
-last 1000 entries, and a corrupt database is moved to `history.db.corrupt`. A
-`history.json` from KGet ≤ 1.7 is imported once and kept as `history.json.bak`.
-Set `KGET_CONFIG_DIR` to store `config.json` and `history.db` elsewhere.
+`HistoryStore::open(path)` gives direct access to a database file (`insert`,
+`query`, `count`, `get`, `delete`). Entries record protocol, duration, average
+speed, checksum result and tags. User names and passwords are stripped from
+stored URLs, the database keeps the last 10,000 entries, and a corrupt database
+is moved to `history.db.corrupt`. A `history.json` from KGet ≤ 1.7 is imported
+once and kept as `history.json.bak`. Set `KGET_CONFIG_DIR` (or call
+`kget::config::set_config_dir_override`) to store `config.json` and
+`history.db` elsewhere.
 
 History is stored at:
 - macOS: `~/Library/Application Support/kget/history.db`
 - Linux: `~/.config/kget/history.db`
 - Windows: `%APPDATA%\kget\history.db`
+
+## Job Manager
+
+`JobManager` is the download queue every frontend uses (GUI worker, daemon,
+MCP server, TUI, UniFFI bindings). It runs at most `max_concurrent` jobs,
+assigns `JobId`s, and broadcasts `JobEvent`s to every subscriber.
+
+```rust,no_run
+use kget::jobs::{JobEvent, JobManager};
+use kget::runner::DownloadJob;
+use kget::JsonEvent;
+use std::time::Duration;
+
+let manager = JobManager::with_concurrency(kget::Config::load()?, 2);
+let events = manager.subscribe();
+
+let mut job = DownloadJob::new("https://example.com/big.iso");
+job.output = Some("./downloads/".into());
+job.advanced = true;
+let id = manager.submit(job);
+
+for event in events {
+    match event {
+        JobEvent::Download { id: j, event: JsonEvent::Progress { percent: Some(p), .. } } if j == id => {
+            print!("\r{p:.1}%");
+        }
+        JobEvent::State { id: j, state, error } if j == id && state.is_finished() => {
+            println!("\n{state} {}", error.unwrap_or_default());
+            break;
+        }
+        _ => {}
+    }
+}
+
+// Other operations
+manager.pause(id).ok();                       // keeps partial data
+manager.resume(id).ok();                      // back to Queued
+let info = manager.wait(id, Some(Duration::from_secs(60)));
+println!("{:?}", info.map(|i| i.state));
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+```
+
+Also: `cancel`, `remove` (finished jobs), `cancel_all`, `list`, `get`,
+`running`, `set_max_concurrent`, `set_record_history`, `wait_idle`.
+`DownloadState` is `Queued → Running → (Verifying) → Completed | Failed`, plus
+`Paused` and `Cancelled`. `JobEvent::Download` carries the same `JsonEvent`s
+`kget --jsonl` prints; `JobInfo` and `JobEvent` are `Serialize`/`Deserialize`.
+
+## Runner (one download, any protocol)
+
+`kget::runner::run_job` is the dispatcher behind the CLI, the REPL and
+`JobManager`: protocol detection, resume, checksum verification, smart rules,
+history and extraction, with output controlled by a `Reporter`.
+
+```rust,no_run
+use kget::runner::{run_job, DownloadJob, Outcome, Reporter, RunContext};
+use std::sync::Arc;
+
+let mut job = DownloadJob::new("hf://org/repo");    // any URL kget accepts
+job.include = vec!["*.safetensors".into()];
+job.checksum = None;
+job.tags = vec!["models".into()];
+
+let ctx = RunContext::new(kget::Config::load()?);   // ctx.cancel stops it
+let reporter = Reporter::events(Arc::new(|ev: &kget::JsonEvent| println!("{}", ev.to_line())));
+match run_job(&job, &ctx, &reporter)? {
+    Outcome::Saved(path) => println!("saved {path:?}"),
+    Outcome::HandedOff => println!("opened in another application"),
+}
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+```
+
+`Reporter::terminal()` prints progress bars, `Reporter::quiet()` prints
+nothing, `Reporter::jsonl_stdout(None)` prints JSON Lines. Build
+`DownloadJob` with `DownloadJob::new` (or `..Default::default()`): new fields
+are added in minor versions. Helpers: `parse_checksum_spec("sha256:…")`,
+`parse_extra_headers`, `parse_url_list`, `run_urls` (batch).
+
+## AI Models (Hugging Face, Ollama)
+
+The builder accepts `hf://` and `ollama://` URLs:
+
+```rust,no_run
+let result = kget::builder("hf://TheBloke/Llama-2-7B-GGUF")
+    .include("*Q4_K_M.gguf")
+    .revision("main")
+    .parallel_files(4)
+    .output("./models/")
+    .download()?;
+println!("saved into {}", result.path);
+# Ok::<(), kget::KgetError>(())
+```
+
+Or call the modules directly:
+
+```rust,no_run
+use kget::fetch::TransferOptions;
+use kget::hf::{self, HfOptions};
+use kget::ollama::{self, OllamaOptions};
+
+let transfer = TransferOptions { parallel_files: 4, ..Default::default() };
+
+let opts = HfOptions { include: vec!["*.json".into()], hf_cache: true, ..Default::default() };
+let (_listing, files) = hf::list("hf://Qwen/Qwen2.5-0.5B-Instruct", &opts, &transfer)?;
+println!("{} file(s) would be downloaded", files.len());
+let model = hf::download("hf://Qwen/Qwen2.5-0.5B-Instruct", &opts, &transfer)?;
+println!("{} files, {} skipped, {} bytes in {}", model.files, model.skipped, model.bytes, model.path.display());
+
+let pulled = ollama::download("ollama://llama3.2:3b", &OllamaOptions::default(), &transfer)?;
+println!("Ollama model in {}", pulled.path.display());
+# Ok::<(), kget::KgetError>(())
+```
+
+`HfRef::parse` / `OllamaRef::parse` parse references without network access.
+Hugging Face tokens come from `HfAuth::Auto` (`HF_TOKEN`,
+`HUGGING_FACE_HUB_TOKEN`, the `hf auth login` file, then the keychain entry
+`hf://token@huggingface.co`), `HfAuth::Token(..)` or `HfAuth::Anonymous`.
+LFS files and Ollama blobs are verified against their SHA-256. Ollama models
+go to `OLLAMA_MODELS` (or `~/.ollama/models`) unless `OllamaOptions::output`
+is set. `KGET_HF_ENDPOINT` and `KGET_OLLAMA_REGISTRY` point them at a mirror.
+
+## Saved Credentials (Keychain)
+
+```rust,no_run
+use kget::credentials::{self, Target};
+
+let target = Target::from_url("sftp://alice@example.com/data.bin").unwrap();
+credentials::store(&target, "s3cret")?;
+assert_eq!(credentials::get(&target)?.as_deref(), Some("s3cret"));
+for t in credentials::list()? {
+    println!("saved: {t}");
+}
+credentials::delete(&target)?;
+# Ok::<(), kget::credentials::CredentialError>(())
+```
+
+Entries use the service `kget` and targets like `sftp://user@host[:port]`,
+`ssh-key:///path/to/key` (`Target::ssh_key`) or `hf://token@huggingface.co`.
+The FTP, SFTP, WebDAV downloaders and `run_job` look passwords up
+automatically through a `CredentialResolver`. Without the `keychain` feature,
+or with `KGET_KEYCHAIN=off`, the functions return
+`CredentialError::Unavailable`; `KGET_KEYCHAIN=mock` (or `Keychain::mock()`)
+uses an in-memory store for tests.
+
+## Daemon Client
+
+Talk to a running `kget daemon` (or start one) from your own program:
+
+```rust,no_run
+use kget::daemon::client::DaemonClient;
+use kget::daemon::protocol::{SubmitParams, SubscribeParams};
+
+let client = DaemonClient::ensure_running()?;    // connect_default() never starts it
+let mut params = SubmitParams::new("https://example.com/file.iso");
+params.advanced = true;
+let job = client.submit(&params)?;               // JSON job snapshot
+let id = job["id"].as_u64().unwrap_or_default();
+
+let events = client.events(&SubscribeParams { ids: vec![id], ..Default::default() })?;
+for event in events {
+    println!("{event}");                          // JSON JobEvent
+    if event["type"] == "state" && matches!(event["state"].as_str(), Some("completed" | "failed")) {
+        break;
+    }
+}
+println!("{} job(s) in the queue", client.list()?.len());
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+```
+
+`client.call(method, params)` reaches every JSON-RPC method (`get`, `wait`,
+`cancel`, `pause`, `resume`, `remove`, `history.query`, `config.get`, …); see
+`kget::daemon::protocol`. The daemon confines outputs to its download
+directory, so `SubmitParams::dir`/`filename` must stay inside it.
 
 ## Async API
 
@@ -560,6 +799,10 @@ unknown ones). `JsonEvent::Phase` announces post-transfer work —
 `{"event":"phase","phase":"extracting"}` — and
 `JsonEvent::phase_from_status` maps the engine's hashing status message
 (`kget::events::verifying_status`) to it, for your own status callbacks.
+Since 1.8 the protocol also has `rule` (a smart rule matched), `duplicate`
+(already downloaded, or identical content) and `torrent_stats` (peers,
+speeds, ratio, seeding state, trackers); a `match` on `JsonEvent` needs a
+catch-all arm.
 
 ## Library Guarantees
 
