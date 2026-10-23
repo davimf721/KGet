@@ -10,7 +10,9 @@ use kget::daemon::client::DaemonClient;
 use kget::daemon::protocol::{SubmitParams, SubscribeParams, codes};
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
