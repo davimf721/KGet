@@ -1109,13 +1109,186 @@ fn absolute(p: &str) -> PathBuf {
 // Batch
 // ============================================================================
 
+/// Maximum number of URLs a wildcard pattern can expand to (prevents runaway allocations).
+pub const MAX_URL_EXPANSION_LIMIT: usize = 10_000;
+
+fn expand_range(range_str: &str, step: usize) -> Option<Vec<String>> {
+    let (start_str, end_str) = range_str.split_once('-')?;
+    let start_str = start_str.trim();
+    let end_str = end_str.trim();
+
+    // Check numeric range e.g. 1-10, 01-10, 10-1
+    if let (Ok(start), Ok(end)) = (start_str.parse::<i64>(), end_str.parse::<i64>()) {
+        let pad_width = if start_str.starts_with('0') && start_str.len() > 1 {
+            start_str.len()
+        } else {
+            0
+        };
+        let mut items = Vec::new();
+        let step = (step as i64).max(1);
+        if start <= end {
+            let mut curr = start;
+            while curr <= end {
+                items.push(if pad_width > 0 {
+                    format!("{curr:0pad_width$}")
+                } else {
+                    curr.to_string()
+                });
+                if items.len() >= MAX_URL_EXPANSION_LIMIT {
+                    break;
+                }
+                curr = curr.saturating_add(step);
+            }
+        } else {
+            let mut curr = start;
+            while curr >= end {
+                items.push(if pad_width > 0 {
+                    format!("{curr:0pad_width$}")
+                } else {
+                    curr.to_string()
+                });
+                if items.len() >= MAX_URL_EXPANSION_LIMIT {
+                    break;
+                }
+                curr = curr.saturating_sub(step);
+            }
+        }
+        return Some(items);
+    }
+
+    // Check alphabetic single-char range e.g. 'a'-'z' or 'A'-'Z'
+    if start_str.chars().count() == 1 && end_str.chars().count() == 1 {
+        let c1 = start_str.chars().next()?;
+        let c2 = end_str.chars().next()?;
+        if c1.is_ascii_alphabetic()
+            && c2.is_ascii_alphabetic()
+            && (c1.is_ascii_lowercase() == c2.is_ascii_lowercase())
+        {
+            let mut items = Vec::new();
+            let step = (step as u8).max(1);
+            if c1 <= c2 {
+                let mut curr = c1 as u8;
+                let end = c2 as u8;
+                while curr <= end {
+                    items.push((curr as char).to_string());
+                    if items.len() >= MAX_URL_EXPANSION_LIMIT {
+                        break;
+                    }
+                    curr = curr.saturating_add(step);
+                }
+            } else {
+                let mut curr = c1 as u8;
+                let end = c2 as u8;
+                while curr >= end {
+                    items.push((curr as char).to_string());
+                    if items.len() >= MAX_URL_EXPANSION_LIMIT {
+                        break;
+                    }
+                    curr = curr.saturating_sub(step);
+                }
+            }
+            return Some(items);
+        }
+    }
+
+    None
+}
+
+fn expand_single_pattern(content: &str) -> Option<Vec<String>> {
+    let content = content.trim();
+    if content.is_empty() {
+        return None;
+    }
+
+    // Check for comma-separated alternatives e.g. "us,eu,asia"
+    if content.contains(',') {
+        let items: Vec<String> = content
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !items.is_empty() {
+            return Some(items);
+        }
+    }
+
+    // Check for range with optional step e.g. "1-10" or "01-20:2"
+    if let Some((range_part, step_str)) = content.split_once(':') {
+        let step = step_str.trim().parse::<usize>().ok()?.max(1);
+        expand_range(range_part.trim(), step)
+    } else {
+        expand_range(content, 1)
+    }
+}
+
+/// Expand wildcard range patterns in a URL (e.g. `[01-10]`, `[a-z]`, `[us,eu]`, `{1-5}`).
+///
+/// Multiple wildcard blocks in a single URL are expanded via Cartesian product up to `MAX_URL_EXPANSION_LIMIT`.
+pub fn expand_url_patterns(input: &str) -> Vec<String> {
+    let mut current_urls = vec![input.to_string()];
+
+    while let Some(candidate) = current_urls.first() {
+        let mut pattern_span = None;
+        let bytes = candidate.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            let open_char = bytes[i];
+            if open_char == b'[' || open_char == b'{' {
+                let close_char = if open_char == b'[' { b']' } else { b'}' };
+                if let Some(close_offset) = bytes[i + 1..].iter().position(|&b| b == close_char) {
+                    let close_idx = i + 1 + close_offset;
+                    let inner = &candidate[i + 1..close_idx];
+                    if let Some(expanded) = expand_single_pattern(inner) {
+                        pattern_span = Some((i, close_idx, expanded));
+                        break;
+                    }
+                }
+            }
+            i += 1;
+        }
+
+        let (open_idx, close_idx, _) = match pattern_span {
+            Some(span) => span,
+            None => break,
+        };
+
+        let mut next_urls = Vec::new();
+        for url in current_urls {
+            let prefix = &url[..open_idx];
+            let inner = &url[open_idx + 1..close_idx];
+            let suffix = &url[close_idx + 1..];
+
+            if let Some(items) = expand_single_pattern(inner) {
+                for item in items {
+                    if next_urls.len() >= MAX_URL_EXPANSION_LIMIT {
+                        break;
+                    }
+                    let mut s = String::with_capacity(prefix.len() + item.len() + suffix.len());
+                    s.push_str(prefix);
+                    s.push_str(&item);
+                    s.push_str(suffix);
+                    next_urls.push(s);
+                }
+            } else {
+                next_urls.push(url);
+            }
+            if next_urls.len() >= MAX_URL_EXPANSION_LIMIT {
+                break;
+            }
+        }
+        current_urls = next_urls;
+    }
+
+    current_urls
+}
+
 /// URLs listed in a batch file: one per line, blank lines and `#` comments
-/// ignored.
+/// ignored. Wildcard patterns like `[01-10]` or `[a-z]` are expanded.
 pub fn parse_url_list(text: &str) -> Vec<String> {
     text.lines()
         .map(str::trim)
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .map(str::to_string)
+        .flat_map(expand_url_patterns)
         .collect()
 }
 
@@ -1377,6 +1550,77 @@ mod tests {
         let jobs = batch_jobs(&urls, dir, &DownloadJob::default());
         assert_ne!(jobs[0].output, jobs[1].output);
         assert_eq!(jobs[2].output.as_deref(), Some("out"));
+    }
+
+    #[test]
+    fn wildcard_url_expansion() {
+        // Plain URL unchanged
+        assert_eq!(
+            expand_url_patterns("https://example.com/file.zip"),
+            vec!["https://example.com/file.zip"]
+        );
+
+        // Numeric range with padding
+        assert_eq!(
+            expand_url_patterns("https://example.com/file[01-03].zip"),
+            vec![
+                "https://example.com/file01.zip",
+                "https://example.com/file02.zip",
+                "https://example.com/file03.zip"
+            ]
+        );
+
+        // Numeric range with step
+        assert_eq!(
+            expand_url_patterns("https://example.com/item_[1-5:2].tar"),
+            vec![
+                "https://example.com/item_1.tar",
+                "https://example.com/item_3.tar",
+                "https://example.com/item_5.tar"
+            ]
+        );
+
+        // Alphabetic range
+        assert_eq!(
+            expand_url_patterns("https://example.com/chunk_[a-c].bin"),
+            vec![
+                "https://example.com/chunk_a.bin",
+                "https://example.com/chunk_b.bin",
+                "https://example.com/chunk_c.bin"
+            ]
+        );
+
+        // Set / alternatives
+        assert_eq!(
+            expand_url_patterns("https://example.com/[us,eu]/file.iso"),
+            vec![
+                "https://example.com/us/file.iso",
+                "https://example.com/eu/file.iso"
+            ]
+        );
+
+        // Cartesian product of multiple brackets
+        assert_eq!(
+            expand_url_patterns("https://example.com/[a-b][1-2].dat"),
+            vec![
+                "https://example.com/a1.dat",
+                "https://example.com/a2.dat",
+                "https://example.com/b1.dat",
+                "https://example.com/b2.dat"
+            ]
+        );
+
+        // Batch parsing integrates expansion
+        let batch_urls =
+            parse_url_list("https://example.com/part[01-02].rar\nhttps://other.com/a.zip");
+        assert_eq!(
+            batch_urls,
+            vec![
+                "https://example.com/part01.rar",
+                "https://example.com/part02.rar",
+                "https://other.com/a.zip"
+            ]
+        );
     }
 
     #[test]

@@ -1052,6 +1052,23 @@ fn run_cli(args: &Args, config: Config) -> Result<i32, BoxError> {
         return run_batch(batch_file, args, &job, &ctx);
     }
 
+    let expanded_urls = runner::expand_url_patterns(&job.url);
+    if expanded_urls.len() > 1 {
+        let output_dir = PathBuf::from(utils::expand_tilde(args.output.as_deref().unwrap_or(".")));
+        let (_, failed) = runner::run_urls(
+            expanded_urls,
+            &output_dir,
+            args.jobs,
+            &job,
+            &ctx,
+            args.jsonl,
+        )?;
+        if ctx.cancel.load(Ordering::SeqCst) {
+            return Ok(130);
+        }
+        return Ok(if failed > 0 { 1 } else { 0 });
+    }
+
     runner::run_job(&job, &ctx, &args.reporter())?;
     Ok(0)
 }
