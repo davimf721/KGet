@@ -255,9 +255,17 @@ pub fn download_to_path(
         if cancelled() {
             return Err(Box::new(KgetError::Cancelled));
         }
+        let part_path = part_path_for(&pre_path);
+        let overlap = if downloaded >= 512 && options.resume && part_path.exists() {
+            (downloaded.min(RESUME_OVERLAP_BYTES as u64)) as usize
+        } else {
+            0
+        };
+
         let mut req = http::apply_headers(client.get(target), &options.extra_headers);
         if downloaded > 0 {
-            req = req.header(reqwest::header::RANGE, format!("bytes={downloaded}-"));
+            let req_start = downloaded.saturating_sub(overlap as u64);
+            req = req.header(reqwest::header::RANGE, format!("bytes={req_start}-"));
             // If the file changed on the server it answers 200 instead of 206.
             if let Some(v) = validators.as_ref().and_then(SingleStreamState::if_range) {
                 req = req.header(reqwest::header::IF_RANGE, v);
@@ -461,6 +469,45 @@ pub fn download_to_path(
         }
         bar.set_position(downloaded);
 
+        let mut source = response;
+        if status.as_u16() == 206 && overlap > 0 {
+            let range_hdr = source
+                .headers()
+                .get(reqwest::header::CONTENT_RANGE)
+                .and_then(|v| v.to_str().ok());
+            let server_start = range_hdr.and_then(parse_content_range_start);
+            let expected_start = downloaded.saturating_sub(overlap as u64);
+
+            if server_start == Some(expected_start) {
+                let mut remote_overlap = vec![0u8; overlap];
+                if let Err(e) = source.read_exact(&mut remote_overlap) {
+                    print(
+                        &format!("Failed to read resume verification bytes: {e}"),
+                        quiet_mode,
+                    );
+                    downloaded = 0;
+                    session_start_bytes = 0;
+                    validators = None;
+                    continue;
+                }
+                let local_tail = read_file_tail(&part_path, overlap).unwrap_or_default();
+                if local_tail != remote_overlap {
+                    print(
+                        "Resume verification mismatch: remote content changed at resume boundary; restarting",
+                        quiet_mode,
+                    );
+                    let _ = std::fs::OpenOptions::new()
+                        .write(true)
+                        .truncate(true)
+                        .open(&part_path);
+                    downloaded = 0;
+                    session_start_bytes = 0;
+                    validators = None;
+                    continue;
+                }
+            }
+        }
+
         let file = std::fs::OpenOptions::new()
             .create(true)
             .write(true)
@@ -469,7 +516,6 @@ pub fn download_to_path(
             .open(&part_path)
             .map_err(|e| format!("Failed to create file {}: {}", part_path.display(), e))?;
         let mut dest = BufWriter::with_capacity(READ_BUF, file);
-        let mut source = response;
         let mut buffer = vec![0u8; READ_BUF];
 
         let copy_result: Result<(), CopyError> = (|| {
@@ -819,6 +865,28 @@ fn ensure_parent_dir(path: &Path, quiet_mode: bool) -> Result<(), Box<dyn Error 
 fn parse_content_range_total(value: &str) -> Option<u64> {
     let (_, total) = value.rsplit_once('/')?;
     total.trim().parse::<u64>().ok()
+}
+
+/// Parse the starting byte offset from a `Content-Range` header value (e.g. `bytes 1024-2047/4096`).
+pub fn parse_content_range_start(value: &str) -> Option<u64> {
+    let range = value.strip_prefix("bytes ")?.split('/').next()?;
+    let (start_str, _) = range.split_once('-')?;
+    start_str.trim().parse::<u64>().ok()
+}
+
+/// Maximum number of bytes to verify at the resume seam.
+pub const RESUME_OVERLAP_BYTES: usize = 4096;
+
+/// Read up to `len` bytes from the tail of a file.
+pub fn read_file_tail(path: &Path, len: usize) -> std::io::Result<Vec<u8>> {
+    use std::io::Seek;
+    let mut file = File::open(path)?;
+    let file_len = file.metadata()?.len();
+    let to_read = (len as u64).min(file_len);
+    file.seek(std::io::SeekFrom::Start(file_len - to_read))?;
+    let mut buf = vec![0u8; to_read as usize];
+    file.read_exact(&mut buf)?;
+    Ok(buf)
 }
 
 /// Parse the `filename` or `filename*` from a `Content-Disposition` header value.

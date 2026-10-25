@@ -802,4 +802,34 @@ mod release_171_tests {
         assert!(is_supported_torrent_source("magnet:?xt=urn:btih:abcdef"));
         assert!(!is_supported_torrent_source("https://x/a.zip"));
     }
+
+    #[test]
+    fn resume_overlap_helpers() {
+        use kget::download::{parse_content_range_start, read_file_tail};
+        use std::io::Write;
+
+        // Content-range start parsing
+        assert_eq!(
+            parse_content_range_start("bytes 1024-2047/4096"),
+            Some(1024)
+        );
+        assert_eq!(parse_content_range_start("bytes 0-500/1000"), Some(0));
+        assert_eq!(parse_content_range_start("invalid"), None);
+
+        // Read file tail
+        let temp_dir = tempfile::tempdir().unwrap();
+        let file_path = temp_dir.path().join("tail_test.bin");
+        let data = b"HELLO_WORLD_RESUME_VERIFICATION_BYTES";
+        std::fs::File::create(&file_path)
+            .unwrap()
+            .write_all(data)
+            .unwrap();
+
+        let tail = read_file_tail(&file_path, 10).unwrap();
+        assert_eq!(tail, b"TION_BYTES");
+
+        // Requesting more bytes than file length returns entire file
+        let full_tail = read_file_tail(&file_path, 1000).unwrap();
+        assert_eq!(full_tail, data);
+    }
 }
