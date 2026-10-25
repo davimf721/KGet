@@ -300,15 +300,43 @@ pub fn normalize_proxy_url(url: &str, kind: ProxyType) -> String {
     }
 }
 
+/// Synthesize an origin `Referer` URL (`scheme://host/`) from a target URL if valid.
+///
+/// Anti-leech mirrors and protected CDN portals (e.g. download portals and file mirrors)
+/// reject downloads without a valid origin Referer header.
+pub fn synthesize_origin_referer(target_url: &str) -> Option<String> {
+    let parsed = url::Url::parse(target_url).ok()?;
+    let host = parsed.host_str()?;
+    let scheme = parsed.scheme();
+    if scheme != "http" && scheme != "https" {
+        return None;
+    }
+    match parsed.port() {
+        Some(port) => Some(format!("{scheme}://{host}:{port}/")),
+        None => Some(format!("{scheme}://{host}/")),
+    }
+}
+
 /// Apply user-supplied headers, skipping names/values that are not valid HTTP.
 pub fn apply_headers(mut req: RequestBuilder, headers: &[(String, String)]) -> RequestBuilder {
+    let mut has_referer = false;
     for (name, value) in headers {
+        if name.eq_ignore_ascii_case("referer") {
+            has_referer = true;
+        }
         if let (Ok(n), Ok(v)) = (
             reqwest::header::HeaderName::from_bytes(name.as_bytes()),
             reqwest::header::HeaderValue::from_str(value),
         ) {
             req = req.header(n, v);
         }
+    }
+    if !has_referer
+        && let Some(built) = req.try_clone().and_then(|r| r.build().ok())
+        && let Some(origin) = synthesize_origin_referer(built.url().as_str())
+        && let Ok(val) = reqwest::header::HeaderValue::from_str(&origin)
+    {
+        req = req.header(reqwest::header::REFERER, val);
     }
     req
 }
@@ -318,13 +346,24 @@ pub fn apply_headers_async(
     mut req: reqwest::RequestBuilder,
     headers: &[(String, String)],
 ) -> reqwest::RequestBuilder {
+    let mut has_referer = false;
     for (name, value) in headers {
+        if name.eq_ignore_ascii_case("referer") {
+            has_referer = true;
+        }
         if let (Ok(n), Ok(v)) = (
             reqwest::header::HeaderName::from_bytes(name.as_bytes()),
             reqwest::header::HeaderValue::from_str(value),
         ) {
             req = req.header(n, v);
         }
+    }
+    if !has_referer
+        && let Some(built) = req.try_clone().and_then(|r| r.build().ok())
+        && let Some(origin) = synthesize_origin_referer(built.url().as_str())
+        && let Ok(val) = reqwest::header::HeaderValue::from_str(&origin)
+    {
+        req = req.header(reqwest::header::REFERER, val);
     }
     req
 }
@@ -460,5 +499,49 @@ mod tests {
         assert_eq!(backoff_delay(1), Duration::from_millis(500));
         assert_eq!(backoff_delay(2), Duration::from_secs(1));
         assert!(backoff_delay(20) <= Duration::from_secs(30));
+    }
+
+    #[test]
+    fn origin_referer_synthesis() {
+        assert_eq!(
+            synthesize_origin_referer("https://cdn.example.com/downloads/package-installer.exe"),
+            Some("https://cdn.example.com/".to_string())
+        );
+        assert_eq!(
+            synthesize_origin_referer("http://example.com:8080/files/archive.zip?token=123"),
+            Some("http://example.com:8080/".to_string())
+        );
+        assert_eq!(
+            synthesize_origin_referer("ftp://files.example.com/file.bin"),
+            None
+        );
+    }
+
+    #[test]
+    fn applies_anti_leech_origin_referer_when_omitted() {
+        let client = reqwest::blocking::Client::new();
+        let req = client.get("https://download.example.com/package.tar.gz");
+        let with_headers = apply_headers(req, &[]);
+        let built = with_headers.build().unwrap();
+        assert_eq!(
+            built.headers().get(reqwest::header::REFERER).unwrap(),
+            "https://download.example.com/"
+        );
+    }
+
+    #[test]
+    fn preserves_explicit_user_referer() {
+        let client = reqwest::blocking::Client::new();
+        let req = client.get("https://download.example.com/package.tar.gz");
+        let headers = vec![(
+            "Referer".to_string(),
+            "https://custom-origin.org/landing".to_string(),
+        )];
+        let with_headers = apply_headers(req, &headers);
+        let built = with_headers.build().unwrap();
+        assert_eq!(
+            built.headers().get(reqwest::header::REFERER).unwrap(),
+            "https://custom-origin.org/landing"
+        );
     }
 }
