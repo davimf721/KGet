@@ -245,6 +245,10 @@ struct Args {
     #[arg(long = "extract")]
     extract: bool,
 
+    /// Remux/transmux downloaded media or local file to target format (e.g. mp4, mkv) without re-encoding
+    #[arg(long = "remux", value_name = "FORMAT")]
+    remux: Option<String>,
+
     /// Schedule the download to start at a specific local time (HH:MM, 24-hour)
     #[arg(long = "at")]
     at: Option<String>,
@@ -965,6 +969,31 @@ fn real_main() -> Result<i32, BoxError> {
         args.overrides().apply(&mut config);
         let opts = args.torrent_options()?;
         cli::print_torrent_files(&args.url, &config, &opts.select, args.jsonl)?;
+        return Ok(0);
+    }
+
+    if let Some(ref target_fmt) = args.remux {
+        if args.url.is_empty() {
+            return Err("--remux requires an input file path".into());
+        }
+        let input_path = std::path::Path::new(&args.url);
+        let output_path = if let Some(ref out) = args.output {
+            std::path::PathBuf::from(out)
+        } else {
+            input_path.with_extension(target_fmt.trim_start_matches('.'))
+        };
+        let opts = kget::remuxer::RemuxOptions {
+            target_format: target_fmt.trim_start_matches('.').to_string(),
+            faststart: true,
+            overwrite: !args.no_clobber,
+        };
+        println!(
+            "Remuxing {} -> {}...",
+            input_path.display(),
+            output_path.display()
+        );
+        kget::remuxer::remux_lossless(&[input_path], &output_path, &opts)?;
+        println!("Remux completed: {}", output_path.display());
         return Ok(0);
     }
 
