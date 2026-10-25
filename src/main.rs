@@ -245,6 +245,10 @@ struct Args {
     #[arg(long = "extract")]
     extract: bool,
 
+    /// Preview files inside a remote or local ZIP archive without downloading it
+    #[arg(long = "preview-zip")]
+    preview_zip: bool,
+
     /// Schedule the download to start at a specific local time (HH:MM, 24-hour)
     #[arg(long = "at")]
     at: Option<String>,
@@ -965,6 +969,18 @@ fn real_main() -> Result<i32, BoxError> {
         args.overrides().apply(&mut config);
         let opts = args.torrent_options()?;
         cli::print_torrent_files(&args.url, &config, &opts.select, args.jsonl)?;
+        return Ok(0);
+    }
+
+    if args.preview_zip {
+        if args.url.is_empty() {
+            return Err("--preview-zip requires a URL or file path".into());
+        }
+        args.overrides().apply(&mut config);
+        let client = kget::http::build_client(&config.proxy, &kget::http::ClientOptions::default())?;
+        let headers = runner::parse_extra_headers(&args.header);
+        let entries = kget::zip_preview::inspect_zip_target(&args.url, &client, &headers)?;
+        kget::zip_preview::print_zip_preview(&entries);
         return Ok(0);
     }
 

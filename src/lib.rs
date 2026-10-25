@@ -120,6 +120,7 @@ pub mod queue;
 pub mod rules;
 pub mod runner;
 pub mod utils;
+pub mod zip_preview;
 
 // Protocol modules
 pub mod ftp;
@@ -148,6 +149,7 @@ pub use utils::{
     auto_extract, expand_tilde, get_filename_from_url_or_default, is_extractable, print,
     resolve_output_path, sanitize_filename,
 };
+pub use zip_preview::{ZipEntryInfo, inspect_zip_target};
 
 // Re-exports: Protocol helpers
 pub use webdav::is_webdav_url;
