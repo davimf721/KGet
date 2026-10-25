@@ -119,6 +119,7 @@ pub mod protocol;
 pub mod queue;
 pub mod rules;
 pub mod runner;
+pub mod stream_manifest;
 pub mod utils;
 
 // Protocol modules
@@ -150,6 +151,7 @@ pub use utils::{
 };
 
 // Re-exports: Protocol helpers
+pub use stream_manifest::{download_hls_stream, is_hls_url, parse_m3u8};
 pub use webdav::is_webdav_url;
 pub use ytdlp::{is_video_url, ytdlp_available, ytdlp_binary};
 
