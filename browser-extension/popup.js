@@ -12,12 +12,50 @@ port.onMessage.addListener((msg) => {
     renderStatus(msg.status);
     jobs = msg.jobs || [];
     renderJobs();
+    port.postMessage({ type: "get_detected_media" });
+  } else if (msg.type === "result" && msg.request === "get_detected_media" && msg.ok) {
+    renderDetectedMedia((msg.result && msg.result.media) || []);
   } else if (msg.type === "result" && !msg.ok) {
     showError(msg.error);
   } else if (msg.type === "result" && msg.request === "add") {
     $("add-url").value = "";
   }
 });
+
+function renderDetectedMedia(mediaList) {
+  const panel = $("media-panel");
+  const list = $("media-list");
+  if (!panel || !list) return;
+
+  if (!mediaList || mediaList.length === 0) {
+    panel.hidden = true;
+    list.textContent = "";
+    return;
+  }
+
+  panel.hidden = false;
+  list.textContent = "";
+  for (const item of mediaList) {
+    const li = document.createElement("li");
+    li.className = "media-item";
+
+    const title = document.createElement("div");
+    title.className = "name";
+    title.textContent = item.title || "Video Stream";
+    title.title = item.url;
+    li.appendChild(title);
+
+    const btn = document.createElement("button");
+    btn.textContent = "Download";
+    btn.className = "small";
+    btn.addEventListener("click", () => {
+      port.postMessage({ type: "add", url: item.url });
+    });
+    li.appendChild(btn);
+
+    list.appendChild(li);
+  }
+}
 
 function showError(text) {
   const el = $("error");

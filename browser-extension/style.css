@@ -188,3 +188,43 @@ fieldset .field {
   gap: 4px;
   margin: 10px 0;
 }
+
+section.media-panel {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+}
+
+section.media-panel h2 {
+  font-size: 13px;
+  margin: 0 0 6px 0;
+  color: var(--accent);
+}
+
+ul#media-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+li.media-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+li.media-item:last-child {
+  border-bottom: none;
+}
+
+li.media-item .name {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

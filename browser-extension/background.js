@@ -256,6 +256,32 @@ if (api.permissions && api.permissions.onAdded) {
 }
 
 // ---------------------------------------------------------------------------
+// Video sniffer & media tracking
+// ---------------------------------------------------------------------------
+
+const detectedMedia = new Map();
+
+api.runtime.onMessage.addListener((msg, sender) => {
+  if (msg.type === "media_detected" && sender.tab && sender.tab.id) {
+    const tabId = sender.tab.id;
+    let list = detectedMedia.get(tabId);
+    if (!list) {
+      list = [];
+      detectedMedia.set(tabId, list);
+    }
+    if (!list.some((m) => m.url === msg.media.url)) {
+      list.push(msg.media);
+    }
+  }
+});
+
+if (api.tabs && api.tabs.onRemoved) {
+  api.tabs.onRemoved.addListener((tabId) => {
+    detectedMedia.delete(tabId);
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Popup / options bridge
 // ---------------------------------------------------------------------------
 
@@ -274,6 +300,11 @@ api.runtime.onConnect.addListener((p) => {
       let result;
       if (msg.type === "add") {
         result = await sendToKGet(String(msg.url || "").trim(), {});
+      } else if (msg.type === "get_detected_media") {
+        const tabs = await api.tabs.query({ active: true, currentWindow: true });
+        const activeTabId = tabs && tabs[0] ? tabs[0].id : null;
+        const media = activeTabId ? (detectedMedia.get(activeTabId) || []) : [];
+        result = { media: media };
       } else if (msg.type === "retry") {
         disconnect();
         connect();

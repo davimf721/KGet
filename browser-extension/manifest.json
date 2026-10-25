@@ -18,6 +18,14 @@
     "service_worker": "background.js",
     "scripts": ["lib.js", "background.js"]
   },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
   "action": {
     "default_title": "KGet",
     "default_popup": "popup.html",
