@@ -112,6 +112,23 @@ brew install kget --with-torrent            # with native BitTorrent client
 brew install kget --with-gui --with-torrent # all optional features
 ```
 
+### Trust the formula or tap
+
+Choose one of the two options below:
+
+* **Option A (Recommended):** Trust only this specific formula for better security:
+```bash
+brew trust --formula davimf721/kget/kget
+
+```
+* **Option B:** Trust the entire tap (allows all present and future packages from this tap):
+```bash
+brew trust davimf721/kget
+
+```
+**Verification:** Homebrew will successfully record the trust entry without throwing an error message.
+
+
 ### Pre-built binaries
 
 Download the latest release from [Releases](https://github.com/davimf721/KGet/releases):
